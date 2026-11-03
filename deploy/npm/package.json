@@ -1,10 +1,10 @@
 {
-  "name": "musebot",
+  "name": "musebot-server",
   "version": "1.0.0",
-  "description": "Muse Bot 服务器的一键安装：sudo npx -y musebot install 你的域名（Ubuntu / Debian）。伙伴、无界面浏览器、语音、HTTPS 证书、开机自启。",
+  "description": "Muse Bot 服务器的一键安装：sudo npx -y musebot-server install 你的域名（Ubuntu / Debian）。伙伴、无界面浏览器、语音、HTTPS 证书、开机自启。",
   "license": "MIT",
   "bin": {
-    "musebot": "bin/musebot.js"
+    "musebot-server": "bin/musebot.js"
   },
   "files": [
     "bin/",

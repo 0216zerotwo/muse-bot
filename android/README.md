@@ -40,7 +40,7 @@ bash android/build.sh
    它会安装 `android/dist` 里最新的 APK，并用 `adb reverse` 把手机的 `127.0.0.1:8766` 转到电脑上的服务器。macOS / Linux 上等价于 `adb install -r android/dist/muse-bot-*.apk && adb reverse tcp:8766 tcp:8766`。
 4. 打开手机上的「Muse Bot」，地址填 `http://127.0.0.1:8766`，点「连接」（经数据线转发的连接算作电脑本机，不用配对）。拔掉数据线后重新运行一次脚本。
 
-**服务器在 VPS 上**：把 APK 发到手机上安装，然后在服务器上运行 `sudo npx musebot pair`（或 `python3 tools/companion-pair.py https://你的域名`），把它给出的「一键连接」链接粘贴到 App 的地址栏；也可以填地址后输入配对码。配对一次就固定下来，换服务器用 **设置 → 高级 → 更换服务器地址**。
+**服务器在 VPS 上**：把 APK 发到手机上安装，然后在服务器上运行 `sudo npx musebot-server pair`（或 `python3 tools/companion-pair.py https://你的域名`），把它给出的「一键连接」链接粘贴到 App 的地址栏；也可以填地址后输入配对码。配对一次就固定下来，换服务器用 **设置 → 高级 → 更换服务器地址**。
 
 ## 这一版的限制
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # 把服务器安装包放进这个 npm 包（bundle/musebot.tar.gz），之后 npm publish 就能
-# 在服务器上 npx musebot install。在这台电脑上用 Git Bash 运行：
+# 在服务器上 npx musebot-server install。在这台电脑上用 Git Bash 运行：
 #
 #   bash deploy/npm/build-bundle.sh
 #
 # 用的就是 deploy/vps/pack.sh（不带数据）：npm 上的包谁都能下载，所以绝不放记忆、对话和密钥；
-# 搬数据用 pack.sh --with-data 打私有的包，再 npx musebot install --bundle 那个包。
+# 搬数据用 pack.sh --with-data 打私有的包，再 npx musebot-server install --bundle 那个包。
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

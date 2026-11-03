@@ -19,10 +19,10 @@
 
 ```bash
 sudo apt-get install -y nodejs npm
-sudo npx -y musebot install 你的域名
+sudo npx -y musebot-server install 你的域名
 ```
 
-效果和下面的三步一样（装的就是同一个安装包），只是不用在电脑上打包、上传。要带数据搬家还是用下面的 `pack.sh --with-data`，再 `npx musebot install --bundle 那个包`。
+效果和下面的三步一样（装的就是同一个安装包），只是不用在电脑上打包、上传。要带数据搬家还是用下面的 `pack.sh --with-data`，再 `npx musebot-server install --bundle 那个包`。
 
 ## 三步装好
 

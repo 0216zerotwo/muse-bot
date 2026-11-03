@@ -30,7 +30,7 @@ Muse Bot 服务器 = Hermes Agent（开源智能体引擎）+ companion 插件�
 | `web/` | 网页版（React + Vite），服务器直接提供；安卓 App 显示的也是它 |
 | `ios/` | iPhone 原生 App（SwiftUI），GitHub Actions 云端编译 |
 | `android/` | 安卓 App（WebView + 原生能力），不需要 Gradle |
-| `deploy/` | 部署到 VPS：一条命令 `npx musebot install`（`deploy/npm`），或 Docker 安装包（`deploy/vps`） |
+| `deploy/` | 部署到 VPS：一条命令 `npx musebot-server install`（`deploy/npm`），或 Docker 安装包（`deploy/vps`） |
 | `tools/` | 安装、运行、配对等脚本 |
 
 ## 快速开始：在自己电脑上跑起来
@@ -80,10 +80,10 @@ Ubuntu 22.04+ / Debian 12+，2 核 4G，放行 80 / 443 端口：
 
 ```bash
 sudo apt-get install -y nodejs npm
-sudo npx -y musebot install 你的域名     # 没有域名就不写，会用 <IP>.sslip.io
+sudo npx -y musebot-server install 你的域名     # 没有域名就不写，会用 <IP>.sslip.io
 ```
 
-它会装好 Docker、构建镜像（伙伴 + 无界面浏览器 + 语音组件）、用 Caddy 自动申请 HTTPS 证书，并设为开机自启，最后打印配对码。常用：`sudo npx musebot status | logs -f | restart | pair | uninstall`。详见 [deploy/npm/README.md](deploy/npm/README.md) 和 [deploy/vps/README.md](deploy/vps/README.md)（也可以不用 npm，打包上传后运行 `install.sh`）。
+它会装好 Docker、构建镜像（伙伴 + 无界面浏览器 + 语音组件）、用 Caddy 自动申请 HTTPS 证书，并设为开机自启，最后打印配对码。常用：`sudo npx musebot-server status | logs -f | restart | pair | uninstall`。详见 [deploy/npm/README.md](deploy/npm/README.md) 和 [deploy/vps/README.md](deploy/vps/README.md)（也可以不用 npm，打包上传后运行 `install.sh`）。
 
 ## 隐私和安全
 

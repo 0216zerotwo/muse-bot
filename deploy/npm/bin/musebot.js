@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * 伙伴服务器的一键安装和日常管理（npx musebot …）。
+ * 伙伴服务器的一键安装和日常管理（npx musebot-server …）。
  *
  * 安装包（Hermes + 伙伴插件 + 网页 + install.sh）就在这个 npm 包的 bundle/ 里，装的时候不用再上传
  * 任何东西：install.sh 装 Docker（没有的话）、构建镜像（浏览器、Python、语音组件都在镜像里）、
@@ -49,14 +49,14 @@ function needServer() {
     fail("这个命令要在服务器（Ubuntu / Debian）上运行。在电脑上请先 ssh 登录服务器。");
   }
   if (typeof process.getuid === "function" && process.getuid() !== 0) {
-    fail("需要 root 权限：sudo npx musebot " + process.argv.slice(2).join(" "));
+    fail("需要 root 权限：sudo npx musebot-server " + process.argv.slice(2).join(" "));
   }
 }
 
 function needInstalled() {
   needServer();
   if (!fs.existsSync(path.join(APP, ".installed"))) {
-    fail("这台服务器上还没装伙伴：sudo npx musebot install 你的域名");
+    fail("这台服务器上还没装伙伴：sudo npx musebot-server install 你的域名");
   }
 }
 
@@ -139,7 +139,7 @@ function status() {
   var address = domain();
   var up = quiet("curl", ["-fsS", "-o", "/dev/null", "--max-time", "5", "http://127.0.0.1:" + PORT + "/webui/bootstrap"]).ok;
   var boot = quiet("systemctl", ["is-enabled", "docker"]).out === "enabled";
-  console.log("伙伴      " + (up ? "运行中" : "没在运行（看日志：sudo npx musebot logs）"));
+  console.log("伙伴      " + (up ? "运行中" : "没在运行（看日志：sudo npx musebot-server logs）"));
   console.log("地址      " + (address ? "https://" + address : "（未知）"));
   console.log("开机自启  " + (boot ? "是（Docker 开机启动，容器 restart: unless-stopped）" : "否：sudo systemctl enable docker"));
   run("docker", ["compose", "ps"], { cwd: APP });
@@ -175,12 +175,12 @@ function help() {
     "Muse Bot 服务器（musebot）" + VERSION,
     "",
     "在服务器上（Ubuntu 22.04+ / Debian 12+，用 root）：",
-    "  sudo npx -y musebot install 你的域名   安装或升级（不写域名就用 <IP>.sslip.io）",
-    "  sudo npx musebot status                 是否在运行、地址、开机自启",
-    "  sudo npx musebot logs [-f]              看日志",
-    "  sudo npx musebot restart                重启（stop / start 停下和启动）",
-    "  sudo npx musebot pair                   生成手机配对码",
-    "  sudo npx musebot uninstall [--purge]    卸载（--purge 连数据一起删）",
+    "  sudo npx -y musebot-server install 你的域名   安装或升级（不写域名就用 <IP>.sslip.io）",
+    "  sudo npx musebot-server status                 是否在运行、地址、开机自启",
+    "  sudo npx musebot-server logs [-f]              看日志",
+    "  sudo npx musebot-server restart                重启（stop / start 停下和启动）",
+    "  sudo npx musebot-server pair                   生成手机配对码",
+    "  sudo npx musebot-server uninstall [--purge]    卸载（--purge 连数据一起删）",
     "",
     "选项：",
     "  --yes                 不再确认，直接装",
@@ -205,7 +205,7 @@ switch (command) {
     compose(["restart"], "已重启");
     break;
   case "stop":
-    compose(["stop"], "已停下（再开：sudo npx musebot start）");
+    compose(["stop"], "已停下（再开：sudo npx musebot-server start）");
     break;
   case "start":
     compose(["up", "-d"], "已启动");

@@ -1,4 +1,4 @@
-# musebot
+# musebot-server
 
 一条命令把伙伴服务器装到自己的 Ubuntu / Debian 服务器上：伙伴本身、无界面浏览器（Chromium + Playwright）、语音（ffmpeg）、推送、HTTPS 证书（Caddy 自动申请），装好就常驻，服务器重启后会自动起来。
 
@@ -8,7 +8,7 @@
 
 ```bash
 sudo apt-get install -y nodejs npm        # 已经有 Node 就跳过
-sudo npx -y musebot install 你的域名
+sudo npx -y musebot-server install 你的域名
 ```
 
 脚本先列出要改动的东西，确认后才动手；第一次要几分钟（下载 Docker 镜像和浏览器）。最后打印**配对码**和**一键连接**链接，手机上填进去就连上了。
@@ -17,18 +17,18 @@ sudo npx -y musebot install 你的域名
 
 - 伙伴和 Caddy 是两个 Docker 容器，`restart: unless-stopped`：进程崩了会自动重启。
 - Docker 本身是 systemd 服务，安装时 `systemctl enable docker`：服务器重启后 Docker 起来，再把两个容器拉起来。
-- 想确认：`sudo npx musebot status`，「开机自启」一行是「是」就对了。
+- 想确认：`sudo npx musebot-server status`，「开机自启」一行是「是」就对了。
 
 ## 日常
 
 | 要做的事 | 命令 |
 |---|---|
-| 看状态 | `sudo npx musebot status` |
-| 看日志 | `sudo npx musebot logs -f` |
-| 重启 / 停下 / 启动 | `sudo npx musebot restart`（`stop` / `start`） |
-| 再配对一台手机 | `sudo npx musebot pair` |
-| 升级 | `sudo npx -y musebot@latest install`（数据保留） |
-| 卸载 | `sudo npx musebot uninstall`，加 `--purge` 连数据一起删 |
+| 看状态 | `sudo npx musebot-server status` |
+| 看日志 | `sudo npx musebot-server logs -f` |
+| 重启 / 停下 / 启动 | `sudo npx musebot-server restart`（`stop` / `start`） |
+| 再配对一台手机 | `sudo npx musebot-server pair` |
+| 升级 | `sudo npx -y musebot-server@latest install`（数据保留） |
+| 卸载 | `sudo npx musebot-server uninstall`，加 `--purge` 连数据一起删 |
 
 ## 把电脑上的数据搬过去
 
@@ -37,7 +37,7 @@ npm 上的包是公开的，里面**只有程序，没有任何数据和密钥**
 ```bash
 bash deploy/vps/pack.sh --with-data                       # 电脑上（Git Bash）
 scp deploy/dist/musebot-server-*.tar.gz root@服务器:/root/
-sudo npx -y musebot install 你的域名 --bundle /root/musebot-server-日期.tar.gz
+sudo npx -y musebot-server install 你的域名 --bundle /root/musebot-server-日期.tar.gz
 ```
 
 装完删掉电脑和服务器上的这个压缩包（里面有密钥）。
