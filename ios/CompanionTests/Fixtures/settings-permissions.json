@@ -1,0 +1,26 @@
+{
+  "kinds": [
+    {
+      "key": "browse",
+      "label": "Neutral example",
+      "detail": "在浏览器里打开网页、看内容、点普通的链接和按钮",
+      "level": "allow",
+      "levels": [
+        "deny",
+        "ask",
+        "allow"
+      ]
+    },
+    {
+      "key": "browser_submit",
+      "label": "Neutral example",
+      "detail": "提交表单、确认、注册、发布、预订这类会生效的操作",
+      "level": "ask",
+      "levels": [
+        "deny",
+        "ask",
+        "allow"
+      ]
+    }
+  ]
+}

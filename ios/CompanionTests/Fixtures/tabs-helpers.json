@@ -1,0 +1,113 @@
+{
+  "helpers": [
+    {
+      "id": "example-1",
+      "name": "示例名称",
+      "emoji": "🔎",
+      "title": "示例名称",
+      "instructions": "保持内容简洁，展示示例。",
+      "chat_id": "example-2",
+      "notes": [],
+      "avatar": "",
+      "habits": [],
+      "created_at": 1792940502050,
+      "last": null,
+      "model": "",
+      "preset": "研究员",
+      "setup": false,
+      "is_default": true,
+      "working": false,
+      "work": []
+    },
+    {
+      "id": "example-3",
+      "name": "示例名称",
+      "emoji": "🧭",
+      "title": "示例名称",
+      "instructions": "保持内容简洁，展示示例。",
+      "chat_id": "example-4",
+      "notes": [],
+      "avatar": "",
+      "habits": [
+        {
+          "id": "example-5",
+          "text": "中性示例内容",
+          "by": "learned",
+          "at": 1793025819833
+        }
+      ],
+      "created_at": 1792941434790,
+      "last": null,
+      "model": "",
+      "preset": "行程",
+      "setup": false,
+      "is_default": true,
+      "working": false,
+      "work": []
+    },
+    {
+      "id": "example-6",
+      "name": "示例名称",
+      "emoji": "🌐",
+      "title": "示例名称",
+      "instructions": "保持内容简洁，展示示例。",
+      "chat_id": "example-7",
+      "notes": [],
+      "avatar": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6lOwAAAAASUVORK5CYII=",
+      "habits": [],
+      "created_at": 1792941435015,
+      "last": {
+        "text": "中性示例内容",
+        "at": 1793192621350,
+        "who": ""
+      },
+      "model": "",
+      "preset": "翻译",
+      "setup": false,
+      "is_default": true,
+      "working": false,
+      "work": [
+        {
+          "turn_id": "example-8",
+          "at": 1793192617189,
+          "from": "中性示例内容",
+          "task": "中性示例内容",
+          "answer": "中性示例内容",
+          "done": true
+        }
+      ]
+    }
+  ],
+  "templates": [
+    {
+      "name": "示例名称",
+      "emoji": "🔎",
+      "title": "示例名称",
+      "starters": [
+        "中性示例内容",
+        "中性示例内容",
+        "中性示例内容"
+      ],
+      "instructions": "保持内容简洁，展示示例。"
+    }
+  ],
+  "max": 12,
+  "groups": [
+    {
+      "id": "example-9",
+      "name": "示例名称",
+      "members": [
+        "example-1",
+        "example-10",
+        "example-11",
+        "example-3",
+        "example-12",
+        "example-6"
+      ],
+      "chat_id": "example-13",
+      "created_at": 1793024010347,
+      "last": null
+    }
+  ],
+  "max_group": 6
+}

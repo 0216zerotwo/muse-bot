@@ -1,0 +1,304 @@
+/* Companion mode: a warm, texting look whose colors follow the companion's own look.
+   These defaults are the orange cat's palette (warm porcelain); theme.ts computes the same
+   tokens from any other avatar's color at runtime. Components only reference the classes below. */
+
+.companion {
+  --c-bg: #f8f3ef;
+  --c-surface: #fffefd;
+  --c-surface-pressed: #f2ebe5;
+  /* Glass (as Apple's): floating controls are clear and strongly blurred, panels a little denser;
+     every pane has a bright rim along its top edge and a faint sheen. */
+  --c-glass: rgb(255 253 251 / 0.6);
+  --c-glass-soft: rgb(255 254 253 / 0.68);
+  --c-rim: rgb(255 255 255 / 0.85);
+  --c-rim-soft: rgb(255 255 255 / 0.5);
+  --c-sheen: linear-gradient(180deg, rgb(255 255 255 / 0.55), rgb(255 255 255 / 0.12) 42%, rgb(255 255 255 / 0) 70%);
+  /* A soft warm light across the canvas, for the glass to refract. */
+  --c-wash: radial-gradient(120% 60% at 15% 0%, rgb(230 127 59 / 0.1), transparent 60%),
+    radial-gradient(90% 50% at 100% 100%, rgb(230 127 59 / 0.07), transparent 65%);
+  --c-text: #1e1814;
+  --c-text-muted: #6e6058;
+  --c-border: rgb(30 24 20 / 0.085);
+  --c-hairline: rgb(30 24 20 / 0.06);
+  --c-bubble-agent: #fffefd;
+  --c-bubble-user: #322822;
+  --c-bubble-user-text: #fbf5f2;
+  --c-primary: #bd5a02;
+  --c-primary-text: #ffffff;
+  /* The companion's own color, for small touches (online dot ring, highlights). */
+  --c-accent: #e67f3b;
+  --c-accent-soft: #fee1d1;
+  /* Secondary buttons, icon chips, inset tracks. */
+  --c-fill: #efe7e0;
+  --c-tab-selected: #eee6df;
+  /* Segmented controls: an inset track with the chosen option raised. */
+  --c-segment: #f0e8e1;
+  --c-segment-on: #fffefd;
+  --c-danger: #b42318;
+  --c-danger-fill: #c0392b;
+  --c-online: #4f8a5b;
+  --c-shadow: 0 1px 1px rgb(30 24 20 / 0.04), 0 3px 8px rgb(30 24 20 / 0.05), 0 14px 32px rgb(30 24 20 / 0.07);
+  --c-scrim: rgb(30 24 20 / 0.36);
+  --c-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* nanoMuse's token names for the screens ported from it, following the companion's colors:
+     its blue accent is the companion's primary, its black "ink" (selected tab, send) too. */
+  --om-bg: var(--c-bg);
+  --om-surface: var(--c-surface);
+  --om-surface-2: var(--c-fill);
+  --om-border: var(--c-border);
+  --om-fg: var(--c-text);
+  --om-muted: var(--c-text-muted);
+  --om-accent: var(--c-primary);
+  --om-accent-fg: var(--c-primary-text);
+  --om-accent-soft: var(--c-accent-soft);
+  --om-ink: var(--c-primary);
+  --om-ink-fg: var(--c-primary-text);
+  --om-danger: var(--c-danger-fill);
+
+  background: var(--c-wash), var(--c-bg);
+  background-attachment: fixed;
+  color: var(--c-text);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Hiragino Sans GB",
+    "Microsoft YaHei UI", system-ui, sans-serif;
+  font-feature-settings: "palt" 1;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.dark .companion {
+  --c-bg: #120d0a;
+  --c-surface: #1e1815;
+  --c-surface-pressed: #2b2420;
+  --c-glass: rgb(31 25 22 / 0.58);
+  --c-glass-soft: rgb(35 29 25 / 0.66);
+  --c-rim: rgb(255 255 255 / 0.16);
+  --c-rim-soft: rgb(255 255 255 / 0.08);
+  --c-sheen: linear-gradient(180deg, rgb(255 255 255 / 0.09), rgb(255 255 255 / 0.02) 45%, rgb(255 255 255 / 0) 70%);
+  --c-wash: radial-gradient(120% 60% at 15% 0%, rgb(251 146 80 / 0.1), transparent 60%),
+    radial-gradient(90% 50% at 100% 100%, rgb(251 146 80 / 0.06), transparent 65%);
+  --c-text: #f3edea;
+  --c-text-muted: #b5a8a1;
+  --c-border: rgb(243 237 234 / 0.1);
+  --c-hairline: rgb(243 237 234 / 0.07);
+  --c-bubble-agent: #231d19;
+  --c-bubble-user: #703f1f;
+  --c-bubble-user-text: #faf4f1;
+  --c-primary: #ed8642;
+  --c-primary-text: #1b1511;
+  --c-accent: #fb9250;
+  --c-accent-soft: #422615;
+  --c-fill: #2e2622;
+  --c-tab-selected: #2f2723;
+  --c-segment: #0d0806;
+  --c-segment-on: #2f2723;
+  --c-danger: #ff8a7a;
+  --c-danger-fill: #d93636;
+  --c-online: #7fbf8a;
+  --c-shadow: 0 1px 1px rgb(0 0 0 / 0.3), 0 4px 10px rgb(0 0 0 / 0.28), 0 16px 36px rgb(0 0 0 / 0.32);
+  --c-scrim: rgb(0 0 0 / 0.55);
+}
+
+.companion .c-muted { color: var(--c-text-muted); }
+.companion .c-danger { color: var(--c-danger); }
+
+/* Floating controls (header buttons, name pill, composer, tab bar): frosted glass with a
+   hairline edge, so the conversation shows faintly through as it scrolls under them. */
+.companion .c-float {
+  background: var(--c-sheen), var(--c-glass);
+  box-shadow: inset 0 1px 0 var(--c-rim), inset 0 0 0 0.5px var(--c-rim-soft), inset 0 0 0 0.5px var(--c-border), var(--c-shadow);
+  -webkit-backdrop-filter: saturate(1.9) blur(24px);
+  backdrop-filter: saturate(1.9) blur(24px);
+}
+/* Panels (cards, sheets, the companion's bubbles): the same glass, a little denser. */
+.companion .c-glass-panel {
+  background: var(--c-sheen), var(--c-glass-soft);
+  box-shadow: inset 0 1px 0 var(--c-rim), inset 0 0 0 0.5px var(--c-border), var(--c-shadow);
+  -webkit-backdrop-filter: saturate(1.8) blur(30px);
+  backdrop-filter: saturate(1.8) blur(30px);
+}
+.companion .c-pressable {
+  transition: background-color 120ms var(--c-ease), opacity 120ms var(--c-ease);
+}
+.companion .c-pressable:active { background: var(--c-surface-pressed); }
+.companion .c-pressable:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+}
+
+/* Flat, as on nanoMuse: its replies are paper with a hairline edge; the user's are ink. */
+.companion .c-bubble-agent {
+  background: var(--c-sheen), var(--c-glass-soft);
+  color: var(--c-text);
+  box-shadow: inset 0 1px 0 var(--c-rim-soft), inset 0 0 0 0.5px var(--c-border);
+  -webkit-backdrop-filter: saturate(1.6) blur(16px);
+  backdrop-filter: saturate(1.6) blur(16px);
+}
+/* The user's ink and the primary color keep their color, with a glossy top light. */
+.companion .c-bubble-user {
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.14), rgb(255 255 255 / 0) 55%), var(--c-bubble-user);
+  color: var(--c-bubble-user-text);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.18);
+}
+.companion .c-card {
+  background: var(--c-sheen), var(--c-glass-soft);
+  border: 0.5px solid var(--c-border);
+  box-shadow: inset 0 1px 0 var(--c-rim-soft);
+  -webkit-backdrop-filter: saturate(1.7) blur(22px);
+  backdrop-filter: saturate(1.7) blur(22px);
+}
+.companion .c-primary {
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.22), rgb(255 255 255 / 0) 60%), var(--c-primary);
+  color: var(--c-primary-text);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.3), 0 2px 8px color-mix(in srgb, var(--c-primary) 28%, transparent);
+}
+.companion .c-tab[aria-current="page"] { background: var(--c-tab-selected); }
+.companion .c-online { background: var(--c-online); }
+.companion .c-divider { border-color: var(--c-border); }
+.companion .c-accent { color: var(--c-accent); }
+
+/* Content scrolls under the floating header and dock. A blurred, fading
+   backdrop (on a pseudo-element, so the controls themselves stay crisp)
+   keeps text from colliding with the name pill and composer. */
+.companion .c-fade-top,
+.companion .c-fade-bottom {
+  isolation: isolate;
+}
+.companion .c-fade-top::before,
+.companion .c-fade-bottom::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+.companion .c-fade-top::before {
+  background: linear-gradient(to bottom, var(--c-bg) 62%, color-mix(in srgb, var(--c-bg) 70%, transparent) 84%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 84%, transparent);
+  mask-image: linear-gradient(to bottom, #000 84%, transparent);
+}
+.companion .c-fade-bottom::before {
+  background: linear-gradient(to top, var(--c-bg) 55%, color-mix(in srgb, var(--c-bg) 70%, transparent) 80%, transparent);
+  -webkit-mask-image: linear-gradient(to top, #000 80%, transparent);
+  mask-image: linear-gradient(to top, #000 80%, transparent);
+}
+
+/* Markdown inside bubbles: tighter rhythm than the workbench. */
+.companion .c-bubble-text { font-size: 16px; line-height: 1.45; overflow-wrap: anywhere; }
+.companion .c-bubble-text p { margin: 0; }
+.companion .c-bubble-text p + p,
+.companion .c-bubble-text ul,
+.companion .c-bubble-text ol { margin-top: 0.5em; }
+.companion .c-bubble-text pre { margin-top: 0.5em; max-width: 100%; overflow-x: auto; }
+/* Typing dots and the mascot's "busy" motion. */
+@keyframes c-dot {
+  0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-2px); }
+}
+.companion .c-dot { animation: c-dot 1.2s infinite ease-in-out; }
+.companion .c-dot:nth-child(2) { animation-delay: 0.15s; }
+.companion .c-dot:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes c-bob {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-2px) scale(1.03); }
+}
+@keyframes c-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  95% { transform: scaleY(0.1); }
+}
+.companion .c-mascot-busy { animation: c-bob 1.6s var(--c-ease) infinite; }
+.companion .c-mascot-eye { transform-box: fill-box; transform-origin: center; animation: c-blink 4.5s infinite; }
+
+@keyframes c-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.companion .c-rise { animation: c-rise 220ms var(--c-ease) both; }
+
+@keyframes c-sheet-in {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.companion .c-sheet { animation: c-sheet-in 260ms var(--c-ease) both; }
+
+/* Settings: the screen slides in from the right; each deeper page pushes in. */
+@keyframes c-screen-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+.companion .c-screen { animation: c-screen-in 280ms var(--c-ease) both; }
+@keyframes c-push {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.companion .c-push { animation: c-push 220ms var(--c-ease) both; }
+
+/* Pictures and drawings without frames move to match what the pet is doing. */
+@keyframes c-pet-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.03, 0.98); }
+}
+@keyframes c-pet-jitter {
+  0%, 100% { transform: translateY(0); }
+  25% { transform: translateY(-1.5px) rotate(-1deg); }
+  75% { transform: translateY(-1px) rotate(1deg); }
+}
+@keyframes c-pet-sway {
+  0%, 100% { transform: rotate(-4deg); }
+  50% { transform: rotate(4deg); }
+}
+@keyframes c-pet-wiggle {
+  0%, 100% { transform: rotate(0); }
+  25% { transform: rotate(-9deg); }
+  75% { transform: rotate(9deg); }
+}
+@keyframes c-pet-hop {
+  0%, 100% { transform: translateY(0) scale(1); }
+  15% { transform: translateY(0) scale(1.06, 0.92); }
+  45% { transform: translateY(-14%) scale(0.96, 1.05); }
+  75% { transform: translateY(0) scale(1.04, 0.95); }
+}
+@keyframes c-pet-droop {
+  0%, 100% { transform: translateY(4%) scale(1, 0.94); }
+  50% { transform: translateY(5%) scale(1.02, 0.92) rotate(-3deg); }
+}
+@keyframes c-pet-zz {
+  0% { opacity: 0; transform: translate(0, 4px); }
+  40% { opacity: 1; }
+  100% { opacity: 0; transform: translate(4px, -8px); }
+}
+.companion .c-pet-breathe { transform-origin: 50% 100%; animation: c-pet-breathe 3.2s ease-in-out infinite; }
+.companion .c-pet-bob { animation: c-bob 0.9s var(--c-ease) infinite; }
+.companion .c-pet-jitter { animation: c-pet-jitter 0.32s linear infinite; }
+.companion .c-pet-sway { transform-origin: 50% 100%; animation: c-pet-sway 2.4s ease-in-out infinite; }
+.companion .c-pet-wiggle { transform-origin: 50% 100%; animation: c-pet-wiggle 0.56s ease-in-out infinite; }
+.companion .c-pet-hop { transform-origin: 50% 100%; animation: c-pet-hop 0.7s var(--c-ease) infinite; }
+.companion .c-pet-droop { transform-origin: 50% 100%; animation: c-pet-droop 1.6s ease-in-out infinite; }
+.companion .c-pet-sleep { transform-origin: 50% 100%; animation: c-pet-breathe 4.8s ease-in-out infinite; }
+.companion .c-pet-zz { color: var(--c-text-muted); animation: c-pet-zz 2.4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .companion .c-dot,
+  .companion .c-mascot-busy,
+  .companion .c-mascot-eye,
+  .companion .c-rise,
+  .companion .c-sheet,
+  .companion .c-screen,
+  .companion .c-push,
+  .companion .c-pet-zz { animation: none; }
+}
+
+/* nanoMuse's motion (vendor/nanomuse-web/web/src/index.css): sheets rise, the face breathes. */
+@keyframes om-sheet { from { transform: translateY(100%); } to { transform: none; } }
+.companion .sheet-in { animation: om-sheet 0.22s cubic-bezier(0.2, 0.8, 0.2, 1); }
+@keyframes om-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.companion .om-rise { animation: om-rise 0.18s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .companion .sheet-in, .companion .om-rise { animation: none; }
+}
+
+/* 动态: links in a post read as the companion color, not underlined. */
+.companion .feed-body a { color: var(--c-primary); text-decoration: none; font-weight: 500; }

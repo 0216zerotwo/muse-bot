@@ -1,0 +1,402 @@
+{
+  "schemaVersion": 1,
+  "sessionKey": "websocket:example-5e5aaa61",
+  "projection": "events",
+  "events": [
+    {
+      "event": "context_compaction",
+      "chat_id": "example-5e5aaa61",
+      "compaction_id": "示例内容",
+      "phase": "succeeded",
+      "created_at_ms": 1792083441213
+    },
+    {
+      "event": "user_message",
+      "chat_id": "example-5e5aaa61",
+      "text": "示例内容",
+      "turn_id": "example-c7c8d183",
+      "turn_phase": "user",
+      "turn_seq": 1,
+      "created_at_ms": 1792085244457,
+      "starts_turn": true
+    },
+    {
+      "event": "stream_end",
+      "chat_id": "example-5e5aaa61",
+      "stream_id": "websocket:example-d55a61ad",
+      "resuming": true,
+      "response_sources": [
+        {
+          "provider": "示例内容",
+          "model": "示例内容",
+          "preset": "示例内容",
+          "fallback": false
+        }
+      ],
+      "turn_id": "example-c7c8d183",
+      "turn_phase": "answer",
+      "turn_seq": 5,
+      "text": "",
+      "created_at_ms": 1792085249513
+    },
+    {
+      "event": "message",
+      "chat_id": "example-5e5aaa61",
+      "text": "示例内容",
+      "turn_id": "example-c7c8d183",
+      "tool_events": [
+        {
+          "version": 1,
+          "phase": "start",
+          "call_id": "example-c009f65b",
+          "name": "示例内容",
+          "arguments": {
+            "query": "示例内容",
+            "count": 10,
+            "timeRange": "示例内容"
+          },
+          "result": null,
+          "error": null,
+          "files": [],
+          "embeds": []
+        },
+        {
+          "version": 1,
+          "phase": "start",
+          "call_id": "example-a18ffbae",
+          "name": "示例内容",
+          "arguments": {
+            "query": "示例内容",
+            "count": 10,
+            "timeRange": "示例内容"
+          },
+          "result": null,
+          "error": null,
+          "files": [],
+          "embeds": []
+        }
+      ],
+      "kind": "tool_hint",
+      "turn_phase": "activity",
+      "turn_seq": 6,
+      "created_at_ms": 1792085249543
+    },
+    {
+      "event": "stream_end",
+      "chat_id": "example-5e5aaa61",
+      "stream_id": "websocket:example-134ab051",
+      "response_sources": [
+        {
+          "provider": "示例内容",
+          "model": "示例内容",
+          "preset": "示例内容",
+          "fallback": false
+        }
+      ],
+      "turn_id": "example-c7c8d183",
+      "turn_phase": "answer",
+      "turn_seq": 582,
+      "text": "示例内容",
+      "created_at_ms": 1792085304833
+    },
+    {
+      "event": "turn_end",
+      "chat_id": "example-5e5aaa61",
+      "turn_id": "example-c7c8d183",
+      "latency_ms": 60353,
+      "goal_state": {
+        "active": false
+      },
+      "usage": {
+        "prompt_tokens": 69757,
+        "completion_tokens": 1563,
+        "total_tokens": 71320,
+        "request_count": 5,
+        "estimated_tokens": 0,
+        "context_tokens": 24502,
+        "cached_tokens": 52352,
+        "generation_ms": 7615,
+        "measured_completion_tokens": 1563,
+        "ttft_ms": 10449,
+        "timed_requests": 5
+      },
+      "round_usages": [
+        {
+          "prompt_tokens": 6531,
+          "completion_tokens": 147,
+          "total_tokens": 6678,
+          "request_count": 1,
+          "estimated_tokens": 0,
+          "context_tokens": 6531,
+          "cached_tokens": 6272,
+          "generation_ms": 828,
+          "measured_completion_tokens": 147,
+          "ttft_ms": 3163,
+          "timed_requests": 1
+        },
+        {
+          "prompt_tokens": 8031,
+          "completion_tokens": 178,
+          "total_tokens": 8209,
+          "request_count": 1,
+          "estimated_tokens": 0,
+          "context_tokens": 8031,
+          "cached_tokens": 6656,
+          "generation_ms": 699,
+          "measured_completion_tokens": 178,
+          "ttft_ms": 1693,
+          "timed_requests": 1
+        },
+        {
+          "prompt_tokens": 11672,
+          "completion_tokens": 219,
+          "total_tokens": 11891,
+          "request_count": 1,
+          "estimated_tokens": 0,
+          "context_tokens": 11672,
+          "cached_tokens": 8192,
+          "generation_ms": 905,
+          "measured_completion_tokens": 219,
+          "ttft_ms": 2030,
+          "timed_requests": 1
+        },
+        {
+          "prompt_tokens": 19021,
+          "completion_tokens": 498,
+          "total_tokens": 19519,
+          "request_count": 1,
+          "estimated_tokens": 0,
+          "context_tokens": 19021,
+          "cached_tokens": 11776,
+          "generation_ms": 2122,
+          "measured_completion_tokens": 498,
+          "ttft_ms": 1766,
+          "timed_requests": 1
+        },
+        {
+          "prompt_tokens": 24502,
+          "completion_tokens": 521,
+          "total_tokens": 25023,
+          "request_count": 1,
+          "estimated_tokens": 0,
+          "context_tokens": 24502,
+          "cached_tokens": 19456,
+          "generation_ms": 3061,
+          "measured_completion_tokens": 521,
+          "ttft_ms": 1797,
+          "timed_requests": 1
+        }
+      ],
+      "context_window_tokens": 1048576,
+      "turn_phase": "complete",
+      "turn_seq": 583,
+      "created_at_ms": 1792085304839
+    },
+    {
+      "event": "message",
+      "chat_id": "example-5e5aaa61",
+      "text": "示例内容",
+      "turn_id": "example-d566767b",
+      "tool_events": [
+        {
+          "version": 1,
+          "phase": "start",
+          "call_id": "example-5b797930",
+          "name": "示例内容",
+          "arguments": {
+            "action": "示例内容"
+          },
+          "result": null,
+          "error": null,
+          "files": [],
+          "embeds": []
+        },
+        {
+          "version": 1,
+          "phase": "start",
+          "call_id": "example-f77be5c3",
+          "name": "示例内容",
+          "arguments": {
+            "query": "示例内容",
+            "head_limit": 50
+          },
+          "result": null,
+          "error": null,
+          "files": [],
+          "embeds": []
+        }
+      ],
+      "kind": "tool_hint",
+      "source": {
+        "kind": "local_trigger",
+        "label": "示例内容"
+      },
+      "turn_phase": "activity",
+      "turn_seq": 3,
+      "created_at_ms": 1792087047147
+    },
+    {
+      "event": "message",
+      "chat_id": "example-5e5aaa61",
+      "text": "示例内容",
+      "turn_id": "example-d566767b",
+      "latency_ms": 38092,
+      "source": {
+        "kind": "local_trigger",
+        "label": "示例内容"
+      },
+      "response_sources": [
+        {
+          "provider": "示例内容",
+          "model": "示例内容",
+          "preset": "示例内容",
+          "fallback": false
+        }
+      ],
+      "turn_phase": "answer",
+      "turn_seq": 31,
+      "created_at_ms": 1792087079390
+    },
+    {
+      "event": "user_message",
+      "text": "示例内容",
+      "starts_turn": true,
+      "turn_id": "example-c50f9cef",
+      "turn_phase": "user",
+      "chat_id": "example-5e5aaa61",
+      "created_at_ms": 1792411481977
+    },
+    {
+      "event": "message",
+      "text": "示例内容",
+      "turn_id": "example-c50f9cef",
+      "turn_phase": "answer",
+      "chat_id": "example-5e5aaa61",
+      "created_at_ms": 1792411495421
+    },
+    {
+      "event": "turn_end",
+      "turn_id": "example-c50f9cef",
+      "turn_phase": "complete",
+      "chat_id": "example-5e5aaa61",
+      "created_at_ms": 1792411495492
+    },
+    {
+      "event": "message",
+      "text": "",
+      "kind": "tool_hint",
+      "turn_phase": "activity",
+      "turn_id": "example-5eeb9419",
+      "tool_events": [
+        {
+          "version": 1,
+          "phase": "start",
+          "call_id": "example-fe0245ca",
+          "name": "示例内容",
+          "arguments": {
+            "limit": 5,
+            "query": "示例内容"
+          },
+          "result": null,
+          "error": null,
+          "files": [],
+          "embeds": []
+        }
+      ],
+      "chat_id": "example-5e5aaa61",
+      "created_at_ms": 1792412894653
+    },
+    {
+      "event": "message",
+      "text": "示例内容",
+      "source": {
+        "kind": "cron",
+        "label": "示例内容"
+      },
+      "chat_id": "example-5e5aaa61",
+      "created_at_ms": 1792499005453
+    },
+    {
+      "event": "message",
+      "text": "示例内容",
+      "chat_id": "example-5e5aaa61",
+      "created_at_ms": 1792517348703
+    },
+    {
+      "event": "message",
+      "text": "",
+      "media_urls": [
+        {
+          "url": "/api/media/example/asset.webp",
+          "name": "示例内容"
+        }
+      ],
+      "turn_id": "example-1766a1cb",
+      "turn_phase": "answer",
+      "chat_id": "example-5e5aaa61",
+      "created_at_ms": 1792683692744
+    },
+    {
+      "event": "user_message",
+      "text": "示例内容",
+      "starts_turn": true,
+      "turn_id": "example-8bb86857",
+      "turn_phase": "user",
+      "media_urls": [
+        {
+          "url": "/api/media/example/asset.webp",
+          "name": "示例内容",
+          "kind": "image"
+        }
+      ],
+      "chat_id": "example-5e5aaa61",
+      "created_at_ms": 1793102086263
+    }
+  ],
+  "completed_turn_ids": [
+    "example-c7c8d183",
+    "example-d566767b",
+    "example-019582ea",
+    "example-c50f9cef",
+    "example-da00832b",
+    "example-cd263533",
+    "example-5eeb9419",
+    "example-996a904c",
+    "example-3a0aa00d",
+    "example-a307fa26",
+    "example-0920d8fc",
+    "example-e5e1059f",
+    "example-61f17582",
+    "example-e7fcdbe3",
+    "example-3608a99a",
+    "example-a610e65d",
+    "example-04ff6b88",
+    "example-34449a40",
+    "example-58246545",
+    "example-1766a1cb",
+    "example-05dcbdd6",
+    "example-f8bcad87",
+    "example-8bb86857",
+    "example-2aee6806",
+    "example-a3fa6351",
+    "example-94e862aa",
+    "example-e84dbc6e",
+    "example-24836373",
+    "example-15f08b10",
+    "example-fd790714",
+    "example-230766a3",
+    "example-203df907",
+    "example-ea0ac5c0",
+    "example-89a5cb2b",
+    "example-55216a10",
+    "example-b1d14365",
+    "example-4197355f",
+    "example-63213bcd",
+    "example-ccf3eb75",
+    "example-60c94718",
+    "example-c04517f2",
+    "example-a9c12c9d",
+    "example-4ca12ef9"
+  ],
+  "revision": "470"
+}

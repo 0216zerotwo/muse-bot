@@ -1,0 +1,35 @@
+{
+  "id": "/companion.html",
+  "name": "Muse Bot",
+  "short_name": "Muse Bot",
+  "description": "你的私人 AI 伙伴",
+  "start_url": "/companion.html",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8f3ef",
+  "theme_color": "#f8f3ef",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/brand/companion_apple_touch.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    },
+    {
+      "src": "/brand/companion_icon_192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/brand/companion_icon_512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/brand/companion_icon_maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

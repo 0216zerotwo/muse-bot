@@ -1,0 +1,30 @@
+{
+  "learned": [
+    {
+      "name": "companion-scene-art",
+      "description": "Neutral example",
+      "category": "",
+      "updated_at": 1793277049358
+    },
+    {
+      "name": "avatar-change",
+      "description": "Neutral example",
+      "category": "",
+      "updated_at": 1793274847667
+    }
+  ],
+  "bundled": [
+    {
+      "name": "airtable",
+      "description": "Neutral example",
+      "category": "productivity",
+      "updated_at": 1792406017000
+    },
+    {
+      "name": "apple-notes",
+      "description": "Neutral example",
+      "category": "apple",
+      "updated_at": 1792406017000
+    }
+  ]
+}

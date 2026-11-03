@@ -1,0 +1,55 @@
+# Muse Bot: only source goes in. Everything below is either your own data (keys, chats, memory),
+# something downloaded, or something built.
+
+# --- Your server's data: API keys (.env), chats, memory, paired devices, browser logins -------------
+hermes-home/
+data/
+*.env
+.env
+.env.*
+!.env.example
+
+# --- Hermes Agent (the engine): fetched by tools/fetch-hermes.sh, and its Python environment -------
+hermes/
+hermes-env/
+
+# --- Toolchains and caches downloaded for building ---------------------------------------------------
+tools/android-sdk/
+tools/jdk-17/
+tools/uv-cache/
+tools/uv-python/
+tools/downloads/
+tools/pet-runs/
+tools/icon-runs/*
+!tools/icon-runs/chosen/
+tools/icon-runs/chosen/*
+!tools/icon-runs/chosen/muse-bot-icon.png
+!tools/icon-runs/contact_sheet.py
+
+# --- Built output -----------------------------------------------------------------------------------
+web/node_modules/
+web/dist/
+web/coverage/
+android/build/
+android/dist/
+deploy/dist/
+deploy/npm/bundle/
+*.tgz
+
+# --- Signing keys: the Android key signs your updates; keep it, never publish it ---------------------
+android/signing/
+*.jks
+*.keystore
+
+# --- Python / OS / editors ---------------------------------------------------------------------------
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.log

@@ -1,0 +1,23 @@
+{
+  "items": [
+    {
+      "id": "example-ae5dfa27",
+      "kind": "image",
+      "name": "示例内容",
+      "created_at": "2026-10-29T12:00:00Z",
+      "image_url": "/api/media/example/asset.webp",
+      "sheet_url": null,
+      "actions_url": null,
+      "character": true,
+      "working_url": "/api/media/example/asset.webp",
+      "happy_url": "/api/media/example/asset.webp",
+      "motions": {
+        "idle": "/api/media/example/asset.webp",
+        "thinking": "/api/media/example/asset.webp",
+        "working": "/api/media/example/asset.webp",
+        "waiting": "/api/media/example/asset.webp"
+      },
+      "motion_pending": false
+    }
+  ]
+}

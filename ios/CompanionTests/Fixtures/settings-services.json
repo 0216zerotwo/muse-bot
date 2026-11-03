@@ -1,0 +1,75 @@
+{
+  "presets": [
+    {
+      "name": "browserbase",
+      "display_name": "Browserbase",
+      "category": "browser",
+      "description": "Neutral example",
+      "docs_url": "https://docs.browserbase.com/integrations/mcp/setup",
+      "transport": "streamableHttp",
+      "auth": null,
+      "requires": "Browserbase API key",
+      "note": "",
+      "install_supported": true,
+      "installed": false,
+      "configured": false,
+      "enabled": false,
+      "available": false,
+      "status": "not_installed",
+      "runtime_status": null,
+      "logo_url": "https://www.google.com/s2/favicons?domain=browserbase.com&sz=64",
+      "brand_color": "#111827",
+      "required_fields": [
+        {
+          "name": "browserbase_api_key",
+          "label": "Neutral example",
+          "secret": true,
+          "required": true,
+          "configured": false,
+          "placeholder": "bb_live_...",
+          "env_var": "BROWSERBASE_API_KEY"
+        }
+      ],
+      "connection_summary": "",
+      "tool_names": null,
+      "tool_count": null,
+      "checked_at": null,
+      "error": null,
+      "enabled_tools": [
+        "*"
+      ],
+      "source": "preset"
+    },
+    {
+      "name": "playwright",
+      "display_name": "Playwright",
+      "category": "browser",
+      "description": "Neutral example",
+      "docs_url": "https://playwright.dev/docs/getting-started-mcp",
+      "transport": "stdio",
+      "auth": null,
+      "requires": "Node.js and npx",
+      "note": "",
+      "install_supported": true,
+      "installed": false,
+      "configured": false,
+      "enabled": false,
+      "available": false,
+      "status": "not_installed",
+      "runtime_status": null,
+      "logo_url": "https://www.google.com/s2/favicons?domain=playwright.dev&sz=64",
+      "brand_color": "#2EAD33",
+      "required_fields": [],
+      "connection_summary": "",
+      "tool_names": null,
+      "tool_count": null,
+      "checked_at": null,
+      "error": null,
+      "enabled_tools": [
+        "*"
+      ],
+      "source": "preset"
+    }
+  ],
+  "installed_count": 1
+}

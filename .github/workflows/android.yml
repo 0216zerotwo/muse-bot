@@ -1,0 +1,51 @@
+name: Build Android
+
+# The Android app (android/): an installable APK on every push, under Artifacts → muse-bot-android.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0, node24
+        with:
+          persist-credentials: false
+      # Android installs an update only when it is signed with the same key as the app on the phone.
+      # Put yours in the repository's secrets (ANDROID_KEYSTORE_BASE64: `base64 -w0 companion.jks`,
+      # ANDROID_KEYSTORE_PASSWORD); without them each run signs with a new key, fine for a first install.
+      - name: Signing key from the repository's secrets
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            mkdir -p android/signing
+            printf '%s' "$KEYSTORE" | base64 -d > android/signing/companion.jks
+            printf '%s' "$PASSWORD" > android/signing/keystore-password.txt
+          else
+            echo "No ANDROID_KEYSTORE_BASE64 secret: signing with a new key for this run"
+          fi
+      - name: Build
+        # The runner's JDK 17 and preinstalled Android SDK (ANDROID_HOME).
+        run: JAVA_HOME="${JAVA_HOME_17_X64:-$JAVA_HOME}" bash android/build.sh
+      - name: Upload APK
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, node24
+        with:
+          name: muse-bot-android
+          path: android/dist/*.apk
+          if-no-files-found: error
+          retention-days: 30

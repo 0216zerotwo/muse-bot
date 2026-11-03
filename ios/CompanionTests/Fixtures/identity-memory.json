@@ -1,0 +1,55 @@
+{
+  "sections": [
+    {
+      "file": "USER.md",
+      "title": "neutral-placeholder",
+      "items": [
+        {
+          "id": "neutral-placeholder",
+          "file": "USER.md",
+          "line": "neutral-placeholder",
+          "text": "neutral-placeholder"
+        },
+        {
+          "id": "neutral-placeholder",
+          "file": "USER.md",
+          "line": "neutral-placeholder",
+          "text": "neutral-placeholder"
+        },
+        {
+          "id": "neutral-placeholder",
+          "file": "USER.md",
+          "line": "neutral-placeholder",
+          "text": "neutral-placeholder"
+        }
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "id": "neutral-placeholder",
+      "at": 1793275841.0289383,
+      "file": "USER.md",
+      "kind": "learn-add",
+      "before": [],
+      "after": "neutral-placeholder"
+    },
+    {
+      "id": "neutral-placeholder",
+      "at": 1793271553.0774784,
+      "file": "USER.md",
+      "kind": "learn-add",
+      "before": [],
+      "after": "neutral-placeholder"
+    },
+    {
+      "id": "neutral-placeholder",
+      "at": 1793194857.6854084,
+      "file": "USER.md",
+      "kind": "learn-add",
+      "before": [],
+      "after": "neutral-placeholder"
+    }
+  ],
+  "learned_at": 1793275841.030009
+}

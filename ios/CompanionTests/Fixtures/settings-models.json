@@ -1,0 +1,134 @@
+{
+  "presets": [
+    {
+      "name": "DeepSeek V4.1 Flash 1017",
+      "model": "deepseek-flash",
+      "provider": "ds",
+      "vendor": "deepseek",
+      "reasoning_effort": "max",
+      "max_tokens": 8192,
+      "temperature": 0.1,
+      "context_window_tokens": 1048576
+    },
+    {
+      "name": "GPT-6.1 Sol",
+      "model": "gpt-6.1-sol",
+      "provider": "openai-codex",
+      "vendor": "chatgpt",
+      "reasoning_effort": null,
+      "max_tokens": 8192,
+      "temperature": 0.1,
+      "context_window_tokens": 1050000
+    }
+  ],
+  "max_tool_iterations": 20,
+  "default": "DeepSeek V4.1 Flash 1017",
+  "fallbacks": [
+    "glm"
+  ],
+  "settings": {
+    "enabled": true,
+    "router": null,
+    "fixed": "DeepSeek V4.1 Flash 1017",
+    "models": {
+      "glm": {
+        "description": "",
+        "tier": "balanced",
+        "vision": true,
+        "price_in": 0.8,
+        "price_out": 2.8,
+        "price_cached": null
+      },
+      "GPT-6.1 Sol": {
+        "description": "",
+        "tier": "balanced",
+        "vision": true,
+        "price_in": 14.4,
+        "price_out": 72.0,
+        "price_cached": null
+      },
+      "DeepSeek V4.1 Flash 1017": {
+        "description": "",
+        "tier": "cheap",
+        "vision": true,
+        "price_in": 1.0,
+        "price_out": 4.0,
+        "price_cached": 0.02
+      }
+    }
+  },
+  "health": {
+    "glm": {
+      "ok": true,
+      "error": null,
+      "checked_at": 1793271311719,
+      "latency_ms": 3767
+    },
+    "GPT-6.1 Sol": {
+      "ok": true,
+      "error": null,
+      "checked_at": 1793271314444,
+      "latency_ms": 2708
+    },
+    "DeepSeek V4.1 Flash 1017": {
+      "ok": true,
+      "error": null,
+      "checked_at": 1793271315962,
+      "latency_ms": 1506
+    }
+  },
+  "decisions": [],
+  "media": {
+    "image": {
+      "active": "gpt-image-2-high",
+      "models": [
+        {
+          "name": "doubao-seedream-5-0-flash",
+          "model": "doubao-seedream-5-0-flash",
+          "vendor": "volcengine",
+          "backend": "openai",
+          "price": {
+            "unit": "image",
+            "rows": [
+              {
+                "spec": "",
+                "price": 0.12
+              }
+            ]
+          }
+        },
+        {
+          "name": "gpt-image-2-high",
+          "model": "gpt-image-2-high",
+          "vendor": "chatgpt",
+          "backend": "openai-codex",
+          "price": null
+        }
+      ]
+    },
+    "video": {
+      "active": "MiniMax-H3-Lite",
+      "models": [
+        {
+          "name": "MiniMax-H3-Lite",
+          "model": "MiniMax-H3-Lite",
+          "vendor": "minimax",
+          "backend": "companion-minimax",
+          "price": {
+            "unit": "second",
+            "rows": [
+              {
+                "spec": "768P",
+                "price": 0.26
+              },
+              {
+                "spec": "480P",
+                "price": 0.16
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

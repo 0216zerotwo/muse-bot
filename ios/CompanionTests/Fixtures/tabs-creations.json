@@ -1,0 +1,43 @@
+{
+  "items": [
+    {
+      "id": "example-1",
+      "kind": "image",
+      "name": "示例名称",
+      "title": "示例名称",
+      "origin": "generated",
+      "prompt": "中性示例内容",
+      "size": 2439476,
+      "created_at": "2026-10-29T20:19:34+08:00",
+      "url": "/api/webui/companion/creations/file/example-signature/example.png"
+    },
+    {
+      "id": "example-2",
+      "kind": "video",
+      "name": "示例名称",
+      "title": "示例名称",
+      "origin": "generated",
+      "prompt": "中性示例内容",
+      "size": 862677,
+      "created_at": "2026-10-28T01:00:28+08:00",
+      "url": "/api/webui/companion/creations/file/example-signature/example.png"
+    },
+    {
+      "id": "example-3",
+      "kind": "document",
+      "name": "示例名称",
+      "title": "示例名称",
+      "origin": "workspace",
+      "prompt": null,
+      "size": 10899,
+      "created_at": "2026-10-27T19:22:16+08:00",
+      "url": "/api/webui/companion/creations/file/example-signature/example.png"
+    }
+  ],
+  "counts": {
+    "image": 13,
+    "video": 5,
+    "document": 4,
+    "audio": 0
+  }
+}

@@ -1,0 +1,163 @@
+name: Build iOS
+
+# Every push (and Run workflow) runs it all: unit tests, the installable .ipa and the screenshots.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+
+# The iPhone app lives in ios/ of the Muse Bot repository.
+defaults:
+  run:
+    working-directory: ios
+
+jobs:
+  test:
+    name: Simulator unit tests
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0, node24
+        with:
+          persist-credentials: false
+      - name: Select pinned Xcode and generate project
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          brew install xcodegen
+          xcodegen generate --spec project.yml
+      - name: Resolve packages
+        run: xcodebuild -resolvePackageDependencies -project Companion.xcodeproj -scheme Companion -clonedSourcePackagesDirPath build/SourcePackages
+      - name: Select an installed iPhone simulator
+        run: |
+          set -euo pipefail
+          SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); devices=[d for runtime,rows in data["devices"].items() if runtime.endswith("iOS-26-2") for d in rows if d.get("isAvailable") and d["name"].startswith("iPhone")]; assert devices, "Pinned Xcode 26.3 requires an installed iOS 26.2 iPhone simulator"; print(devices[0]["udid"])')
+          echo "SIMULATOR_ID=$SIMULATOR_ID" >> "$GITHUB_ENV"
+      - name: Run XCTest
+        run: |
+          set -euo pipefail
+          xcodebuild test -project Companion.xcodeproj -scheme Companion -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -clonedSourcePackagesDirPath build/SourcePackages -derivedDataPath build/DerivedData \
+            -resultBundlePath build/Tests.xcresult CODE_SIGNING_ALLOWED=NO
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, node24
+        with:
+          name: Companion-test-results
+          path: ios/build/Tests.xcresult
+          if-no-files-found: ignore
+          retention-days: 14
+
+  build:
+    name: Unsigned device IPA
+    runs-on: macos-latest
+    timeout-minutes: 35
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0, node24
+        with:
+          persist-credentials: false
+      - name: Select pinned Xcode and generate project
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          brew install xcodegen
+          xcodegen generate --spec project.yml
+      - name: Resolve packages
+        run: xcodebuild -resolvePackageDependencies -project Companion.xcodeproj -scheme Companion -clonedSourcePackagesDirPath build/SourcePackages
+      - name: Build Release without signing
+        run: |
+          set -euo pipefail
+          xcodebuild build -project Companion.xcodeproj -scheme Companion -configuration Release \
+            -destination 'generic/platform=iOS' -clonedSourcePackagesDirPath build/SourcePackages \
+            -derivedDataPath build/DerivedData CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          mkdir -p build/ipa/Payload
+          cp -R build/DerivedData/Build/Products/Release-iphoneos/Companion.app build/ipa/Payload/
+          cd build/ipa
+          zip -qry ../Companion-unsigned.ipa Payload
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, node24
+        with:
+          name: Companion-unsigned
+          path: ios/build/Companion-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+  screenshots:
+    name: Screenshots of every screen
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0, node24
+        with:
+          persist-credentials: false
+      - name: Select pinned Xcode and generate project
+        run: |
+          set -euo pipefail
+          brew install xcodegen
+          xcodegen generate --spec project.yml
+      - name: Resolve packages
+        run: xcodebuild -resolvePackageDependencies -project Companion.xcodeproj -scheme Screenshots -clonedSourcePackagesDirPath build/SourcePackages
+      - name: Select an installed iPhone simulator
+        run: |
+          set -euo pipefail
+          SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); devices=[d for runtime,rows in data["devices"].items() if runtime.endswith("iOS-26-2") for d in rows if d.get("isAvailable") and d["name"].startswith("iPhone")]; devices.sort(key=lambda d: (not d["name"].endswith("Pro"), d["name"])); assert devices, "Pinned Xcode 26.3 requires an installed iOS 26.2 iPhone simulator"; print(devices[0]["udid"])')
+          echo "SIMULATOR_ID=$SIMULATOR_ID" >> "$GITHUB_ENV"
+      - name: Start the stand-in server
+        run: |
+          set -euo pipefail
+          python3 -m venv build/mock-env
+          build/mock-env/bin/pip install --quiet websockets==15.0.1 pillow
+          nohup build/mock-env/bin/python preview/mock_server.py 8799 > build/mock.log 2>&1 &
+          for i in $(seq 1 30); do curl -fs http://127.0.0.1:8799/webui/bootstrap > /dev/null && exit 0; sleep 1; done
+          cat build/mock.log; exit 1
+      - name: Walk every screen
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p build/shots
+          xcrun simctl boot "$SIMULATOR_ID" || true
+          xcrun simctl ui "$SIMULATOR_ID" appearance dark || true
+          # Photos for the ＋ panel's strip, with access already allowed (no permission alert mid-walk).
+          for n in 1 2 3 4; do curl -fs "http://127.0.0.1:8799/api/media/sample/$n.png" -o "build/sample-$n.png" && xcrun simctl addmedia "$SIMULATOR_ID" "build/sample-$n.png" || true; done
+          xcrun simctl privacy "$SIMULATOR_ID" grant photos com.personalbot.companion || true
+          TEST_RUNNER_SCREENSHOT_DIR="$PWD/build/shots" xcodebuild test -project Companion.xcodeproj -scheme Screenshots             -configuration Debug -destination "platform=iOS Simulator,id=$SIMULATOR_ID"             -clonedSourcePackagesDirPath build/SourcePackages -derivedDataPath build/DerivedData             -resultBundlePath build/Shots.xcresult CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=""  # signed to run locally, so the app may use the keychain
+      - name: Collect screenshots
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p build/shots build/attachments
+          if [ -d build/Shots.xcresult ]; then
+            xcrun xcresulttool export attachments --path build/Shots.xcresult --output-path build/attachments || true
+            python3 preview/name_attachments.py build/attachments build/shots || true
+            # Which steps failed (a button not found …), to fix the walk.
+            xcrun xcresulttool get test-results tests --path build/Shots.xcresult > build/shots/test-results.json || true
+          fi
+          cp build/mock.log build/shots/ 2>/dev/null || true
+          ls -la build/shots
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, node24
+        with:
+          name: Companion-screenshots
+          path: ios/build/shots
+          if-no-files-found: warn
+          retention-days: 14

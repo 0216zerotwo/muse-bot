@@ -1,0 +1,186 @@
+"""What the agent is doing, shown in the app while it works.
+
+Hermes calls the plugin's ``pre_tool_call`` / ``post_tool_call`` hooks around every
+tool call (on the agent's thread). These turn them into the companion's
+``tool_hint`` activity events (nanobot's wire shape: ``tool_events`` with
+``phase`` start/end), which drive the "正在…" line, the pet's animation and
+the 任务 page's activity log. Hooks only observe: they never block a call.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+from typing import TYPE_CHECKING, Any, Optional
+
+from .approvals import approval_action
+from .modules import computer, creations, egress, permissions, secrets_guard
+
+if TYPE_CHECKING:
+    from .adapter import CompanionAdapter
+
+logger = logging.getLogger(__name__)
+
+_RESULT_LIMIT = 2000
+_adapter: Optional["CompanionAdapter"] = None
+_loop: Optional[asyncio.AbstractEventLoop] = None
+# Hermes session id -> companion chat id
+_chat_by_session: dict[str, str] = {}
+
+
+def bind(adapter: "CompanionAdapter", loop: asyncio.AbstractEventLoop) -> None:
+    global _adapter, _loop
+    _adapter, _loop = adapter, loop
+
+
+def _chat_for_session(session_id: str) -> Optional[str]:
+    """The companion chat a Hermes session (or its subagent's parent chain) belongs to."""
+    if _chat_by_session.get(session_id):
+        return _chat_by_session[session_id]
+    chat_id = None
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        current, seen = session_id, set()
+        while current and current not in seen:
+            seen.add(current)
+            row = db.get_session(current) or {}
+            if row.get("source") == "companion" and row.get("chat_id"):
+                chat_id = str(row["chat_id"])
+                break
+            current = row.get("parent_session_id")
+    except Exception as exc:  # the activity line is a nicety; never break a tool call over it
+        logger.debug("companion: could not resolve session %s: %s", session_id, exc)
+        return None
+    if chat_id:
+        # Only hits are cached: a session's row may not exist yet on its first tool call.
+        _chat_by_session[session_id] = chat_id
+    return chat_id
+
+
+def _text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    return text if len(text) <= _RESULT_LIMIT else text[:_RESULT_LIMIT] + "…"
+
+
+def _emit(phase: str, tool_name: str, args: Any, *, session_id: str = "", tool_call_id: str = "",
+          result: Any = None, error: Any = None) -> None:
+    adapter, loop = _adapter, _loop
+    if adapter is None or loop is None or not session_id:
+        if os.environ.get("COMPANION_DEBUG_FRAMES"):
+            logger.warning("companion: tool %s %s without session (adapter=%s)", tool_name, phase, adapter is not None)
+        return
+    chat_id = _chat_for_session(str(session_id))
+    if not chat_id:
+        if os.environ.get("COMPANION_DEBUG_FRAMES"):
+            logger.warning("companion: no chat for session %r (tool %s %s)", session_id, tool_name, phase)
+        return
+    tool_event = {
+        "version": 1,
+        "phase": phase,
+        "call_id": str(tool_call_id or f"{tool_name}-{id(args)}"),
+        "name": tool_name,
+        "arguments": args if isinstance(args, dict) else {},
+        "result": _text(result) if phase == "end" else None,
+        "error": _text(error),
+        "files": [],
+        "embeds": [],
+    }
+    asyncio.run_coroutine_threadsafe(adapter.emit_activity(chat_id, tool_event), loop)
+
+
+def on_pre_tool_call(tool_name: str = "", args: Any = None, **kwargs: Any) -> Optional[dict[str, str]]:
+    session_id, call_id = kwargs.get("session_id", ""), kwargs.get("tool_call_id", "")
+    _emit("start", tool_name, args, session_id=session_id, tool_call_id=call_id)
+    secret = secrets_guard.check(tool_name, args)
+    if secret:
+        return {"action": "block", "message": secret}
+    if computer.is_browser_tool(tool_name):
+        # The browser is the companion's: a helper asks it with browser_request instead.
+        from .modules.helpers import helper_for_chat
+
+        if helper_for_chat(_chat_for_session(str(session_id)) if session_id else None):
+            return {"action": "block", "message": (
+                "帮手不能直接用浏览器。用 browser_request 把要在网页上做的事交给主助理，它做完会把结果告诉你。")}
+        if computer.holding():
+            return {"action": "block", "message": (
+                "用户正在亲自操作浏览器，等用户说好了再继续。现在不要操作浏览器，可以先做别的或者等一等。")}
+        computer.ensure_browser()
+    action = approval_action(tool_name, args)
+    # After reading private data, sending to a site needs the user too (see modules/egress).
+    egress_target = None if action else egress.check(session_id, tool_name, args)
+    if egress_target:
+        action = "send_private"
+    host = (egress_target or {}).get("host")
+    # 设置 → 权限: what the user lets it do on its own, per kind of action.
+    kind = permissions.kind_of(tool_name, args, action, computer.is_browser_tool(tool_name))
+    level = permissions.level_of(kind) if kind else permissions.ALLOW
+    if level == permissions.DENY:
+        return {"action": "block", "message": permissions.denied_message(kind)}
+    if action != "goal_plan":  # a plan change is always the user's call
+        if level == permissions.ALLOW:
+            return None
+        if not action and kind != "run_command":  # Hermes asks about risky commands itself
+            action = kind
+    if not action or (_adapter is not None and _adapter.approvals.granted(action, args, host)):
+        return None
+    # Acting in the user's name: hold the call as an approval card instead of running it. Calls
+    # from outside a companion chat (scheduled jobs) are shown in the main companion chat.
+    chat_id = (_chat_for_session(str(session_id)) if session_id else None) or _home_chat()
+    if chat_id is None or _adapter is None:
+        return {"action": "block", "message": "这个操作需要用户确认，但现在没法让用户确认，所以没有执行。"}
+    facing = _adapter.facing_chat(chat_id)
+    message = _adapter.approvals.defer(facing, call_id, tool_name, args, action, egress_target, kind=kind)
+    if facing != chat_id:  # handed work: the card is where the user waits, and the companion takes it from there
+        message += "（确认卡片已放到用户正在看的聊天里，用户同意后主助理会在那边接着做。先把做到哪一步写出来。）"
+    return {"action": "block", "message": message}
+
+
+def _record_media(tool_name: str, args: Any, result: Any) -> None:
+    """用量: a picture or a clip a chat's tools made (the length and resolution asked, else the
+    tools' defaults)."""
+    if tool_name not in ("image_generate", "video_generate") or not isinstance(result, str):
+        return
+    try:
+        made = json.loads(result)
+    except ValueError:
+        return
+    if not isinstance(made, dict) or not made.get("success"):
+        return
+    from .modules.models import record_media
+
+    args = args if isinstance(args, dict) else {}
+    if tool_name == "image_generate":
+        record_media("image")
+    else:
+        seconds = args.get("duration") if isinstance(args.get("duration"), (int, float)) else 6
+        record_media("video", seconds=float(seconds), resolution=str(args.get("resolution") or "720p"))
+
+
+def _home_chat() -> Optional[str]:
+    from .modules.companion_state import read_companion_state
+
+    chat_id = read_companion_state().get("chat_id")
+    return str(chat_id) if chat_id else None
+
+
+def on_post_tool_call(tool_name: str = "", args: Any = None, result: Any = None, **kwargs: Any) -> None:
+    error = kwargs.get("error_message") if kwargs.get("status") == "error" else None
+    if computer.is_browser_tool(tool_name) and kwargs.get("status") not in ("error", "blocked"):
+        session_id = kwargs.get("session_id")
+        computer.note_action(tool_name, args, _chat_for_session(str(session_id)) if session_id else None)
+    if kwargs.get("status") not in ("error", "blocked"):
+        egress.note(kwargs.get("session_id"), tool_name)
+        # Images, videos and audio a generation tool made go into 创意.
+        creations.on_generation_result(tool_name, args, result, _loop)
+        _record_media(tool_name, args, result)
+    if kwargs.get("status") == "blocked" and kwargs.get("error_message"):
+        # The app recognizes a held call by the block message itself.
+        result = kwargs["error_message"]
+    _emit("end", tool_name, args, session_id=kwargs.get("session_id", ""),
+          tool_call_id=kwargs.get("tool_call_id", ""), result=result, error=error)

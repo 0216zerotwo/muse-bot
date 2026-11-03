@@ -1,0 +1,91 @@
+{
+  "jobs": [
+    {
+      "id": "example-1",
+      "name": "示例名称",
+      "enabled": false,
+      "protected": false,
+      "kind": "cron",
+      "created_at_ms": 1792590433197,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 8 * * *",
+        "tz": "Asia/Taipei"
+      },
+      "payload": {
+        "message": "中性示例内容",
+        "kind": "agent_turn"
+      },
+      "state": {
+        "next_run_at_ms": 1792627200000,
+        "last_run_at_ms": null,
+        "last_status": null,
+        "last_error": null
+      },
+      "runs": [
+        {
+          "id": "2026-10-30_08-00-04",
+          "at_ms": 1792022404000,
+          "status": "ok"
+        },
+        {
+          "id": "2026-10-29_08-00-03",
+          "at_ms": 1791936003000,
+          "status": "error"
+        }
+      ]
+    },
+    {
+      "id": "example-2",
+      "name": "示例名称",
+      "enabled": true,
+      "protected": false,
+      "kind": "cron",
+      "created_at_ms": 1792590433197,
+      "schedule": {
+        "kind": "every",
+        "every_ms": 10800000
+      },
+      "payload": {
+        "message": "中性示例内容",
+        "kind": "agent_turn"
+      },
+      "state": {
+        "next_run_at_ms": 1792627200000,
+        "last_run_at_ms": 1792616400000,
+        "last_status": "ok",
+        "last_error": null
+      },
+      "runs": [
+        {
+          "id": "2026-10-31_21-16-00",
+          "at_ms": 1792616160000,
+          "status": "ok"
+        }
+      ]
+    },
+    {
+      "id": "example-3",
+      "name": "示例名称",
+      "enabled": true,
+      "protected": false,
+      "kind": "cron",
+      "created_at_ms": 1792590433197,
+      "schedule": {
+        "kind": "at",
+        "at_ms": 1795170000000
+      },
+      "payload": {
+        "message": "中性示例内容",
+        "kind": "agent_turn"
+      },
+      "state": {
+        "next_run_at_ms": 1795170000000,
+        "last_run_at_ms": null,
+        "last_status": null,
+        "last_error": null
+      },
+      "runs": []
+    }
+  ]
+}

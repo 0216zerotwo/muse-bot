@@ -1,0 +1,47 @@
+{
+  "groups": [
+    {
+      "id": "example-id-1",
+      "name": "用订阅账号登录"
+    },
+    {
+      "id": "example-id-2",
+      "name": "国内"
+    }
+  ],
+  "vendors": [
+    {
+      "id": "example-id-3",
+      "name": "ChatGPT 订阅",
+      "kinds": [
+        "text",
+        "image"
+      ],
+      "console": "",
+      "group": "sub",
+      "login": "chatgpt",
+      "local_login": true,
+      "logo_url": "https://www.google.com/s2/favicons?domain=chatgpt.com&sz=64",
+      "color": "#0D0D0D",
+      "note": "Neutral example",
+      "has_key": true
+    },
+    {
+      "id": "example-id-4",
+      "name": "SuperGrok 订阅",
+      "kinds": [
+        "text",
+        "image",
+        "video"
+      ],
+      "console": "",
+      "group": "sub",
+      "login": "grok",
+      "local_login": false,
+      "logo_url": "https://www.google.com/s2/favicons?domain=grok.com&sz=64",
+      "color": "#111111",
+      "note": "Neutral example",
+      "has_key": false
+    }
+  ]
+}

@@ -1,0 +1,192 @@
+import { useEffect, useState, type ReactNode } from "react";
+import { ChevronLeft } from "lucide-react";
+
+import { fetchMcpPresets } from "@/lib/api";
+import type { McpPresetInfo } from "@/lib/types";
+import { useClient } from "@/providers/ClientProvider";
+
+import { deviceTimezone, updateCompanionState, type CompanionState, type Routines } from "./companion-api";
+import { ConnectSheet, recommendedPresets, RecommendedServices } from "./ConnectSheet";
+import { NameAndLookFields, PersonalityFields, personaChanges, personaDraft } from "./IdentityPanel";
+import { PetView } from "./Pet";
+import { DEFAULT_BRIEF_TIME, RoutineFields, useSaveRoutines } from "./ProactivePanel";
+
+const STEPS = ["welcome", "look", "personality", "proactive", "connect"] as const;
+type Step = (typeof STEPS)[number];
+
+/**
+ * First-run setup, like Muse's: name it, pick how it talks, decide when it may
+ * reach out, and connect the first services. Every step can be changed later
+ * from the menu, so "跳过" finishes right away without changing anything.
+ */
+export function Onboarding({
+  companion,
+  onDone,
+}: {
+  companion: CompanionState;
+  onDone: (companion: CompanionState) => void;
+}) {
+  const { client, token } = useClient();
+  const saveRoutines = useSaveRoutines();
+  const [step, setStep] = useState<Step>("welcome");
+  const [draft, setDraft] = useState(() => personaDraft(companion));
+  const [routines, setRoutines] = useState<Routines>({ brief_time: DEFAULT_BRIEF_TIME, checkins: true });
+  const [presets, setPresets] = useState<McpPresetInfo[] | null>(null);
+  const [connecting, setConnecting] = useState<McpPresetInfo | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (step !== "connect") return;
+    let cancelled = false;
+    fetchMcpPresets(token)
+      .then((payload) => {
+        if (!cancelled) setPresets(payload.presets);
+      })
+      .catch(() => {
+        if (!cancelled) setPresets([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [step, token]);
+
+  const index = STEPS.indexOf(step);
+  const next = () => setStep(STEPS[Math.min(index + 1, STEPS.length - 1)]);
+  const back = () => setStep(STEPS[Math.max(index - 1, 0)]);
+
+  const finish = async (keep: boolean) => {
+    setSaving(true);
+    setError(null);
+    try {
+      if (keep) await saveRoutines(routines);
+      const timezone = deviceTimezone();
+      const saved = await updateCompanionState(client, {
+        ...(keep ? personaChanges(draft) : {}),
+        ...(timezone ? { timezone } : {}),
+        onboarded: true,
+      });
+      onDone(saved);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setSaving(false);
+    }
+  };
+
+  const name = draft.name.trim() || companion.name;
+
+  return (
+    <div className="flex h-full flex-col" style={{ background: "var(--c-bg)" }}>
+      <header
+        className="flex min-h-14 items-center justify-between px-3"
+        style={{ paddingTop: "env(safe-area-inset-top)" }}
+      >
+        {index > 0 ? (
+          <button type="button" onClick={back} className="c-pressable grid h-11 w-11 place-items-center rounded-full" aria-label="上一步">
+            <ChevronLeft className="h-5 w-5" aria-hidden="true" />
+          </button>
+        ) : (
+          <span className="h-11 w-11" />
+        )}
+        <div className="flex gap-1.5" aria-label={`第 ${index + 1} 步，共 ${STEPS.length} 步`}>
+          {STEPS.map((key, i) => (
+            <span
+              key={key}
+              className="h-1.5 w-5 rounded-full"
+              style={{ background: i <= index ? "var(--c-primary)" : "var(--c-border)" }}
+              aria-hidden="true"
+            />
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() => void finish(false)}
+          disabled={saving}
+          className="c-muted c-pressable min-h-11 rounded-full px-3 text-[15px]"
+        >
+          跳过
+        </button>
+      </header>
+
+      <main className="min-h-0 flex-1 overflow-y-auto px-5 pb-4">
+        {step === "welcome" && (
+          <StepIntro mascot={<PetView value={draft.avatar} animation="waving" size={120} />} title="嗨，我是你的私人伙伴">
+            我能替你查资料、写邮件、管日程，会记住你在意的事，也会在合适的时候主动找你。先花一分钟认识一下？
+          </StepIntro>
+        )}
+        {step === "look" && (
+          <div className="flex flex-col gap-5">
+            <StepTitle title="给我起个名字吧" subtitle="我会用这个名字称呼自己。想换个样子，以后跟我说“把虚拟形象改为……”就行。" />
+            <NameAndLookFields draft={draft} onChange={setDraft} />
+          </div>
+        )}
+        {step === "personality" && (
+          <div className="flex flex-col gap-5">
+            <StepTitle title={`你希望${name}怎么说话？`} subtitle="随时可以在菜单里改。" />
+            <PersonalityFields draft={draft} onChange={setDraft} showNote={false} />
+          </div>
+        )}
+        {step === "proactive" && (
+          <div className="flex flex-col gap-5">
+            <StepTitle title="要我主动找你吗？" subtitle="消息会出现在「动态」里，开了通知还会推送到手机。" />
+            <RoutineFields value={routines} onChange={(changes) => setRoutines({ ...routines, ...changes })} />
+          </div>
+        )}
+        {step === "connect" && (
+          <div className="flex flex-col gap-5">
+            <StepTitle
+              title="连上你常用的服务"
+              subtitle={`连上之后${name}就能直接替你看邮件、排日程、做视频。凭据只保存在你自己的 bot 上，现在不连也可以。`}
+            />
+            {presets === null ? (
+              <p className="c-muted text-sm">正在读取…</p>
+            ) : (
+              <RecommendedServices presets={recommendedPresets(presets)} onConnect={setConnecting} />
+            )}
+          </div>
+        )}
+        {error && (
+          <p className="c-danger mt-4 text-sm" role="alert">
+            {error}
+          </p>
+        )}
+      </main>
+
+      <footer className="px-5 pt-2" style={{ paddingBottom: "max(1.25rem, env(safe-area-inset-bottom))" }}>
+        <button
+          type="button"
+          disabled={saving || (step === "look" && !draft.name.trim())}
+          onClick={() => (step === "connect" ? void finish(true) : next())}
+          className="c-primary min-h-12 w-full rounded-full text-[16px] font-semibold disabled:opacity-50"
+        >
+          {step === "welcome" ? "开始" : step === "connect" ? (saving ? "保存中…" : "完成") : "下一步"}
+        </button>
+      </footer>
+
+      <ConnectSheet
+        preset={connecting}
+        onClose={() => setConnecting(null)}
+        onChanged={(payload) => setPresets(payload.presets)}
+      />
+    </div>
+  );
+}
+
+function StepTitle({ title, subtitle }: { title: string; subtitle: string }) {
+  return (
+    <div className="pt-2">
+      <h1 className="text-[26px] font-bold leading-tight">{title}</h1>
+      <p className="c-muted mt-1.5 text-[15px]">{subtitle}</p>
+    </div>
+  );
+}
+
+function StepIntro({ mascot, title, children }: { mascot: ReactNode; title: string; children: ReactNode }) {
+  return (
+    <div className="flex min-h-full flex-col items-center justify-center gap-4 text-center">
+      {mascot}
+      <h1 className="text-[26px] font-bold leading-tight">{title}</h1>
+      <p className="c-muted max-w-sm text-[16px] leading-relaxed">{children}</p>
+    </div>
+  );
+}

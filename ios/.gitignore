@@ -1,0 +1,19 @@
+DerivedData/
+build/
+*.xcodeproj/
+*.xcworkspace/
+*.ipa
+*.xcresult/
+.DS_Store
+xcuserdata/
+*.mobileprovision
+*.p12
+*.cer
+*.key
+*.log
+.swiftpm/
+.validation/
+
+# Screenshots downloaded from the workflow
+reference/Companion-screenshots/
+reference/*.zip

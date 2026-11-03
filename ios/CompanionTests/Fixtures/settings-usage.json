@@ -1,0 +1,64 @@
+{
+  "today": {
+    "by_model": [],
+    "by_source": {},
+    "cached_tokens": 0,
+    "input_tokens": 0,
+    "cost": null,
+    "media": []
+  },
+  "week": {
+    "by_model": [
+      {
+        "provider": "https://api.deepseek.com",
+        "model": "deepseek-flash",
+        "preset": "DeepSeek V4.1 Flash 1017",
+        "calls": 389,
+        "input_tokens": 12518256,
+        "output_tokens": 187023,
+        "cached_tokens": 11275899,
+        "subscription": false,
+        "cost": 2.216
+      },
+      {
+        "provider": "",
+        "model": "glm-5-3-flash-260828",
+        "preset": "glm",
+        "calls": 4,
+        "input_tokens": 20680,
+        "output_tokens": 11806,
+        "cached_tokens": 0,
+        "subscription": false,
+        "cost": 0.0496
+      }
+    ],
+    "by_source": {
+      "user": 7221635,
+      "cron": 4285767,
+      "system": 1230363
+    },
+    "cached_tokens": 11275899,
+    "input_tokens": 12538936,
+    "cost": 7.4656,
+    "media": [
+      {
+        "name": "gpt-image-2-high",
+        "kind": "image",
+        "model": "gpt-image-2-high",
+        "count": 10,
+        "seconds": 0.0,
+        "cost": 0.0,
+        "subscription": true
+      },
+      {
+        "name": "MiniMax-H3-Lite",
+        "kind": "video",
+        "model": "MiniMax-H3-Lite",
+        "count": 5,
+        "seconds": 20.0,
+        "cost": 5.2,
+        "subscription": false
+      }
+    ]
+  }
+}

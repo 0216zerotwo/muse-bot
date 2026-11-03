@@ -1,0 +1,74 @@
+{
+  "sessions": [
+    {
+      "key": "websocket:example-5e5aaa61",
+      "created_at": "2026-10-29T12:00:00Z",
+      "updated_at": "2026-10-29T12:00:00Z",
+      "title": "",
+      "preview": "示例内容"
+    },
+    {
+      "key": "websocket:example-a65e3a4d",
+      "created_at": "2026-10-29T12:00:00Z",
+      "updated_at": "2026-10-29T12:00:00Z",
+      "title": "示例内容",
+      "preview": "示例内容",
+      "helper": "example-6245e586"
+    },
+    {
+      "key": "websocket:example-57dc05a7",
+      "created_at": "2026-10-29T12:00:00Z",
+      "updated_at": "2026-10-29T12:00:00Z",
+      "title": "示例内容",
+      "preview": "",
+      "helper": "example-9a724041"
+    },
+    {
+      "key": "websocket:example-10c7c2f6",
+      "created_at": "2026-10-29T12:00:00Z",
+      "updated_at": "2026-10-29T12:00:00Z",
+      "title": "示例内容",
+      "preview": "",
+      "group": true
+    },
+    {
+      "key": "websocket:example-2b7428d3",
+      "created_at": "2026-10-29T12:00:00Z",
+      "updated_at": "2026-10-29T12:00:00Z",
+      "title": "示例内容",
+      "preview": "",
+      "helper": "example-bfe21fe8"
+    },
+    {
+      "key": "websocket:example-de102891",
+      "created_at": "2026-10-29T12:00:00Z",
+      "updated_at": "2026-10-29T12:00:00Z",
+      "title": "示例内容",
+      "preview": "",
+      "helper": "example-5cda885b"
+    },
+    {
+      "key": "websocket:example-74ed6f6d",
+      "created_at": "2026-10-29T12:00:00Z",
+      "updated_at": "2026-10-29T12:00:00Z",
+      "title": "示例内容",
+      "preview": "",
+      "helper": "example-faed2a26"
+    },
+    {
+      "key": "websocket:example-ee700501",
+      "created_at": "2026-10-29T12:00:00Z",
+      "updated_at": "2026-10-29T12:00:00Z",
+      "title": "示例内容",
+      "preview": "",
+      "helper": "example-66017230"
+    },
+    {
+      "key": "websocket:example-591f566c",
+      "created_at": "2026-10-29T12:00:00Z",
+      "updated_at": "2026-10-29T12:00:00Z",
+      "title": "示例内容",
+      "preview": "示例内容"
+    }
+  ]
+}

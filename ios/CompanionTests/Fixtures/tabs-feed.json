@@ -1,0 +1,27 @@
+{
+  "instructions": "保持内容简洁，展示示例。",
+  "daily": true,
+  "time": "08:00",
+  "generated_at": 1793271407474,
+  "posts": [
+    {
+      "id": "example-1",
+      "ts": 1793271407474,
+      "title": "示例名称",
+      "body": "中性示例内容",
+      "area": "finance",
+      "image": null,
+      "prompt": "中性示例内容"
+    },
+    {
+      "id": "example-2",
+      "ts": 1793271397355,
+      "title": "示例名称",
+      "body": "中性示例内容",
+      "area": "finance",
+      "image": "https://example.com/image.png",
+      "prompt": "中性示例内容"
+    }
+  ],
+  "liked": []
+}

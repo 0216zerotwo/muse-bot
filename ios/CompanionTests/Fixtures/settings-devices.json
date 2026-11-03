@@ -1,0 +1,16 @@
+{
+  "devices": [
+    {
+      "id": "example-id-5",
+      "name": "Windows 电脑",
+      "paired_at": 1792678376496,
+      "last_seen": 1792681697689
+    },
+    {
+      "id": "example-id-6",
+      "name": "iPhone",
+      "paired_at": 1793290808848,
+      "last_seen": 1793290808848
+    }
+  ]
+}

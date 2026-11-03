@@ -1,0 +1,50 @@
+{
+  "approvals": [
+    {
+      "id": "example-eecc5afd",
+      "session_key": "示例内容",
+      "call_id": "example-2cab435f",
+      "tool_name": "示例内容",
+      "arguments": {
+        "account_name": "示例内容",
+        "recipients": [
+          "示例内容"
+        ],
+        "subject": "示例内容",
+        "body": "示例内容"
+      },
+      "status": "failed",
+      "created_at_ms": 1792086944615,
+      "decided_at_ms": 1792087041141,
+      "result": "示例内容",
+      "action": "",
+      "scope": "once",
+      "scopes": [
+        "once"
+      ]
+    },
+    {
+      "id": "example-74e2ffcf",
+      "session_key": "示例内容",
+      "call_id": "example-016cd07e",
+      "tool_name": "示例内容",
+      "arguments": {
+        "account_name": "示例内容",
+        "recipients": [
+          "示例内容"
+        ],
+        "subject": "示例内容",
+        "body": "示例内容"
+      },
+      "status": "rejected",
+      "created_at_ms": 1792158860441,
+      "decided_at_ms": 1792158860451,
+      "result": null,
+      "action": "",
+      "scope": "once",
+      "scopes": [
+        "once"
+      ]
+    }
+  ]
+}

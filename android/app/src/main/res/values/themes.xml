@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the companion page background (c-bg) so there is no flash while it loads. -->
+    <style name="Theme.Companion" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/companion_bg</item>
+        <item name="android:statusBarColor">@color/companion_bg</item>
+        <item name="android:navigationBarColor">@color/companion_bg</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+    <color name="companion_bg">#F6F6F8</color>
+</resources>

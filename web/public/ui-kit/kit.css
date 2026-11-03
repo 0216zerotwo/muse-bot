@@ -1,0 +1,132 @@
+/* The companion's UI kit for generated answers (small apps in a reply).
+   Colors come from the app (the companion's theme) as CSS variables; these are the
+   orange cat's defaults for a page opened on its own. Keep class names short: models write them. */
+
+:root {
+  --c-bg: #f8f3ef;
+  --c-surface: #fffefd;
+  --c-text: #1e1814;
+  --c-text-muted: #6e6058;
+  --c-border: rgb(30 24 20 / 0.085);
+  --c-primary: #bd5a02;
+  --c-primary-text: #ffffff;
+  --c-accent: #e67f3b;
+  --c-accent-soft: #fee1d1;
+  --c-fill: #efe7e0;
+  --c-good: #3f8f5a;
+  --c-bad: #c0392b;
+}
+
+* { box-sizing: border-box; }
+/* The card's own surface: a transparent frame gets painted by the browser when its color scheme
+   differs from the app's, so the page paints itself. */
+html, body { margin: 0; background: var(--c-surface); color: var(--c-text); }
+body {
+  padding: 2px 2px 6px;
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "HarmonyOS Sans SC", "MiSans", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overflow-x: hidden;
+}
+
+/* Layout */
+.stack { display: flex; flex-direction: column; gap: 12px; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.between { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.scroll-x { display: flex; gap: 8px; overflow-x: auto; scroll-snap-type: x mandatory; padding-bottom: 2px; }
+.scroll-x > * { scroll-snap-align: start; flex: 0 0 auto; }
+
+/* Surfaces and type */
+.card { background: var(--c-surface); border-radius: 16px; padding: 14px; box-shadow: inset 0 0 0 0.5px var(--c-border); }
+.soft { background: var(--c-fill); border-radius: 14px; padding: 12px; }
+.accent-card { background: var(--c-accent-soft); border-radius: 14px; padding: 12px; }
+.title { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
+.subtitle { font-size: 13px; font-weight: 600; color: var(--c-text-muted); }
+.muted { color: var(--c-text-muted); }
+.small { font-size: 12px; }
+.note { font-size: 12px; color: var(--c-text-muted); }
+.big { font-size: 32px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.num { font-variant-numeric: tabular-nums; }
+.good { color: var(--c-good); }
+.bad { color: var(--c-bad); }
+.accent { color: var(--c-accent); }
+hr, .divider { border: 0; height: 0.5px; background: var(--c-border); margin: 4px 0; }
+
+/* A labelled number */
+.stat { display: flex; flex-direction: column; gap: 2px; }
+.stat > .label, .stat > small { font-size: 12px; color: var(--c-text-muted); }
+.stat > .value, .stat > b { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+
+/* Tags */
+.tag { display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; padding: 2px 9px; font-size: 12px; background: var(--c-fill); color: var(--c-text); }
+.tag.accent { background: var(--c-accent-soft); color: var(--c-primary); }
+
+/* Buttons */
+button, .btn {
+  font: inherit; font-size: 14px; border: 0; border-radius: 999px; min-height: 36px; padding: 0 14px;
+  background: var(--c-fill); color: var(--c-text); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+button:active, .btn:active { transform: scale(0.97); }
+button.primary, .btn.primary, [data-primary] { background: var(--c-primary); color: var(--c-primary-text); font-weight: 600; }
+button.block, .btn.block { width: 100%; min-height: 44px; }
+button:disabled { opacity: 0.5; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--c-primary); outline-offset: 2px; }
+
+/* Segmented control: <div class="seg"><button aria-pressed="true">月</button><button>年</button></div> */
+.seg { display: flex; background: var(--c-fill); border-radius: 999px; padding: 3px; gap: 2px; }
+.seg > button { flex: 1; min-height: 32px; background: transparent; font-size: 13px; }
+.seg > button[aria-pressed="true"] { background: var(--c-surface); font-weight: 600; box-shadow: 0 1px 3px rgb(0 0 0 / 0.1); }
+
+/* Chips: <div class="chips" data-multi><button>日料</button>…</div> */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips > button { min-height: 32px; font-size: 13px; padding: 0 12px; }
+.chips > button[aria-pressed="true"] { background: var(--c-primary); color: var(--c-primary-text); }
+
+/* Fields */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > label, .field > .label { display: flex; justify-content: space-between; font-size: 13px; color: var(--c-text-muted); }
+.field output, .field .value { color: var(--c-text); font-weight: 600; font-variant-numeric: tabular-nums; }
+input[type="text"], input[type="number"], input[type="date"], input[type="time"], select, textarea {
+  font: inherit; width: 100%; min-height: 40px; border-radius: 12px; border: 0; padding: 0 12px;
+  background: var(--c-fill); color: var(--c-text);
+}
+input[type="range"] { width: 100%; accent-color: var(--c-primary); height: 28px; }
+
+/* Lists: <div class="list"><div class="item">…</div></div> */
+.list { display: flex; flex-direction: column; }
+.list > .item, .list > li { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 0.5px solid var(--c-border); }
+.list > .item:first-child, .list > li:first-child { border-top: 0; }
+ul.list, ol.list { margin: 0; padding: 0; list-style: none; }
+.badge { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 999px; display: grid; place-items: center; font-size: 12px; font-weight: 700; background: var(--c-primary); color: var(--c-primary-text); }
+
+/* Key/value rows */
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 14px; }
+.kv > :nth-child(odd) { color: var(--c-text-muted); }
+.kv > :nth-child(even) { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Progress bar: <div class="bar"><i style="width:40%"></i></div> */
+.bar { height: 8px; border-radius: 999px; background: var(--c-fill); overflow: hidden; }
+.bar > i { display: block; height: 100%; border-radius: inherit; background: var(--c-primary); }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { text-align: left; font-size: 12px; font-weight: 600; color: var(--c-text-muted); padding: 0 8px 8px 0; }
+td { padding: 8px 8px 8px 0; border-top: 0.5px solid var(--c-border); vertical-align: top; font-variant-numeric: tabular-nums; }
+.table-wrap { overflow-x: auto; }
+
+/* Charts and maps */
+.chart { position: relative; width: 100%; height: 200px; }
+.map { width: 100%; height: 240px; border-radius: 14px; overflow: hidden; background: var(--c-fill); }
+.map-pin { width: 24px; height: 24px; border-radius: 999px; display: grid; place-items: center; font: 700 12px/1 system-ui;
+  background: var(--c-primary); color: var(--c-primary-text); box-shadow: 0 2px 6px rgb(0 0 0 / 0.25); border: 2px solid #fff; }
+.map-pin.active { transform: scale(1.25); background: var(--c-accent); }
+.leaflet-container { font: inherit; background: var(--c-fill); }
+.leaflet-control-attribution { font-size: 9px; }
+[data-stop].active { box-shadow: inset 0 0 0 1.5px var(--c-primary); border-radius: 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

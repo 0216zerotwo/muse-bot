@@ -1,0 +1,7 @@
+{
+  "id": "orange-cat",
+  "displayName": "橘猫",
+  "description": "A tiny orange tabby cat companion who does your errands.",
+  "spritesheetPath": "spritesheet.webp",
+  "actionsPath": "actions.webp"
+}

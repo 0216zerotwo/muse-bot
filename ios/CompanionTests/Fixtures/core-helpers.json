@@ -1,0 +1,238 @@
+{
+  "helpers": [
+    {
+      "id": "example-66017230",
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "instructions": "示例内容",
+      "chat_id": "example-ee700501",
+      "notes": [],
+      "avatar": "",
+      "habits": [],
+      "created_at": 1792940502050,
+      "last": null,
+      "model": "",
+      "preset": "示例内容",
+      "setup": false,
+      "is_default": true,
+      "working": false,
+      "work": []
+    },
+    {
+      "id": "example-faed2a26",
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "instructions": "示例内容",
+      "chat_id": "example-74ed6f6d",
+      "notes": [],
+      "avatar": "",
+      "habits": [],
+      "created_at": 1792940813519,
+      "last": null,
+      "model": "",
+      "preset": "示例内容",
+      "setup": false,
+      "is_default": true,
+      "working": false,
+      "work": []
+    },
+    {
+      "id": "example-5cda885b",
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "instructions": "示例内容",
+      "chat_id": "example-de102891",
+      "notes": [],
+      "avatar": "",
+      "habits": [],
+      "created_at": 1792941434694,
+      "last": null,
+      "model": "",
+      "preset": "示例内容",
+      "setup": false,
+      "is_default": true,
+      "working": false,
+      "work": []
+    },
+    {
+      "id": "example-bfe21fe8",
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "instructions": "示例内容",
+      "chat_id": "example-2b7428d3",
+      "notes": [],
+      "avatar": "",
+      "habits": [
+        {
+          "id": "example-ce159672",
+          "text": "示例内容",
+          "by": "示例内容",
+          "at": 1793025819833
+        }
+      ],
+      "created_at": 1792941434790,
+      "last": null,
+      "model": "",
+      "preset": "示例内容",
+      "setup": false,
+      "is_default": true,
+      "working": false,
+      "work": []
+    },
+    {
+      "id": "example-9a724041",
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "instructions": "示例内容",
+      "chat_id": "example-57dc05a7",
+      "notes": [
+        "示例内容"
+      ],
+      "avatar": "example-5c0456ae",
+      "habits": [],
+      "created_at": 1792941434904,
+      "last": null,
+      "model": "",
+      "preset": "示例内容",
+      "setup": false,
+      "is_default": true,
+      "working": false,
+      "work": []
+    },
+    {
+      "id": "example-6245e586",
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "instructions": "示例内容",
+      "chat_id": "example-a65e3a4d",
+      "notes": [],
+      "avatar": "example-3a92586e",
+      "habits": [],
+      "created_at": 1792941435015,
+      "last": {
+        "text": "示例内容",
+        "at": 1793192621350,
+        "who": ""
+      },
+      "model": "",
+      "preset": "示例内容",
+      "setup": false,
+      "is_default": true,
+      "working": false,
+      "work": [
+        {
+          "turn_id": "example-f582aaf5",
+          "at": 1793192617189,
+          "from": "示例内容",
+          "task": "示例内容",
+          "answer": "示例内容",
+          "done": true
+        }
+      ]
+    }
+  ],
+  "templates": [
+    {
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "starters": [
+        "示例内容",
+        "示例内容",
+        "示例内容"
+      ],
+      "instructions": "示例内容"
+    },
+    {
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "starters": [
+        "示例内容",
+        "示例内容",
+        "示例内容"
+      ],
+      "instructions": "示例内容"
+    },
+    {
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "starters": [
+        "示例内容",
+        "示例内容",
+        "示例内容"
+      ],
+      "instructions": "示例内容"
+    },
+    {
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "starters": [
+        "示例内容",
+        "示例内容",
+        "示例内容"
+      ],
+      "instructions": "示例内容"
+    },
+    {
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "starters": [
+        "示例内容",
+        "示例内容",
+        "示例内容"
+      ],
+      "instructions": "示例内容"
+    },
+    {
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "starters": [
+        "示例内容",
+        "示例内容",
+        "示例内容"
+      ],
+      "instructions": "示例内容"
+    },
+    {
+      "name": "示例内容",
+      "emoji": "示例内容",
+      "title": "示例内容",
+      "starters": [
+        "示例内容",
+        "示例内容",
+        "示例内容"
+      ],
+      "instructions": "示例内容"
+    }
+  ],
+  "max": 12,
+  "groups": [
+    {
+      "id": "example-0eac33c9",
+      "name": "示例内容",
+      "members": [
+        "example-66017230",
+        "example-faed2a26",
+        "example-5cda885b",
+        "example-bfe21fe8",
+        "example-9a724041",
+        "example-6245e586"
+      ],
+      "chat_id": "example-10c7c2f6",
+      "created_at": 1793024010347,
+      "last": null
+    }
+  ],
+  "max_group": 6
+}

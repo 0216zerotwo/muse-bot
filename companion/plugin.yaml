@@ -1,0 +1,34 @@
+name: companion-platform
+label: 伙伴
+kind: platform
+version: 0.1.0
+description: >
+  The personal companion app (phone web app and Android shell) as a Hermes
+  platform: serves the companion pages, speaks the companion's WebSocket
+  protocol, and relays chats to and from the Hermes agent.
+author: personal_bot
+optional_env:
+  - name: COMPANION_PORT
+    description: "Port for the companion web app (default 8766)"
+    prompt: "Port"
+    password: false
+  - name: COMPANION_HOST
+    description: "Address to listen on (default 127.0.0.1; 0.0.0.0 to reach it from a phone on the LAN)"
+    prompt: "Host"
+    password: false
+  - name: COMPANION_AUTH_SECRET
+    description: "Password for signing in from another device (local browsers need none)"
+    prompt: "Sign-in password"
+    password: true
+  - name: COMPANION_WEB_DIST
+    description: "Folder with the built companion web app"
+    prompt: "Web app folder"
+    password: false
+  - name: COMPANION_ALLOWED_USERS
+    description: "Owner id the companion signs messages as (default: owner)"
+    prompt: "Allowed users"
+    password: false
+# Python packages this plugin needs beyond Hermes itself (Web Push encryption and signing).
+pip_dependencies:
+  - py-vapid==1.9.6
+  - http-ece==1.2.1

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>连接你的伙伴</title>
+<style>
+  :root {
+    --bg: #f6f6f8; --surface: #ffffff; --text: #16161a; --muted: #6b6b75;
+    --border: #e4e4ea; --primary: #bd5a02; --danger: #d93a3a;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #120d0a; --surface: #1e1815; --text: #f3edea; --muted: #b5a8a1; --border: #2e2622; --primary: #ed8642; --danger: #ff6b6b; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    display: flex; flex-direction: column; align-items: center; padding: 48px 20px 32px;
+  }
+  main { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 20px; }
+  .hello { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; }
+  .hello svg { width: 88px; height: 88px; }
+  h1 { margin: 8px 0 0; font-size: 26px; }
+  p { margin: 0; }
+  .muted { color: var(--muted); font-size: 15px; }
+  form { display: flex; flex-direction: column; gap: 12px; }
+  label { font-size: 14px; font-weight: 600; }
+  input {
+    width: 100%; min-height: 52px; padding: 0 18px; border-radius: 26px; font-size: 17px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); outline: none;
+  }
+  input:focus { border-color: var(--primary); }
+  button {
+    min-height: 52px; border: 0; border-radius: 26px; font-size: 17px; font-weight: 600;
+    background: var(--primary); color: #fff;
+  }
+  button:active { opacity: .8; }
+  .error { color: var(--danger); font-size: 15px; }
+  .error:empty { display: none; }
+  .help { background: var(--surface); border-radius: 22px; padding: 18px 20px; font-size: 15px; }
+  .help h2 { margin: 0 0 8px; font-size: 15px; }
+  .help ol { margin: 0 0 14px; padding-left: 20px; }
+  .help ol:last-child { margin-bottom: 0; }
+  code { font-family: ui-monospace, monospace; font-size: 13px; background: var(--bg); padding: 1px 6px; border-radius: 6px; white-space: nowrap; }
+  code.line { display: block; width: fit-content; margin-top: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <section class="hello">
+    <svg viewBox="0 0 64 64" aria-hidden="true">
+      <defs>
+        <radialGradient id="body" cx="38%" cy="30%" r="75%">
+          <stop offset="0%" stop-color="#fff7ec"/>
+          <stop offset="100%" stop-color="#e6cdb0"/>
+        </radialGradient>
+      </defs>
+      <path d="M32 7c13 0 23 9.5 23 24.5C55 47 45 57 32 57S9 47 9 31.5C9 16.5 19 7 32 7Z" fill="url(#body)"/>
+      <ellipse cx="24" cy="18" rx="6" ry="3.5" fill="#fff" opacity="0.55" transform="rotate(-20 24 18)"/>
+      <ellipse cx="25.5" cy="33" rx="2.4" ry="3.2" fill="#3a2d27"/>
+      <ellipse cx="38.5" cy="33" rx="2.4" ry="3.2" fill="#3a2d27"/>
+      <ellipse cx="20" cy="40" rx="4" ry="2.3" fill="#ff8a8a" opacity="0.35"/>
+      <ellipse cx="44" cy="40" rx="4" ry="2.3" fill="#ff8a8a" opacity="0.35"/>
+      <path d="M29.5 39.5q2.5 2 5 0" stroke="#3a2d27" stroke-width="1.4" stroke-linecap="round" fill="none"/>
+    </svg>
+    <h1>连接你的伙伴</h1>
+    <p class="muted">伙伴运行在你自己的服务器上。连一次就行，以后打开直接用。</p>
+  </section>
+
+  <form id="form">
+    <label for="server">服务器地址，或连接链接</label>
+    <input id="server" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
+           placeholder="https://你的域名">
+    <p class="error" id="error" role="alert"></p>
+    <button type="submit">连接</button>
+  </form>
+
+  <section class="help">
+    <h2>连服务器</h2>
+    <ol>
+      <li>在服务器上运行<code class="line">python tools/companion-pair.py https://你的域名</code></li>
+      <li>把它给出的「一键连接」链接粘贴到上面；或者只填地址，下一步再输入配对码</li>
+    </ol>
+    <h2>用数据线连电脑测试</h2>
+    <ol>
+      <li>手机打开「USB 调试」，用数据线连上电脑</li>
+      <li>电脑上运行<code class="line">adb reverse tcp:8766 tcp:8766</code></li>
+      <li>地址填 <code>http://127.0.0.1:8766</code></li>
+    </ol>
+  </section>
+</main>
+<script>
+  var bridge = window.PersonalBotAndroid;
+  var input = document.getElementById("server");
+  var error = document.getElementById("error");
+  if (bridge) {
+    input.value = bridge.server();
+    error.textContent = bridge.error();
+  }
+  document.getElementById("form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    if (!bridge) return;
+    error.textContent = bridge.connect(input.value) || "";
+  });
+</script>
+</body>
+</html>

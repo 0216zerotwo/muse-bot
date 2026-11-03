@@ -1,0 +1,27 @@
+Muse Bot
+Copyright (c) 2026 Muse Bot contributors. Released under the MIT License (see LICENSE).
+
+Muse Bot is not affiliated with, endorsed by or sponsored by Meta Platforms (Muse) or xAI / SpaceX AI
+(Grok). Those names and marks belong to their owners.
+
+This project includes or builds on the following third-party software:
+
+- web/ began as the WebUI of nanobot (https://github.com/HKUDS/nanobot).
+  MIT License. Copyright (c) 2025-present Xubin Ren and the nanobot contributors.
+
+- The server runs on Hermes Agent (https://github.com/NousResearch/hermes-agent), downloaded at a
+  fixed version by tools/fetch-hermes.sh (not included in this repository).
+  MIT License. Copyright (c) 2025 Nous Research.
+
+- Chart.js (https://www.chartjs.org), MIT License, and Leaflet (https://leafletjs.com), BSD 2-Clause
+  License, bundled for interactive cards in web/public/ui-kit/vendor and
+  ios/Companion/Resources/UiKit/vendor (their license files are next to them).
+
+- Provider icons from lobe-icons (https://github.com/lobehub/lobe-icons), MIT License; see
+  web/public/brand/provider-icons-NOTICE.txt.
+
+- MarkdownUI (https://github.com/gonzalezreal/swift-markdown-ui), MIT License, used by the iPhone
+  app as a Swift package.
+
+- The web app's npm dependencies (web/package.json) and the server's Python dependencies are
+  installed from their registries under their own licenses.

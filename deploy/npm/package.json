@@ -1,0 +1,33 @@
+{
+  "name": "musebot",
+  "version": "1.0.0",
+  "description": "Muse Bot 服务器的一键安装：sudo npx -y musebot install 你的域名（Ubuntu / Debian）。伙伴、无界面浏览器、语音、HTTPS 证书、开机自启。",
+  "license": "MIT",
+  "bin": {
+    "musebot": "bin/musebot.js"
+  },
+  "files": [
+    "bin/",
+    "bundle/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=12"
+  },
+  "scripts": {
+    "prepack": "node bin/musebot.js check-bundle"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0216zerotwo/muse-bot.git",
+    "directory": "deploy/npm"
+  },
+  "homepage": "https://github.com/0216zerotwo/muse-bot",
+  "keywords": [
+    "personal-agent",
+    "ai-agent",
+    "companion",
+    "self-hosted",
+    "hermes-agent"
+  ]
+}
