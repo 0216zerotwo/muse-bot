@@ -8,7 +8,7 @@
 # 定时任务、伙伴的状态和创作、密码保管箱。不带：日志、缓存、浏览器登录数据、已配对的设备
 # （服务器上重新配对）。包里有密钥，只上传到你自己的服务器，用完删掉本地这份。
 #
-# 输出：deploy/dist/musebot-server-<日期>.tar.gz
+# 输出：deploy/dist/musebot-server-<版本>.tar.gz（版本取 MUSEBOT_VERSION，比如发布流程里的 v1.2.0；没有就用日期）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -23,7 +23,8 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 OUT_DIR="$ROOT/deploy/dist"
 mkdir -p "$OUT_DIR"
-NAME="musebot-server-$(date +%Y%m%d-%H%M)"
+RELEASE="${MUSEBOT_VERSION:-dev-$(date +%Y%m%d-%H%M)}"
+NAME="musebot-server-$RELEASE"
 B="$STAGE/$NAME"
 mkdir -p "$B/tools"
 
@@ -38,6 +39,7 @@ echo "==> 伙伴插件和网页"
 tar -C "$ROOT" -cf - --exclude='__pycache__' --exclude='*.pyc' companion | tar -C "$B" -xf -
 mkdir -p "$B/web" && cp -r "$WEB/." "$B/web/"
 cp "$ROOT/tools/companion-pair.py" "$B/tools/"
+echo "$RELEASE" > "$B/VERSION"
 cp "$ROOT/deploy/vps/install.sh" "$ROOT/deploy/vps/uninstall.sh" "$ROOT/deploy/vps/README.md" "$ROOT/deploy/vps/Dockerfile" "$B/"
 
 if [ "$WITH_DATA" -eq 1 ]; then

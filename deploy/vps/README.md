@@ -15,14 +15,14 @@
 
 ## 最省事：一条 npx 命令
 
-发布到 npm 之后（见 `deploy/npm/README.md`），在服务器上直接：
+在服务器上直接（见 `deploy/npm/README.md`）：
 
 ```bash
 sudo apt-get install -y nodejs npm
 sudo npx -y musebot-server install 你的域名
 ```
 
-效果和下面的三步一样（装的就是同一个安装包），只是不用在电脑上打包、上传。要带数据搬家还是用下面的 `pack.sh --with-data`，再 `npx musebot-server install --bundle 那个包`。
+效果和下面的三步一样（装的是 GitHub Releases 里的同一种安装包），只是不用在电脑上打包、上传；以后升级 `sudo npx -y musebot-server update`。要带数据搬家还是用下面的 `pack.sh --with-data`，再 `npx musebot-server install --bundle 那个包`。
 
 ## 三步装好
 
@@ -55,7 +55,7 @@ tar xzf musebot-server-*.tar.gz && bash musebot-server-*/install.sh 你的域名
 | 要做的事 | 怎么做 |
 |---|---|
 | 再配对一台设备 | `python3 /opt/companion/tools/companion-pair.py https://你的域名`，或在已连上的设备里 **设置 → 设备 → 生成配对码** |
-| 升级 | 电脑上重新 `pack.sh`（不用 `--with-data`），上传后再运行一次 `install.sh`，数据保留 |
+| 升级 | `sudo npx -y musebot-server update`（下载最新 Release）；或电脑上重新 `pack.sh`，上传后再运行一次 `install.sh`。数据都保留 |
 | 看日志 | `docker logs -f companion` |
 | 重启 | `cd /opt/companion && docker compose restart` |
 | 改 API 密钥 | App 的 **设置 → 模型**；或编辑 `/opt/companion/data/.env` 后重启 |

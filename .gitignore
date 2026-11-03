@@ -33,7 +33,6 @@ web/coverage/
 android/build/
 android/dist/
 deploy/dist/
-deploy/npm/bundle/
 *.tgz
 
 # --- Signing keys: the Android key signs your updates; keep it, never publish it ---------------------

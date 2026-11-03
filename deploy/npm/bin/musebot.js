@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 /*
- * 伙伴服务器的一键安装和日常管理（npx musebot-server …）。
+ * Muse Bot 服务器的一键安装和日常管理（npx musebot-server …）。
  *
- * 安装包（Hermes + 伙伴插件 + 网页 + install.sh）就在这个 npm 包的 bundle/ 里，装的时候不用再上传
- * 任何东西：install.sh 装 Docker（没有的话）、构建镜像（浏览器、Python、语音组件都在镜像里）、
- * 用 Caddy 申请 HTTPS 证书，容器设成 restart: unless-stopped，Docker 开机自启，所以伙伴常驻。
+ * 这个 npm 包只是安装器：安装包（Hermes + 伙伴插件 + 网页 + install.sh）由 GitHub Actions 在每次
+ * 打版本标签时构建，发在仓库的 Releases 里；install / update 下载最新的（或 --version 指定的）那个。
+ * install.sh 装 Docker（没有的话）、构建镜像（浏览器、Python、语音组件都在镜像里）、用 Caddy 申请
+ * HTTPS 证书，容器设成 restart: unless-stopped，Docker 开机自启，所以伙伴常驻。
+ * 所以服务器端改了代码，只要在 GitHub 上发新版本；这个 npm 包只有安装器本身改了才需要重新发布。
  *
  * 只用 Node 自带的模块，Node 12 也能跑（Ubuntu 22.04 apt 里的版本）。
  */
@@ -17,8 +19,9 @@ var path = require("path");
 
 var APP = "/opt/companion";
 var PORT = 8766;
-// One archive, not a folder: npm would apply the .gitignore files inside Hermes's source to it.
-var BUNDLE = path.join(__dirname, "..", "bundle", "musebot.tar.gz");
+// Where the server bundles are published (a fork can point MUSEBOT_REPO at itself).
+var REPO = process.env.MUSEBOT_REPO || "0216zerotwo/muse-bot";
+var ASSET = "musebot-server.tar.gz";
 var VERSION = require("../package.json").version;
 
 // 安装包里不许出现的东西：数据和密钥只能用 pack.sh --with-data 私下带到自己的服务器。
@@ -75,15 +78,15 @@ function entries(archive) {
   return listed.out.split(/\r?\n/).filter(Boolean);
 }
 
-/** 打包前（npm pack / publish）：安装包齐全，而且没有数据和密钥。 */
-function checkBundle() {
-  if (!fs.existsSync(BUNDLE)) fail("还没有安装包：先运行 bash build-bundle.sh");
-  var names = entries(BUNDLE).map(function (entry) {
+/** 发布前（GitHub Actions 的 Release 流程）：安装包齐全，而且没有数据和密钥。 */
+function checkBundle(archive) {
+  if (!archive || !fs.existsSync(archive)) fail("找不到安装包：" + (archive || "（没写）"));
+  var names = entries(archive).map(function (entry) {
     return entry.replace(/^[^/]+\//, "");
   });
   ["install.sh", "uninstall.sh", "Dockerfile", "hermes/pyproject.toml", "hermes/uv.lock", "companion/plugin.yaml",
     "web/companion.html", "tools/companion-pair.py"].forEach(function (file) {
-    if (names.indexOf(file) === -1) fail("安装包不完整，缺 " + file + "：重新运行 bash build-bundle.sh");
+    if (names.indexOf(file) === -1) fail("安装包不完整，缺 " + file);
   });
   var found = names.filter(function (name) {
     return name === "data/" || name.indexOf("data/") === 0 || FORBIDDEN.indexOf(path.posix.basename(name)) !== -1;
@@ -92,18 +95,34 @@ function checkBundle() {
   say("安装包齐全，没有数据和密钥（" + names.length + " 个文件）");
 }
 
-/** 解压安装包（npm 包自带的，或 --bundle 给的），返回 install.sh 所在的目录。 */
+/** 取出 `--name 值` 这样的选项（没有就是 undefined）。 */
+function option(args, name) {
+  var index = args.indexOf(name);
+  if (index === -1) return undefined;
+  var value = args[index + 1];
+  if (!value || value.charAt(0) === "-") fail(name + " 后面要写值");
+  args.splice(index, 2);
+  return value;
+}
+
+/** 安装包：--bundle 给的本地文件，或从 GitHub Releases 下载（最新的，或 --version 指定的）。
+ * 解压后返回 install.sh 所在的目录。 */
 function bundleDir(args) {
-  var archive = BUNDLE;
-  var index = args.indexOf("--bundle");
-  if (index !== -1) {
-    archive = args[index + 1];
-    if (!archive || !fs.existsSync(archive)) fail("找不到 --bundle 后面的安装包：" + (archive || "（没写）"));
-    args.splice(index, 2);
-  } else if (!fs.existsSync(archive)) {
-    fail("这个 npm 包里没有安装包（bundle/）");
-  }
   var target = fs.mkdtempSync(path.join(os.tmpdir(), "musebot-"));
+  var archive = option(args, "--bundle");
+  var version = option(args, "--version");
+  if (archive) {
+    if (!fs.existsSync(archive)) fail("找不到 --bundle 后面的安装包：" + archive);
+  } else {
+    var url = version
+      ? "https://github.com/" + REPO + "/releases/download/" + version + "/" + ASSET
+      : "https://github.com/" + REPO + "/releases/latest/download/" + ASSET;
+    archive = path.join(target, ASSET);
+    say("下载安装包 " + (version || "（最新版）") + "：" + url);
+    if (run("curl", ["-fL", "--retry", "3", "-o", archive, url]) !== 0) {
+      fail("下载失败。确认服务器能访问 github.com，以及 " + (version ? "版本 " + version + " 存在" : "仓库已经发过版本") + "：https://github.com/" + REPO + "/releases");
+    }
+  }
   say("解压安装包");
   if (run("tar", ["-xzf", archive, "-C", target]) !== 0) fail("解压失败：" + archive);
   var inside = fs.readdirSync(target).filter(function (name) {
@@ -134,9 +153,18 @@ function install(args) {
   process.exit(code);
 }
 
+function installedVersion() {
+  try {
+    return fs.readFileSync(path.join(APP, "VERSION"), "utf8").trim();
+  } catch (error) {
+    return "";
+  }
+}
+
 function status() {
   needInstalled();
   var address = domain();
+  console.log("版本      " + (installedVersion() || "（未知）"));
   var up = quiet("curl", ["-fsS", "-o", "/dev/null", "--max-time", "5", "http://127.0.0.1:" + PORT + "/webui/bootstrap"]).ok;
   var boot = quiet("systemctl", ["is-enabled", "docker"]).out === "enabled";
   console.log("伙伴      " + (up ? "运行中" : "没在运行（看日志：sudo npx musebot-server logs）"));
@@ -175,8 +203,9 @@ function help() {
     "Muse Bot 服务器（musebot）" + VERSION,
     "",
     "在服务器上（Ubuntu 22.04+ / Debian 12+，用 root）：",
-    "  sudo npx -y musebot-server install 你的域名   安装或升级（不写域名就用 <IP>.sslip.io）",
-    "  sudo npx musebot-server status                 是否在运行、地址、开机自启",
+    "  sudo npx -y musebot-server install 你的域名   安装（不写域名就用 <IP>.sslip.io）",
+    "  sudo npx -y musebot-server update             升级到 GitHub 上的最新版本（数据保留）",
+    "  sudo npx musebot-server status                 版本、是否在运行、地址、开机自启",
     "  sudo npx musebot-server logs [-f]              看日志",
     "  sudo npx musebot-server restart                重启（stop / start 停下和启动）",
     "  sudo npx musebot-server pair                   生成手机配对码",
@@ -184,7 +213,8 @@ function help() {
     "",
     "选项：",
     "  --yes                 不再确认，直接装",
-    "  --bundle 文件.tar.gz  用 pack.sh 打的安装包（比如带着数据搬家），不用 npm 包里自带的",
+    "  --version v1.2.0      装指定版本（默认最新版，见 https://github.com/" + REPO + "/releases）",
+    "  --bundle 文件.tar.gz  用 pack.sh 打的本地安装包（比如带着数据搬家），不从 GitHub 下载",
   ].join("\n"));
 }
 
@@ -192,7 +222,12 @@ var args = process.argv.slice(2);
 var command = args.shift() || "help";
 switch (command) {
   case "install":
+    install(args);
+    break;
+  case "update":
   case "upgrade":
+    // install.sh keeps the data and the domain it was installed with.
+    needInstalled();
     install(args);
     break;
   case "status":
@@ -217,7 +252,7 @@ switch (command) {
     uninstall(args);
     break;
   case "check-bundle":
-    checkBundle();
+    checkBundle(args[0]);
     break;
   case "version":
   case "--version":

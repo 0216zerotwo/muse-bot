@@ -83,7 +83,7 @@ sudo apt-get install -y nodejs npm
 sudo npx -y musebot-server install 你的域名     # 没有域名就不写，会用 <IP>.sslip.io
 ```
 
-它会装好 Docker、构建镜像（伙伴 + 无界面浏览器 + 语音组件）、用 Caddy 自动申请 HTTPS 证书，并设为开机自启，最后打印配对码。常用：`sudo npx musebot-server status | logs -f | restart | pair | uninstall`。详见 [deploy/npm/README.md](deploy/npm/README.md) 和 [deploy/vps/README.md](deploy/vps/README.md)（也可以不用 npm，打包上传后运行 `install.sh`）。
+它会装好 Docker、构建镜像（伙伴 + 无界面浏览器 + 语音组件）、用 Caddy 自动申请 HTTPS 证书，并设为开机自启，最后打印配对码。升级：`sudo npx -y musebot-server update`。常用：`sudo npx musebot-server status | logs -f | restart | pair | uninstall`。详见 [deploy/npm/README.md](deploy/npm/README.md) 和 [deploy/vps/README.md](deploy/vps/README.md)（也可以不用 npm，打包上传后运行 `install.sh`）。
 
 ## 隐私和安全
 
@@ -105,6 +105,8 @@ cd web && npm run lint && npm test && npm run build    # 开发时 npm run dev�
 # iPhone（Windows 上的静态检查；编译在 CI）
 python ios/scripts/validate.py
 ```
+
+发布新版本：`git tag v1.2.0 && git push origin v1.2.0`，GitHub Actions 会构建服务器安装包并发到 Releases，服务器上 `sudo npx -y musebot-server update` 就能升级（npm 安装器本身很少需要重新发布）。
 
 改了图标：把 1024×1024 的图放到 `tools/icon-runs/chosen/muse-bot-icon.png`，运行 `python tools/make_app_icons.py tools/icon-runs/chosen/muse-bot-icon.png`，一次更新 iOS、安卓和网页的所有尺寸。
 

@@ -103,6 +103,7 @@ rm -rf "$DATA/plugins/companion" && cp -r "$HERE/companion" "$DATA/plugins/compa
 rm -rf "$DATA/companion-web" && cp -r "$HERE/web" "$DATA/companion-web"
 mkdir -p "$APP/tools" && cp "$HERE/tools/companion-pair.py" "$APP/tools/"
 cp "$HERE/install.sh" "$HERE/uninstall.sh" "$HERE/README.md" "$APP/"
+[ -f "$HERE/VERSION" ] && cp "$HERE/VERSION" "$APP/VERSION"
 echo "$DOMAIN" > "$APP/domain"
 
 if [ ! -f "$DATA/config.yaml" ]; then

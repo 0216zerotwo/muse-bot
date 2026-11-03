@@ -1,0 +1,45 @@
+name: Release
+
+# Push a version tag (git tag v1.2.0 && git push origin v1.2.0) and this builds the server bundle
+# (Hermes at its pinned version + the companion plugin + the built web app + install.sh) and
+# publishes it as a GitHub Release. Servers pick it up with: sudo npx -y musebot-server update
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    name: Server bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0, node24
+        with:
+          persist-credentials: false
+      - name: Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0, node24
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the web app
+        working-directory: web
+        run: npm ci && npm run build
+      - name: Hermes Agent at its pinned version
+        run: bash tools/fetch-hermes.sh
+      - name: Pack (no data, no keys)
+        env:
+          MUSEBOT_VERSION: ${{ github.ref_name }}
+        run: |
+          bash deploy/vps/pack.sh
+          mv "deploy/dist/musebot-server-$MUSEBOT_VERSION.tar.gz" musebot-server.tar.gz
+          node deploy/npm/bin/musebot.js check-bundle musebot-server.tar.gz
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" musebot-server.tar.gz --title "Muse Bot $TAG" --generate-notes
