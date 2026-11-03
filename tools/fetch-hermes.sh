@@ -16,5 +16,6 @@ fi
 mkdir -p "$TARGET"
 echo "==> Downloading Hermes Agent ${COMMIT:0:12}"
 curl -fL --retry 3 "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/$COMMIT" \
-  | tar -xz -C "$TARGET" --strip-components=1 --exclude='*/website' --exclude='*/tests'
+  | tar -xz -C "$TARGET" --strip-components=1 --exclude='*/website' --exclude='*/tests' \
+      --exclude="hermes-agent-$COMMIT/apps"   # the desktop and other apps: the server doesn't use them
 echo "==> hermes/ ready"

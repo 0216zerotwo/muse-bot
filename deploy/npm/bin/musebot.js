@@ -24,8 +24,9 @@ var REPO = process.env.MUSEBOT_REPO || "0216zerotwo/muse-bot";
 var ASSET = "musebot-server.tar.gz";
 var VERSION = require("../package.json").version;
 
-// 安装包里不许出现的东西：数据和密钥只能用 pack.sh --with-data 私下带到自己的服务器。
-var FORBIDDEN = [".env", "auth.json", "devices.json", "media.key", "state.db", "data"];
+// 公开的安装包里不许出现的东西：数据和密钥只能用 pack.sh --with-data 私下带到自己的服务器
+// （那时它们在安装包最外层的 data/ 里）。这些是数据文件的名字，不管在哪一层。
+var FORBIDDEN = [".env", "auth.json", "devices.json", "media.key", "state.db"];
 
 function say(text) {
   console.log("\x1b[1;34m==>\x1b[0m " + text);
@@ -89,7 +90,10 @@ function checkBundle(archive) {
     if (names.indexOf(file) === -1) fail("安装包不完整，缺 " + file);
   });
   var found = names.filter(function (name) {
-    return name === "data/" || name.indexOf("data/") === 0 || FORBIDDEN.indexOf(path.posix.basename(name)) !== -1;
+    // The bundle's own data/ (a private move with pack.sh --with-data), or a secret file anywhere;
+    // not every folder that happens to be called "data" (Hermes has some in its source).
+    if (name === "data/" || name.indexOf("data/") === 0) return true;
+    return name.slice(-1) !== "/" && FORBIDDEN.indexOf(path.posix.basename(name)) !== -1;
   });
   if (found.length) fail("安装包里有不该公开的文件：\n  " + found.join("\n  "));
   say("安装包齐全，没有数据和密钥（" + names.length + " 个文件）");
