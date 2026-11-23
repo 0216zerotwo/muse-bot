@@ -8,6 +8,17 @@ vi.mock("@/providers/ClientProvider", () => ({ useClient: () => ({ client: { req
 
 vi.mock("@/companion/companion-api", async (original) => ({
   ...(await original<typeof import("@/companion/companion-api")>()),
+  fetchCompanionState: vi.fn(async () => ({
+    name: "伙伴",
+    avatar: "mochi:cream",
+    chat_id: "c1",
+    tone: "warm" as const,
+    user_name: null,
+    style_note: null,
+    onboarded: true,
+    timezone: null,
+    updated_at: null,
+  })),
   fetchRoutines: vi.fn(async () => ({ brief_time: "08:00", checkins: true })),
   fetchMemory: vi.fn(async () => ({ sections: [] })),
   fetchSkills: vi.fn(async () => ({ learned: [], bundled: [] })),

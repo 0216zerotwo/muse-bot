@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  AlertCircle,
   CalendarClock,
   FileText,
   Globe,
   History,
   ImageIcon,
+  Loader2,
   Mail,
   PlugZap,
   RefreshCw,
@@ -197,7 +199,26 @@ export function ConnectionsView({ active }: { active: boolean }) {
 
   return (
     <div className="flex flex-col gap-6 px-4">
-      {error && <p className="c-danger text-sm">{error}</p>}
+      {error && (
+        <div className="c-card flex items-center gap-3 rounded-2xl px-4 py-3" role="alert">
+          <AlertCircle className="c-danger h-5 w-5 shrink-0" aria-hidden="true" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[14px] font-medium">服务列表加载失败</p>
+            <p className="c-muted truncate text-[12.5px]">{error}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setError(null);
+              setReloadAt(Date.now());
+            }}
+            className="c-pressable shrink-0 rounded-full px-3.5 py-1.5 text-[13px] font-semibold"
+            style={{ background: "var(--c-fill)" }}
+          >
+            重试
+          </button>
+        </div>
+      )}
       {presets !== null && connected.length === 0 && groups.length === 0 && (
         <EmptyState title="还没有连接任何服务" body="邮箱、日历、地图等服务接入后，它就能直接替你操作。" />
       )}
@@ -343,18 +364,67 @@ export function IdeasView({ active, onDo }: { active: boolean; onDo: (prompt: st
           </button>
         }
       />
-      {error && <p className="c-danger px-5 pb-2 text-sm">{error}</p>}
+      {error && payload && (
+        <div className="c-card mx-4 mb-3 flex items-center gap-3 rounded-2xl px-4 py-3" role="alert">
+          <AlertCircle className="c-danger h-4 w-4 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 flex-1 truncate text-[13.5px]">{error}</span>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => void run(true)}
+            className="c-pressable shrink-0 rounded-full px-3 py-1 text-[13px] font-semibold disabled:opacity-50"
+            style={{ background: "var(--c-fill)" }}
+          >
+            重试
+          </button>
+        </div>
+      )}
+      {loading && payload && (
+        <div
+          className="c-card mx-4 mb-2 flex items-center gap-2.5 rounded-2xl px-4 py-2.5 text-[13.5px]"
+          role="status"
+        >
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin" style={{ color: "var(--c-primary)" }} aria-hidden="true" />
+          <span>正在结合最新聊天换一批点子…</span>
+        </div>
+      )}
       {loading && !payload ? (
         <div className="flex flex-col items-center px-8 pt-12 text-center" role="status">
           <CompanionPet size={64} animation="review" />
+          <p className="mt-4 flex items-center gap-2 text-[15px] font-medium">
+            <Loader2 className="h-4 w-4 animate-spin" style={{ color: "var(--c-primary)" }} aria-hidden="true" />
+            正在构思能顺手帮你的事…
+          </p>
+          <p className="c-muted mt-1 text-[13px]">结合最近的聊天与记忆挑选中</p>
+        </div>
+      ) : error && !payload ? (
+        <div className="c-card mx-5 mt-4 flex flex-col items-center rounded-3xl px-6 py-7 text-center" role="alert">
+          <AlertCircle className="c-danger h-7 w-7" aria-hidden="true" />
+          <p className="mt-2.5 text-[15.5px] font-semibold">点子没加载出来</p>
+          <p className="c-muted mt-1 max-w-xs text-[13.5px] leading-relaxed">{error}</p>
+          <button
+            type="button"
+            onClick={() => void run(false)}
+            className="c-primary mt-4 min-h-10 rounded-full px-5 text-[14px] font-semibold"
+          >
+            重试
+          </button>
         </div>
       ) : !payload?.ideas.length ? (
-        <div className="flex flex-col items-center gap-2 px-8 pt-14 text-center">
+        <div className="flex flex-col items-center gap-2 px-8 pt-12 text-center">
           <CompanionPet size={64} animation="idle" />
-          <p className="mt-2 text-[15px] font-medium">暂时还没有新点子</p>
+          <p className="mt-2 text-[16px] font-semibold">暂时还没有新点子</p>
           <p className="c-muted max-w-xs text-[13.5px] leading-relaxed">
-            多跟它聊几句你的日常和打算，或点右上角刷新，它就会想到能顺手帮你的事。
+            多跟它聊几句你的日常和打算，或者现在让它结合记忆想几个能顺手帮你的事。
           </p>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => void run(true)}
+            className="c-primary mt-3 inline-flex min-h-11 items-center gap-1.5 rounded-full px-5 text-[14.5px] font-semibold disabled:opacity-50"
+          >
+            <Sparkles className="h-4 w-4" aria-hidden="true" /> 现在想几个
+          </button>
         </div>
       ) : (
         // A plain list, one idea per row: tap it and it starts.
