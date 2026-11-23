@@ -148,7 +148,7 @@ final class RecentPhotos: ObservableObject {
         }
     }
 
-    private static func shouldIgnoreDegraded(_ info: [AnyHashable: Any]?) -> Bool {
+    nonisolated private static func shouldIgnoreDegraded(_ info: [AnyHashable: Any]?) -> Bool {
         let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
         let isCancelled = (info?[PHImageCancelledKey] as? Bool) == true
         let hasError = info?[PHImageErrorKey] != nil
@@ -165,7 +165,7 @@ final class RecentPhotos: ObservableObject {
             let url: URL? = await withCheckedContinuation { continuation in
                 let box = OnceBox(continuation)
                 PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { video, _, info in
-                    if shouldIgnoreDegraded(info) { return }
+                    if Self.shouldIgnoreDegraded(info) { return }
                     box.resume(returning: (video as? AVURLAsset)?.url)
                 }
             }
@@ -182,7 +182,7 @@ final class RecentPhotos: ObservableObject {
         return await withCheckedContinuation { continuation in
             let box = OnceBox(continuation)
             PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, uti, _, info in
-                if shouldIgnoreDegraded(info) { return }
+                if Self.shouldIgnoreDegraded(info) { return }
                 guard let data else { box.resume(returning: nil); return }
                 let type = uti.flatMap { UTType($0) } ?? .jpeg
                 box.resume(returning: (data, "照片.\(type.preferredFilenameExtension ?? "jpg")", type.preferredMIMEType ?? "image/jpeg"))
