@@ -6,6 +6,7 @@ import {
   Clock,
   CreditCard,
   Globe,
+  Loader2,
   Mail,
   Plug,
   ShieldAlert,
@@ -305,7 +306,7 @@ export function ApprovalCard({
               <button
                 type="button"
                 onClick={() => setExpanded((value) => !value)}
-                className="c-muted mt-1 min-h-11 text-[13px] font-medium"
+                className="c-muted mt-1 min-h-11 rounded-full px-2 text-[13px] font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--c-primary)] motion-reduce:transition-none"
                 aria-expanded={expanded}
               >
                 {expanded ? "收起" : "展开全文"}
@@ -314,7 +315,7 @@ export function ApprovalCard({
           </div>
         )}
 
-        <div className="mt-4">
+        <div className="mt-4" aria-busy={busy !== null}>
           {pending ? (
             // As on nanoMuse: one stacked column — this once (the main button), the standing yeses, no.
             <div className="flex flex-col gap-2">
@@ -322,11 +323,14 @@ export function ApprovalCard({
                 type="button"
                 disabled={busy !== null || expired}
                 onClick={() => decide("approve", "once")}
-                className={`min-h-[46px] w-full rounded-full text-[15px] font-semibold transition active:scale-[0.98] disabled:opacity-60 ${
+                className={`inline-flex min-h-[46px] w-full items-center justify-center gap-1.5 rounded-full text-[15px] font-semibold transition active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--c-primary)] disabled:opacity-60 motion-reduce:transition-none motion-reduce:active:scale-100 ${
                   destructive ? "text-white" : paying ? "bg-amber-600 text-white" : "c-primary"
                 }`}
                 style={destructive ? { background: "var(--c-danger-fill)" } : undefined}
               >
+                {busy === "approve" && scope === "once" && (
+                  <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                )}
                 {expired
                   ? "已超时失效"
                   : busy === "approve" && scope === "once"
@@ -342,23 +346,34 @@ export function ApprovalCard({
                     type="button"
                     disabled={busy !== null}
                     onClick={() => decide("approve", option)}
-                    className="c-pressable min-h-11 w-full truncate rounded-full px-4 text-[15px] font-medium transition active:scale-[0.98] disabled:opacity-60"
+                    className="c-pressable inline-flex min-h-11 w-full items-center justify-center gap-1.5 truncate rounded-full px-4 text-[15px] font-medium transition active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--c-primary)] disabled:opacity-60 motion-reduce:transition-none motion-reduce:active:scale-100"
                     style={{ background: "var(--c-fill)" }}
                   >
-                    {busy === "approve" && scope === option ? `${copy.confirm}中…` : standingLabel(option, subject)}
+                    {busy === "approve" && scope === option && (
+                      <Loader2 className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                    )}
+                    <span className="truncate">
+                      {busy === "approve" && scope === option ? `${copy.confirm}中…` : standingLabel(option, subject)}
+                    </span>
                   </button>
                 ))}
               <button
                 type="button"
                 disabled={busy !== null}
                 onClick={() => decide("reject", "once")}
-                className="c-pressable min-h-11 w-full rounded-full text-[15px] font-medium transition active:scale-[0.98] disabled:opacity-60"
+                className="c-pressable inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-full text-[15px] font-medium transition active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--c-primary)] disabled:opacity-60 motion-reduce:transition-none motion-reduce:active:scale-100"
                 style={{ background: "var(--c-fill)" }}
               >
+                {busy === "reject" && <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />}
                 {busy === "reject" ? "取消中…" : action === "goal_plan" ? "保持原样" : "不要"}
               </button>
               {onLater && (
-                <button type="button" onClick={onLater} disabled={busy !== null} className="c-muted min-h-9 self-center text-[13px]">
+                <button
+                  type="button"
+                  onClick={onLater}
+                  disabled={busy !== null}
+                  className="c-muted min-h-11 self-center rounded-full px-4 text-[13.5px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--c-primary)] motion-reduce:transition-none"
+                >
                   稍后再说
                 </button>
               )}
@@ -367,9 +382,10 @@ export function ApprovalCard({
             <StatusLine approval={approval} done={approval.scope && approval.scope !== "once" ? `${copy.done}，${SCOPE_LABELS[approval.scope]}不再问` : copy.done} />
           )}
           {error && (
-            <p className="c-danger mt-2 text-[13px]" role="alert">
-              {error}
-            </p>
+            <div className="mt-2.5 flex items-start gap-2 rounded-xl px-3 py-2 text-[13px]" style={{ background: "var(--c-fill)" }} role="alert">
+              <CircleAlert className="c-danger mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              <span className="c-danger min-w-0 flex-1 leading-snug">{error}</span>
+            </div>
           )}
         </div>
       </section>
