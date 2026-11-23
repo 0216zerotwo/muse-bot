@@ -140,7 +140,12 @@ export function Viewer({
     const onKey = (event: KeyboardEvent) => {
       if (event.ctrlKey || event.metaKey || event.altKey) return;
       const target = event.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)
+      ) {
+        return;
+      }
       if (event.key === "ArrowLeft") setIndex((i) => Math.max(0, i - 1));
       else if (event.key === "ArrowRight") setIndex((i) => Math.min(items.length - 1, i + 1));
       else if (isImage && (event.key === "+" || event.key === "=")) {
@@ -234,7 +239,7 @@ export function Viewer({
       </header>
 
       <div className="relative min-h-0 flex-1" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
-        <ViewerBody key={item.key} item={item} zoom={zoom} onToggleZoom={toggleZoom} />
+        <ViewerBody key={`${item.key}:${item.url}`} item={item} zoom={zoom} onToggleZoom={toggleZoom} />
         {items.length > 1 && !zoomed && (
           <>
             {index > 0 && (
@@ -371,11 +376,26 @@ function ViewerAction({
 
 function ViewerBody({ item, zoom, onToggleZoom }: { item: ViewerItem; zoom: number; onToggleZoom: () => void }) {
   const scroller = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
   const focus = useRef<{ x: number; y: number }>({ x: 0.5, y: 0.5 });
   const [imgState, setImgState] = useState<"loading" | "loaded" | "error">("loading");
   const [videoFailed, setVideoFailed] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
   const zoomed = zoom > 1;
+
+  useEffect(() => {
+    setImgState("loading");
+    setVideoFailed(false);
+  }, [item.url]);
+
+  // Cached images already loaded before mount may skip onLoad; clear the spinner immediately.
+  useEffect(() => {
+    if (item.kind !== "image") return;
+    const node = imgRef.current;
+    if (node && node.complete && node.naturalWidth > 0) {
+      setImgState("loaded");
+    }
+  }, [item.kind, item.url, retryKey]);
 
   // Zooming in keeps the spot that was tapped in the middle.
   useEffect(() => {
@@ -443,6 +463,7 @@ function ViewerBody({ item, zoom, onToggleZoom }: { item: ViewerItem; zoom: numb
           </div>
         )}
         <img
+          ref={imgRef}
           key={retryKey}
           src={item.url}
           alt={item.title}

@@ -107,10 +107,10 @@ describe("Viewer zoom controls, keyboard shortcuts, and error/loading recovery",
     expect(resetBtn).toHaveTextContent("100%");
   });
 
-  it("shows broken image error card and recovers on retry", () => {
-    render(
+  it("shows broken image error card, recovers on retry, and resets when item.url refreshes for the same key", () => {
+    const { rerender } = render(
       <Viewer
-        items={[{ key: "img-err", kind: "image", url: "/media/broken.png", name: "broken.png", title: "损坏图片" }]}
+        items={[{ key: "img-err", kind: "image", url: "/media/broken.png?sig=1", name: "broken.png", title: "损坏图片" }]}
         start={0}
         onClose={vi.fn()}
       />,
@@ -119,8 +119,44 @@ describe("Viewer zoom controls, keyboard shortcuts, and error/loading recovery",
     fireEvent.error(screen.getByRole("img", { name: "损坏图片" }));
     expect(screen.getByRole("alert")).toHaveTextContent("图片加载失败");
 
+    // Same key with refreshed URL automatically resets error state without manual retry click
+    rerender(
+      <Viewer
+        items={[{ key: "img-err", kind: "image", url: "/media/broken.png?sig=2", name: "broken.png", title: "损坏图片" }]}
+        start={0}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    const refreshedImg = screen.getByRole("img", { name: "损坏图片" });
+    expect(refreshedImg).toHaveAttribute("src", "/media/broken.png?sig=2");
+
+    // Error again -> manual retry button recovers
+    fireEvent.error(refreshedImg);
+    expect(screen.getByRole("alert")).toHaveTextContent("图片加载失败");
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
-    expect(screen.getByRole("img", { name: "损坏图片" })).toBeInTheDocument();
+    fireEvent.load(screen.getByRole("img", { name: "损坏图片" }));
+    expect(screen.queryByRole("status", { name: "正在加载图片" })).not.toBeInTheDocument();
+  });
+
+  it("clears the loading spinner immediately for already-cached complete images", () => {
+    const completeDesc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "complete");
+    const widthDesc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "naturalWidth");
+    Object.defineProperty(HTMLImageElement.prototype, "complete", { configurable: true, get: () => true });
+    Object.defineProperty(HTMLImageElement.prototype, "naturalWidth", { configurable: true, get: () => 640 });
+    try {
+      render(
+        <Viewer
+          items={[{ key: "img-cached", kind: "image", url: "/media/cached.png", name: "cached.png", title: "缓存图" }]}
+          start={0}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(screen.queryByRole("status", { name: "正在加载图片" })).not.toBeInTheDocument();
+    } finally {
+      if (completeDesc) Object.defineProperty(HTMLImageElement.prototype, "complete", completeDesc);
+      if (widthDesc) Object.defineProperty(HTMLImageElement.prototype, "naturalWidth", widthDesc);
+    }
   });
 
   it("shows retryable error state for broken text documents and clear PDF guidance", async () => {
