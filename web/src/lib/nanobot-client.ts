@@ -197,6 +197,8 @@ export class NanobotClient {
   private runtimeModelHandlers = new Set<RuntimeModelHandler>();
   private sessionUpdateHandlers = new Set<SessionUpdateHandler>();
   private sidebarStateUpdateHandlers = new Set<SidebarStateUpdateHandler>();
+  private feedUpdateHandlers = new Set<() => void>();
+  private approvalUpdateHandlers = new Set<() => void>();
   private runStatusHandlers = new Set<RunStatusHandler>();
   private errorHandlers = new Set<ErrorHandler>();
   // chat_id -> handlers listening on it
@@ -274,9 +276,19 @@ export class NanobotClient {
     }
   }
 
+  /** Refresh the HTTP attachment upload Bearer token after bootstrap token renewal. */
+  updateUploadToken(token: string | null | undefined): void {
+    if (!token || !this.upload) return;
+    this.upload = { ...this.upload, token };
+  }
+
   onStatus(handler: StatusHandler): Unsubscribe {
     this.statusHandlers.add(handler);
-    handler(this.status_);
+    try {
+      handler(this.status_);
+    } catch {
+      // best-effort: subscriber fault must not break registration
+    }
     return () => {
       this.statusHandlers.delete(handler);
     };
@@ -303,10 +315,28 @@ export class NanobotClient {
     };
   }
 
+  onFeedUpdate(handler: () => void): Unsubscribe {
+    this.feedUpdateHandlers.add(handler);
+    return () => {
+      this.feedUpdateHandlers.delete(handler);
+    };
+  }
+
+  onApprovalUpdate(handler: () => void): Unsubscribe {
+    this.approvalUpdateHandlers.add(handler);
+    return () => {
+      this.approvalUpdateHandlers.delete(handler);
+    };
+  }
+
   onRunStatus(handler: RunStatusHandler): Unsubscribe {
     this.runStatusHandlers.add(handler);
     for (const [chatId, startedAt] of this.runStartedAtByChatId) {
-      handler(chatId, startedAt);
+      try {
+        handler(chatId, startedAt);
+      } catch {
+        // best-effort: subscriber fault must not break registration
+      }
     }
     return () => {
       this.runStatusHandlers.delete(handler);
@@ -817,7 +847,11 @@ export class NanobotClient {
       const flushed = pending.splice(0);
       this.pendingInboundByChat.delete(chatId);
       for (const ev of flushed) {
-        handler(ev);
+        try {
+          handler(ev);
+        } catch {
+          // best-effort: subscriber fault must not abort queued replay
+        }
       }
     }
     this.attach(chatId);
@@ -849,6 +883,22 @@ export class NanobotClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.pendingNewChat) {
+      clearTimeout(this.pendingNewChat.timer);
+      this.pendingNewChat.reject(new Error("socket closed"));
+      this.pendingNewChat = null;
+    }
+    this.rejectAllTranscriptions("socket closed");
+    for (const pending of this.pendingWebUIRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new WebUIMutationError(503, "Socket closed before WebUI response"));
+    }
+    this.pendingWebUIRequests.clear();
+    for (const pending of this.pendingSystemCommands.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("socket closed"));
+    }
+    this.pendingSystemCommands.clear();
     const sock = this.socket;
     this.socket = null;
     try {
@@ -933,7 +983,15 @@ export class NanobotClient {
     timeoutMs: number = 20_000,
   ): Promise<T> {
     const socket = this.socket;
-    if (!socket || socket.readyState !== WS_OPEN) {
+    const isOpen = socket?.readyState === WS_OPEN;
+    const canQueue =
+      !this.intentionallyClosed
+      && (
+        socket?.readyState === 0
+        || this.reconnectTimer !== null
+        || (this.shouldReconnect && this.status_ !== "idle")
+      );
+    if (!isOpen && !canQueue) {
       return Promise.reject(
         new WebUIMutationError(503, "WebUI connection is not open"),
       );
@@ -974,12 +1032,17 @@ export class NanobotClient {
         timer,
         serializedFrame,
       });
-      try {
-        socket.send(serializedFrame);
-      } catch {
-        clearTimeout(timer);
-        this.pendingWebUIRequests.delete(requestId);
-        reject(new WebUIMutationError(503, "Could not send WebUI request"));
+      if (isOpen && socket) {
+        try {
+          socket.send(serializedFrame);
+        } catch {
+          if (!canQueue) {
+            clearTimeout(timer);
+            this.pendingWebUIRequests.delete(requestId);
+            reject(new WebUIMutationError(503, "Could not send WebUI request"));
+          }
+          // Otherwise keep in pendingWebUIRequests so handleOpen replays on reconnect.
+        }
       }
     });
   }
@@ -1025,7 +1088,7 @@ export class NanobotClient {
     const capability = this.upload;
     const turnId = options?.turnId ?? crypto.randomUUID();
     const stillConnected = () => this.socket === socket
-      && socket?.readyState === WS_OPEN && this.upload === capability;
+      && socket?.readyState === WS_OPEN && this.upload !== null;
     try {
       const references = await uploadAttachments(media, capability,
         typeof window !== "undefined" ? window.location.href : this.currentUrl,
@@ -1129,7 +1192,13 @@ export class NanobotClient {
   private setStatus(status: ConnectionStatus): void {
     if (this.status_ === status) return;
     this.status_ = status;
-    for (const handler of this.statusHandlers) handler(status);
+    for (const handler of this.statusHandlers) {
+      try {
+        handler(status);
+      } catch {
+        // best-effort: subscriber fault must not stall transport bookkeeping
+      }
+    }
   }
 
   private clearRunStatusesForReconnect(): void {
@@ -1312,6 +1381,16 @@ export class NanobotClient {
       return;
     }
 
+    if (parsed.event === "feed_updated") {
+      this.emitFeedUpdate();
+      return;
+    }
+
+    if (parsed.event === "approval_updated") {
+      this.emitApprovalUpdate();
+      return;
+    }
+
     if (parsed.event === "error" && parsed.detail === "workspace_scope_rejected") {
       this.emitError({
         kind: "workspace_scope_rejected",
@@ -1346,7 +1425,11 @@ export class NanobotClient {
 
   private emitRuntimeModelUpdate(modelName: string | null, modelPreset?: string | null): void {
     for (const handler of this.runtimeModelHandlers) {
-      handler(modelName, modelPreset);
+      try {
+        handler(modelName, modelPreset);
+      } catch {
+        // best-effort
+      }
     }
   }
 
@@ -1356,19 +1439,51 @@ export class NanobotClient {
     workspaceScope?: WorkspaceScopePayload,
   ): void {
     for (const handler of this.sessionUpdateHandlers) {
-      handler(chatId, scope, workspaceScope);
+      try {
+        handler(chatId, scope, workspaceScope);
+      } catch {
+        // best-effort
+      }
     }
   }
 
   private emitSidebarStateUpdate(state: SidebarStatePayload): void {
     for (const handler of this.sidebarStateUpdateHandlers) {
-      handler(state);
+      try {
+        handler(state);
+      } catch {
+        // best-effort
+      }
+    }
+  }
+
+  private emitFeedUpdate(): void {
+    for (const handler of this.feedUpdateHandlers) {
+      try {
+        handler();
+      } catch {
+        // best-effort
+      }
+    }
+  }
+
+  private emitApprovalUpdate(): void {
+    for (const handler of this.approvalUpdateHandlers) {
+      try {
+        handler();
+      } catch {
+        // best-effort
+      }
     }
   }
 
   private emitRunStatus(chatId: string, startedAt: number | null): void {
     for (const handler of this.runStatusHandlers) {
-      handler(chatId, startedAt);
+      try {
+        handler(chatId, startedAt);
+      } catch {
+        // best-effort
+      }
     }
   }
 
@@ -1376,7 +1491,12 @@ export class NanobotClient {
     const handlers = this.chatHandlers.get(chatId);
     if (handlers !== undefined && handlers.size > 0) {
       for (const h of handlers) {
-        h(ev);
+        try {
+          h(ev);
+        } catch {
+          // Isolate listener errors (e.g. unsupported Notification constructor in WebView)
+          // so remaining subscribers and turn bookkeeping still run.
+        }
       }
       return;
     }

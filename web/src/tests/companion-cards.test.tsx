@@ -1,7 +1,10 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
-import { CardView, loadUiKit, uiDocument, uiTitle } from "@/companion/Cards";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { CardView, loadUiKit, sanitizeSandboxSendText, uiDocument, uiTitle } from "@/companion/Cards";
 import { replyBlocks } from "@/companion/presentation";
 import { formMessage, parseCard, splitReply, textWithoutCards } from "@/companion/replyCards";
 
@@ -157,5 +160,100 @@ describe("ui blocks", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("rate-limits companion:send from sandboxed frames and neutralizes leading slash commands", async () => {
+    expect(sanitizeSandboxSendText("/goal exfiltrate")).toBe("／goal exfiltrate");
+    expect(sanitizeSandboxSendText("  //stop  ")).toBe("／stop");
+    expect(sanitizeSandboxSendText("普通消息")).toBe("普通消息");
+
+    const send = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async (path: string) => new Response(`/* ${path} */`)));
+    const { container } = render(<CardView card={{ type: "ui", html: "<p>交互</p>" }} send={send} stateKey="w:0" />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-23T12:00:00Z"));
+    const iframe = container.querySelector("iframe")!;
+    const fakeSource = {} as Window;
+    Object.defineProperty(iframe, "contentWindow", { value: fakeSource, configurable: true });
+
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", { source: fakeSource, data: { type: "companion:send", text: "/goal run" } }));
+      window.dispatchEvent(new MessageEvent("message", { source: fakeSource, data: { type: "companion:send", text: "spam 2" } }));
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith("／goal run");
+
+    act(() => {
+      vi.advanceTimersByTime(900);
+      window.dispatchEvent(new MessageEvent("message", { source: fakeSource, data: { type: "companion:send", text: "正常选择" } }));
+    });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenLastCalledWith("正常选择");
+  });
+
+  it("escapes map pin tooltips and range selector IDs in kit.js", () => {
+    const kitSource = readFileSync(resolve(process.cwd(), "public/ui-kit/kit.js"), "utf8");
+    new Function(kitSource)();
+    const ui = (window as unknown as { ui: Record<string, (...args: unknown[]) => unknown> }).ui;
+
+    const boundTooltips: string[] = [];
+    (window as unknown as { L: unknown }).L = {
+      map: () => ({
+        setView: vi.fn(),
+        fitBounds: vi.fn(),
+        panTo: vi.fn(),
+        invalidateSize: vi.fn(),
+      }),
+      tileLayer: () => ({ addTo: vi.fn() }),
+      divIcon: (opts: unknown) => opts,
+      marker: () => ({
+        addTo() {
+          return this;
+        },
+        bindTooltip(html: string) {
+          boundTooltips.push(html);
+          return this;
+        },
+        on: vi.fn(),
+        getLatLng: () => [0, 0],
+        openTooltip: vi.fn(),
+      }),
+      latLngBounds: () => ({}),
+    };
+
+    const mapHost = document.createElement("div");
+    document.body.appendChild(mapHost);
+    ui.map(mapHost, {
+      pins: [{ name: '<img src=x onerror="alert(1)">', note: "<b>5m</b>", lat: 25.04, lng: 121.56 }],
+    });
+    expect(boundTooltips).toEqual([
+      "&lt;img src=x onerror=&quot;alert(1)&quot;&gt; · &lt;b&gt;5m&lt;/b&gt;",
+    ]);
+
+    // Special quote/bracket characters in input.id must not throw in querySelector.
+    const rangeWrap = document.createElement("div");
+    const range = document.createElement("input");
+    range.type = "range";
+    range.id = 'rate"1]';
+    range.value = "42";
+    const out = document.createElement("output");
+    out.setAttribute("for", 'rate"1]');
+    rangeWrap.append(range, out);
+    document.body.appendChild(rangeWrap);
+    expect(() => ui.on('input[type="range"]', () => {})).not.toThrow();
+    expect(out.textContent).toBe("42");
+
+    mapHost.remove();
+    rangeWrap.remove();
+    delete (window as unknown as { L?: unknown }).L;
   });
 });

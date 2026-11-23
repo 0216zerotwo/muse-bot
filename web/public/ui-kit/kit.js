@@ -97,13 +97,30 @@
     return el.value;
   };
 
+  var escHtml = function (value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  };
+  var findOutput = function (id) {
+    if (!id) return null;
+    var list = document.querySelectorAll("output[for]");
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].getAttribute("for") === id) return list[i];
+    }
+    return null;
+  };
+
   /** Run render() now and whenever any matching control changes. */
   ui.on = function (selector, render) {
     var run = function () {
       try { render(); } catch (e) { console.error(e); }
       // Range inputs show their value in a sibling <output> when there is one.
       document.querySelectorAll("input[type=range]").forEach(function (input) {
-        var out = input.id && document.querySelector('output[for="' + input.id + '"]');
+        var out = findOutput(input.id);
         if (out && !out.dataset.manual) out.textContent = input.value + (out.dataset.unit || "");
       });
       report();
@@ -229,7 +246,7 @@
     var markers = pins.map(function (p, i) {
       var icon = L.divIcon({ className: "", html: '<div class="map-pin" data-pin="' + i + '">' + (i + 1) + "</div>", iconSize: [24, 24], iconAnchor: [12, 12] });
       var marker = L.marker([Number(p.lat), Number(p.lng)], { icon: icon }).addTo(map);
-      if (p.name) marker.bindTooltip(p.name + (p.note ? " · " + p.note : ""), { direction: "top", offset: [0, -12] });
+      if (p.name) marker.bindTooltip(escHtml(p.name) + (p.note ? " · " + escHtml(p.note) : ""), { direction: "top", offset: [0, -12] });
       marker.on("click", function () { ui.focusStop(i); });
       return marker;
     });

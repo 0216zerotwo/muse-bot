@@ -283,13 +283,26 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const target = new URL(event.notification.data?.url || COMPANION_URL, self.location.origin);
+  let target;
+  try {
+    const candidate = new URL(event.notification.data?.url || COMPANION_URL, self.location.origin);
+    target = candidate.origin === self.location.origin ? candidate : new URL(COMPANION_URL, self.location.origin);
+  } catch {
+    target = new URL(COMPANION_URL, self.location.origin);
+  }
   event.waitUntil(
     self.clients
       .matchAll({ type: "window", includeUncontrolled: true })
       .then((windows) => {
         // Prefer an open companion window over opening another one.
-        const existing = windows.find((client) => new URL(client.url).pathname === target.pathname);
+        const existing = windows.find((client) => {
+          try {
+            const clientUrl = new URL(client.url);
+            return clientUrl.origin === target.origin && clientUrl.pathname === target.pathname;
+          } catch {
+            return false;
+          }
+        });
         if (existing) return existing.focus();
         return self.clients.openWindow(target.href);
       })

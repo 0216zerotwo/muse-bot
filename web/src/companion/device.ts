@@ -42,11 +42,33 @@ export function clearDeviceToken(): void {
 
 /** A pairing code passed in the link (``…/companion.html#pair=ABCD-2345``), taken out of the URL. */
 export function consumePairCode(): string {
-  const match = /(?:^#|&)pair=([^&]+)/.exec(window.location.hash);
-  if (!match) return "";
-  const rest = window.location.hash.replace(match[0], "").replace(/^#&?/, "");
-  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ""}`);
-  return decodeURIComponent(match[1]);
+  const rawHash = window.location.hash;
+  if (!rawHash) return "";
+  const body = rawHash.startsWith("#") ? rawHash.slice(1) : rawHash;
+  const parts = body.split("&").filter(Boolean);
+  let rawCode: string | null = null;
+  const kept: string[] = [];
+  for (const part of parts) {
+    const eq = part.indexOf("=");
+    const key = eq >= 0 ? part.slice(0, eq) : part;
+    if (key === "pair" && rawCode === null) {
+      rawCode = eq >= 0 ? part.slice(eq + 1) : "";
+    } else {
+      kept.push(part);
+    }
+  }
+  if (rawCode === null) return "";
+  const nextHash = kept.length > 0 ? `#${kept.join("&")}` : "";
+  try {
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${nextHash}`);
+  } catch {
+    // History replacement can fail in restricted frames; continue with the extracted code.
+  }
+  try {
+    return decodeURIComponent(rawCode);
+  } catch {
+    return rawCode;
+  }
 }
 
 /** A name for the device list: "iPhone", "Android 手机", "Windows 电脑"… */
@@ -80,8 +102,10 @@ export async function pairDevice(code: string): Promise<{ device_id: string; tok
     throw new PairError("offline");
   }
   if (res.ok) return (await res.json()) as { device_id: string; token: string };
+  if (res.status >= 500 || res.status === 0) throw new PairError("offline");
   const body = (await res.json().catch(() => ({}))) as { error?: string };
-  throw new PairError(body.error === "locked" ? "locked" : "wrong_code");
+  if (res.status === 429 || body.error === "locked") throw new PairError("locked");
+  throw new PairError("wrong_code");
 }
 
 export interface PairedDevice {

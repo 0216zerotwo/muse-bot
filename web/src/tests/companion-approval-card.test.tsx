@@ -72,4 +72,33 @@ describe("ApprovalCard", () => {
     expect(screen.getByText("张三 13800000000")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "「发到 forms.example.com」一直允许" })).toBeInTheDocument();
   });
+
+  it("normalizes `to` comma-separated recipients and numeric `email_ids`", () => {
+    const { unmount } = render(
+      <ApprovalCard
+        approval={record({
+          tool_name: "mcp__email__send_email",
+          action: "send_email",
+          arguments: { to: "alice@example.com, bob@example.com", subject: "周报" },
+          scopes: ["once", "24h"],
+        })}
+        onDecide={vi.fn(async () => {})}
+      />,
+    );
+    expect(screen.getByText("alice@example.com、bob@example.com")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "24 小时内「发给 alice@example.com、bob@example.com」都允许" })).toBeInTheDocument();
+    unmount();
+
+    render(
+      <ApprovalCard
+        approval={record({
+          tool_name: "mcp__email__delete_emails",
+          action: "delete_emails",
+          arguments: { email_ids: [101, 102, 103] },
+        })}
+        onDecide={vi.fn(async () => {})}
+      />,
+    );
+    expect(screen.getByText("3 封")).toBeInTheDocument();
+  });
 });

@@ -110,12 +110,24 @@ export function filePageDocument(html: string): string {
   const policy =
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; " +
     "media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'";
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${policy}">`;
-  for (const tag of [/<head\b[^>]*>/i, /<html\b[^>]*>/i, /^\s*<!doctype[^>]*>/i]) {
-    const match = tag.exec(html);
-    if (match) return html.slice(0, match.index + match[0].length) + meta + html.slice(match.index + match[0].length);
+  if (typeof DOMParser !== "undefined") {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    let head = doc.head;
+    if (!head) {
+      head = doc.createElement("head");
+      doc.documentElement.insertBefore(head, doc.documentElement.firstChild);
+    } else if (doc.documentElement.firstChild !== head) {
+      doc.documentElement.insertBefore(head, doc.documentElement.firstChild);
+    }
+    const meta = doc.createElement("meta");
+    meta.setAttribute("http-equiv", "Content-Security-Policy");
+    meta.setAttribute("content", policy);
+    head.insertBefore(meta, head.firstChild);
+    return `<!doctype html>${doc.documentElement.outerHTML}`;
   }
-  return meta + html;
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${policy}">`;
+  const safeBody = html.replace(/<\/?(?:html|head|body)\b[^>]*>|<!doctype[^>]*>/gi, "");
+  return `<!doctype html><html><head>${meta}</head><body>${safeBody}</body></html>`;
 }
 
 /** A reply as it is read out: its words only (no cards, links' addresses, Markdown marks). */

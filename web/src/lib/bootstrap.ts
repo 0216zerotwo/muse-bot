@@ -117,7 +117,7 @@ export function deriveWsUrl(
       ? `[${window.location.hostname}]`
       : window.location.hostname;
     let scheme = "ws";
-    let port = "8765";
+    let port = "8766";
     if (wsUrl && /^wss?:\/\//i.test(wsUrl)) {
       const upstream = new URL(wsUrl);
       scheme = upstream.protocol === "wss:" ? "wss" : "ws";
@@ -132,7 +132,7 @@ export function deriveWsUrl(
     return `${wsUrl}${join}token=${encodeURIComponent(token)}`;
   }
   if (typeof window === "undefined") {
-    return `ws://127.0.0.1:8765${path}${query}`;
+    return `ws://127.0.0.1:8766${path}${query}`;
   }
   const scheme = window.location.protocol === "https:" ? "wss" : "ws";
   const host = window.location.host;

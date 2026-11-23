@@ -768,6 +768,15 @@ export function uiDocument(html: string, kit: UiKit, tokens: Record<string, stri
   ].join("\n");
 }
 
+const SANDBOX_SEND_COOLDOWN_MS = 800;
+
+/** Neutralize leading slash commands from sandboxed UI/widget frames and cap message size. */
+export function sanitizeSandboxSendText(raw: string): string {
+  const trimmed = raw.trim().slice(0, 2000);
+  if (!trimmed) return "";
+  return trimmed.startsWith("/") ? trimmed.replace(/^\/+/, "／") : trimmed;
+}
+
 /**
  * A sandboxed answer page (a ```ui block, or a page file the server signed). Its scripts run in
  * their own origin with no access to the app; it talks back only through postMessage: its height,
@@ -788,6 +797,7 @@ function SandboxFrame({
   fixedHeight?: number;
 }) {
   const frame = useRef<HTMLIFrameElement>(null);
+  const lastSendAt = useRef(0);
   const [height, setHeight] = useState(fixedHeight ?? 240);
   const [expanded, setExpanded] = useState(false);
   const [srcDoc, setSrcDoc] = useState<string | undefined>(undefined);
@@ -807,9 +817,14 @@ function SandboxFrame({
     const onMessage = (event: MessageEvent) => {
       if (event.source !== frame.current?.contentWindow) return;
       const data = event.data as { type?: string; text?: unknown; height?: unknown };
-      if (data?.type === "companion:send" && typeof data.text === "string" && data.text.trim() && send) {
+      if (data?.type === "companion:send" && typeof data.text === "string" && send) {
+        const clean = sanitizeSandboxSendText(data.text);
+        if (!clean) return;
+        const now = Date.now();
+        if (lastSendAt.current > 0 && now - lastSendAt.current < SANDBOX_SEND_COOLDOWN_MS) return;
+        lastSendAt.current = now;
         setExpanded(false);
-        send(data.text.trim().slice(0, 2000));
+        send(clean);
       } else if (data?.type === "companion:height" && typeof data.height === "number" && !fixedHeight) {
         setHeight(Math.min(Math.max(data.height, 80), 2000));
       }
