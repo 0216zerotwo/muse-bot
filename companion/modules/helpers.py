@@ -64,8 +64,9 @@ _MAX_NAME = 12
 _MAX_TITLE = 16
 # How many helpers deep work may be passed on (a helper asking one, which asks another).
 _MAX_CHAIN = 3
-# A helper's chat -> the chat waiting for its answer, while a helper asked it.
+# A helper's chat -> the active chat waiting for its answer, plus FIFO queue of concurrent waiters.
 _asking: dict[str, str] = {}
+_asking_queue: dict[str, list[tuple[str, str]]] = {}
 _MAX_INSTRUCTIONS = 2000
 _ASK_TIMEOUT_S = 15 * 60
 _BACKGROUND_TIMEOUT_S = 60 * 60  # work handed off to run in the background (helper_ask wait=false)
@@ -763,11 +764,6 @@ def _handle_ask(args: dict[str, Any], **kwargs: Any) -> str:
         else:
             # From its own chat (as Grok Bot's chief of staff): the answer shows there. Waited
             # for, and never back up the chain (two helpers each waiting on the other).
-            chain = _chain_of(origin)
-            if helper["chat_id"] in chain:
-                return _result(success=False, error=f"「{helper['name']}」正在等你的结果，不能再交回给它")
-            if len(chain) >= _MAX_CHAIN:
-                return _result(success=False, error="已经转了好几手了，这件事你自己做完吧")
             return _ask_from_helper(origin, helper, task, goal_id)
     from .plans import log_event
 
@@ -797,23 +793,62 @@ def _handle_ask(args: dict[str, Any], **kwargs: Any) -> str:
     return _result(success=True, helper=helper["name"], answer=answer)
 
 
+def _waiters_locked(callee: str) -> list[str]:
+    out = [origin for _, origin in _asking_queue.get(callee, ())]
+    direct = _asking.get(callee)
+    if direct and direct not in out:
+        out.insert(0, direct)
+    return out
+
+
+def _ancestors_and_depth_locked(chat_id: str) -> tuple[set[str], int]:
+    """All chats waiting (directly or transitively) on ``chat_id``, and longest chain length (``chat_id`` = 1)."""
+    ancestors: set[str] = {chat_id}
+    best_depth = 1
+    frontier: list[tuple[str, int, frozenset[str]]] = [(chat_id, 1, frozenset({chat_id}))]
+    while frontier:
+        node, depth, path = frontier.pop()
+        if depth > best_depth:
+            best_depth = depth
+        if depth >= 12:
+            continue
+        for parent in _waiters_locked(node):
+            ancestors.add(parent)
+            if parent not in path:
+                frontier.append((parent, depth + 1, path | {parent}))
+    return ancestors, best_depth
+
+
 def _chain_of(chat_id: str) -> list[str]:
     """The chats waiting, one on the next, for this one's work (it first)."""
     chain = [chat_id]
     with _LOCK:
-        while chain[-1] in _asking and len(chain) < 10:
-            chain.append(_asking[chain[-1]])
+        while len(chain) < 10:
+            parents = _waiters_locked(chain[-1])
+            nxt = next((p for p in parents if p not in chain), None)
+            if nxt is None:
+                break
+            chain.append(nxt)
     return chain
 
 
 def _ask_from_helper(origin: str, helper: dict[str, Any], task: str, goal_id: str) -> str:
     from .plans import log_event
 
+    callee = helper["chat_id"]
+    token = uuid.uuid4().hex[:12]
     with _LOCK:
-        _asking[helper["chat_id"]] = origin
+        ancestors, depth = _ancestors_and_depth_locked(origin)
+        if callee in ancestors:
+            return _result(success=False, error=f"「{helper['name']}」正在等你的结果，不能再交回给它")
+        if depth >= _MAX_CHAIN:
+            return _result(success=False, error="已经转了好几手了，这件事你自己做完吧")
+        queue = _asking_queue.setdefault(callee, [])
+        queue.append((token, origin))
+        _asking[callee] = queue[0][1]
     try:
         future = asyncio.run_coroutine_threadsafe(
-            _adapter.ask_helper(origin, helper["chat_id"], task[:4000], _ASK_TIMEOUT_S), _loop)
+            _adapter.ask_helper(origin, callee, task[:4000], _ASK_TIMEOUT_S), _loop)
         answer = future.result(_ASK_TIMEOUT_S + 30)
     except TimeoutError:
         return _result(success=False, error=f"「{helper['name']}」还没做完，做完的结果在它的聊天里能看到")
@@ -821,7 +856,16 @@ def _ask_from_helper(origin: str, helper: dict[str, Any], task: str, goal_id: st
         return _result(success=False, error=str(exc) or type(exc).__name__)
     finally:
         with _LOCK:
-            _asking.pop(helper["chat_id"], None)
+            queue = _asking_queue.get(callee)
+            if queue is not None:
+                queue[:] = [item for item in queue if item[0] != token]
+                if queue:
+                    _asking[callee] = queue[0][1]
+                else:
+                    _asking_queue.pop(callee, None)
+                    _asking.pop(callee, None)
+            else:
+                _asking.pop(callee, None)
     if goal_id:
         log_event(goal_id, "helper_done", f"「{helper['name']}」做完了：{answer}", helper=helper["name"], emoji=helper.get("emoji"))
     asyncio.run_coroutine_threadsafe(_adapter.post_as_helper(origin, helper, answer), _loop).result(30)

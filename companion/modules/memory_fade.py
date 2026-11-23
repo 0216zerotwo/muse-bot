@@ -84,17 +84,22 @@ def shortened(entry: str, text: Any) -> Optional[str]:
     return prefix + short
 
 
-def _ask_short(entries: list[str]) -> dict[int, Any]:
-    from .llm import ask_json
-
-    lines = "\n".join(f"{i}. {' '.join(e.split())}" for i, e in enumerate(entries, 1))
+def _ask_short_checked(entries: list[str]) -> tuple[dict[int, Any], bool]:
     try:
+        from .llm import ask_json
+
+        lines = "\n".join(f"{i}. {' '.join(e.split())}" for i, e in enumerate(entries, 1))
         proposal = ask_json(_PROMPT, lines, timeout=90)
     except Exception as exc:  # no model now: they are shortened at the next pass
         logger.info("companion: memory fading has no model (%s)", type(exc).__name__)
-        return {}
+        return {}, False
     return {item["id"]: item.get("text") for item in proposal.get("short") or []
-            if isinstance(item, dict) and isinstance(item.get("id"), int)}
+            if isinstance(item, dict) and isinstance(item.get("id"), int)}, True
+
+
+def _ask_short(entries: list[str]) -> dict[int, Any]:
+    answers, _ = _ask_short_checked(entries)
+    return answers
 
 
 def fade(force: bool = False) -> dict[str, Any]:
@@ -113,7 +118,14 @@ def fade(force: bool = False) -> dict[str, Any]:
             _write_meta(meta)  # the clocks started for lines seen for the first time
         files = {target: file for file, (target, _) in _TARGETS.items()}
         long_ones = [(t, e, d) for t, e, d in to_shorten if len(_SECTION.sub("", e)) > _SHORT_ENOUGH]
-        answers = _ask_short([e for _, e, _ in long_ones]) if long_ones else {}
+        if long_ones:
+            if _ask_short is not _DEFAULT_ASK_SHORT:
+                # Preserve compatibility with tests that monkeypatch ``memory_fade._ask_short``.
+                answers, short_ok = _ask_short([e for _, e, _ in long_ones]), True
+            else:
+                answers, short_ok = _ask_short_checked([e for _, e, _ in long_ones])
+        else:
+            answers, short_ok = {}, True
         applied, newly_faded = [], []
         for index, (target, entry, idle) in enumerate(long_ones, 1):
             short = shortened(entry, answers.get(index))
@@ -150,7 +162,8 @@ def fade(force: bool = False) -> dict[str, Any]:
                 [e for e in _store()._entries_for(target) if e.strip()] for target, _ in _TARGETS.values()) for e in items}
             meta["seen_at"] = {k: v for k, v in meta["seen_at"].items() if k in live}
             meta["faded"] = sorted(faded & live)
-            meta["fade_pass_at"] = now
+            if short_ok or applied or newly_faded:
+                meta["fade_pass_at"] = now
             meta["changes"] = (applied[::-1] + meta["changes"])[:_CHANGES_KEPT]
             _write_meta(meta)
         faded_count = sum(1 for c in applied if c["kind"] == "fade")
@@ -159,6 +172,9 @@ def fade(force: bool = False) -> dict[str, Any]:
         return {"faded": faded_count, "forgot": len(applied) - faded_count}
     finally:
         _RUNNING.release()
+
+
+_DEFAULT_ASK_SHORT = _ask_short
 
 
 def freshness(meta: dict[str, Any], entry: str, now: float) -> tuple[int, bool]:

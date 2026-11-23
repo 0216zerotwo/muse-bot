@@ -23,6 +23,7 @@ from typing import Any
 
 from . import helpers
 from .llm import ask_json
+from .memory_learn import _chat_untouched_since
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ def _conversation(chat_store: Any, since_ms: int) -> tuple[str, int]:
     lines: list[tuple[int, str]] = []
     newest = since_ms
     for chat_id, meta in list(chat_store._read_index().items()):
-        if meta.get("desk"):
+        if meta.get("desk") or _chat_untouched_since(chat_store, chat_id, meta, since_ms):
             continue
         where = (f"和「{by_chat[chat_id]}」单聊" if chat_id in by_chat else f"群聊「{groups[chat_id]}」" if chat_id in groups
                  else "和主助理聊")

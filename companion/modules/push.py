@@ -121,7 +121,7 @@ def _valid(subscription: Any) -> bool:
 
 def add_subscription(subscription: Any) -> int:
     if not _valid(subscription):
-        raise ValueError("invalid push subscription")
+        raise ValueError("通知订阅信息无效")
     entry = {"endpoint": subscription["endpoint"],
              "keys": {"p256dh": subscription["keys"]["p256dh"], "auth": subscription["keys"]["auth"]}}
     with _LOCK:

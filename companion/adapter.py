@@ -212,6 +212,12 @@ class CompanionAdapter(BasePlatformAdapter):
         chat_id = companion_state.read_companion_state().get("chat_id")
         if not chat_id:
             return
+        with contextlib.suppress(Exception):
+            triggers.ensure_jobs()
+        with contextlib.suppress(Exception):
+            plans.ensure_jobs()
+        with contextlib.suppress(Exception):
+            feed.ensure_job()
         home = HomeChannel(platform=Platform(PLATFORM), chat_id=chat_id, name="伙伴")
         current = getattr(self.config, "home_channel", None)
         if current is not None and getattr(current, "chat_id", None) == chat_id:

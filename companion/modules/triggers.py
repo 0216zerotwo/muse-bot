@@ -129,6 +129,19 @@ def _prompt(trigger: dict[str, Any]) -> str:
                    "有的话提醒用户：什么事、几点、在哪；路上要花时间的顺便提醒出发。")
 
 
+def _schedule_for(trigger: dict[str, Any]) -> str:
+    if trigger["kind"] == "webhook":
+        # A webhook runs when it is called; the weekly tick only keeps the job alive (unchanged → silent).
+        return "0 4 * * 1"
+    every = int(trigger.get("every") or 60)
+    if every < 60:
+        return f"*/{every} * * * *" if 60 % every == 0 else f"every {every}m"
+    hours = every // 60
+    if hours >= 24:
+        return "0 0 * * *"
+    return f"0 */{hours} * * *" if 24 % hours == 0 else f"every {every}m"
+
+
 def _sync_job(trigger: dict[str, Any]) -> None:
     from cron.jobs import create_job, remove_job
 
@@ -142,15 +155,50 @@ def _sync_job(trigger: dict[str, Any]) -> None:
         chat_id = (find(trigger["owner"]) or {}).get("chat_id")
     if not chat_id or trigger.get("paused"):
         return
-    every = trigger.get("every") or 60
     options: dict[str, Any] = {}
     if trigger["kind"] in ("webhook", "page"):
         options["monitor_url"] = _state_url(trigger)
-    # A webhook runs when it is called; the weekly tick only keeps the job alive (unchanged → silent).
-    schedule = "0 4 * * 1" if trigger["kind"] == "webhook" else f"*/{every} * * * *" if every < 60 else f"0 */{every // 60} * * *"
+    schedule = _schedule_for(trigger)
     job = create_job(prompt=_prompt(trigger), schedule=schedule, name=JOB_PREFIX + trigger["name"],
                      deliver=f"companion:{chat_id}", attach_to_session=True, failure_deliver="local", **options)
     trigger["job_id"] = job.get("id") if isinstance(job, dict) else None
+
+
+def ensure_jobs() -> None:
+    """Create missing cron jobs once ``chat_id`` is populated."""
+    from cron.jobs import get_job
+
+    with _LOCK:
+        triggers = _read()
+        changed = False
+        for trigger in triggers:
+            if trigger.get("paused"):
+                continue
+            job_id = trigger.get("job_id")
+            if job_id and get_job(job_id) is not None:
+                continue
+            trigger["job_id"] = None
+            _sync_job(trigger)
+            if trigger.get("job_id"):
+                changed = True
+        if changed:
+            _write(triggers)
+
+
+def clear_job_ref(job_id: str) -> None:
+    """Clean up trigger metadata when its cron job is deleted from the 任务 page."""
+    if not job_id:
+        return
+    with _LOCK:
+        triggers = _read()
+        changed = False
+        for trigger in triggers:
+            if trigger.get("job_id") == job_id:
+                trigger["job_id"] = None
+                trigger["paused"] = True
+                changed = True
+        if changed:
+            _write(triggers)
 
 
 # ── changes ───────────────────────────────────────────────────────────────────────────────────────

@@ -78,18 +78,18 @@ def update_routines(changes: dict[str, Any]) -> dict[str, Any]:
     """Apply ``brief_time`` (``"HH:MM"`` or ``None``) and/or ``checkins`` (bool)."""
     unknown = set(changes) - {"brief_time", "checkins"}
     if unknown:
-        raise ValueError(f"unknown routine fields: {', '.join(sorted(unknown))}")
+        raise ValueError(f"不支持的日常字段：{', '.join(sorted(unknown))}")
     chat_id = read_companion_state().get("chat_id")
     if not chat_id:
-        raise ValueError("companion chat is not set up yet")
+        raise ValueError("主对话还没有准备好")
     if "brief_time" in changes:
         at = changes["brief_time"]
         if at is not None and (not isinstance(at, str) or not _TIME.match(at)):
-            raise ValueError("invalid brief_time")
+            raise ValueError("早报时间格式不正确（应为 HH:MM）")
         _replace(BRIEF_JOB_NAME, chat_id, None if at is None else _daily(at), BRIEF_PROMPT)
     if "checkins" in changes:
         if not isinstance(changes["checkins"], bool):
-            raise ValueError("invalid checkins")
+            raise ValueError("主动关心开关格式不正确")
         if changes["checkins"] != bool(_ours(CHECKIN_JOB_NAME, chat_id)):
             _replace(CHECKIN_JOB_NAME, chat_id, CHECKIN_SCHEDULE if changes["checkins"] else None, CHECKIN_PROMPT)
     return read_routines()

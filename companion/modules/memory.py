@@ -56,7 +56,7 @@ def _failed(result: dict[str, Any]) -> str | None:
 def forget_memory(file: str, line: str) -> dict[str, Any]:
     """Remove one exact remembered entry. Raises ``ValueError`` if it is gone."""
     if file not in _TARGETS:
-        raise ValueError("unknown memory file")
+        raise ValueError("不支持这个记忆文件")
     target = _TARGETS[file][0]
     with _LOCK:
         store = _store()
@@ -65,6 +65,9 @@ def forget_memory(file: str, line: str) -> dict[str, Any]:
         error = _failed(store.remove(target, line, matched_entry=line))
     if error:
         raise ValueError(error)
+    from .memory_tidy import drop_user_written
+
+    drop_user_written([line, line.strip()])
     return read_memory()
 
 
@@ -72,7 +75,7 @@ def remember(text: str) -> dict[str, Any]:
     """Keep something the user explicitly asked the companion to remember (about them)."""
     fact = " ".join(text.split())
     if not fact or len(fact) > _MAX_REMEMBER_CHARS:
-        raise ValueError(f"memory must be 1-{_MAX_REMEMBER_CHARS} characters")
+        raise ValueError(f"记忆内容要在 1~{_MAX_REMEMBER_CHARS} 字之间")
     with _LOCK:
         error = _failed(_store().add("user", fact))
     if error:
@@ -189,15 +192,15 @@ def _parse_doc(text: str) -> dict[str, list[str]]:
 
 def write_memory_doc(text: str) -> dict[str, Any]:
     """Apply the edited document: removed entries are forgotten, new ones remembered."""
-    from .memory_tidy import note_user_written
+    from .memory_tidy import drop_user_written, note_user_written
 
     wanted = _parse_doc(text)
     with _LOCK:
         store = _store()
         for file, (target, _) in _TARGETS.items():
             current = [entry for entry in store._entries_for(target) if entry.strip()]
-            ops = [{"action": "remove", "old_text": entry, "matched_entry": entry}
-                   for entry in current if entry.strip() not in wanted[file]]
+            removed = [entry for entry in current if entry.strip() not in wanted[file]]
+            ops = [{"action": "remove", "old_text": entry, "matched_entry": entry} for entry in removed]
             existing = {entry.strip() for entry in current}
             added = [entry for entry in wanted[file] if entry not in existing]
             ops += [{"action": "add", "content": entry} for entry in added]
@@ -206,6 +209,8 @@ def write_memory_doc(text: str) -> dict[str, Any]:
             error = _failed(store.apply_batch(target, ops))
             if error:
                 raise ValueError(f"{_TARGETS[file][1]}：{error}")
+            if removed:
+                drop_user_written([*removed, *(e.strip() for e in removed)])
             for entry in added:
                 note_user_written(entry)
     return read_memory_doc()

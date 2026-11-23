@@ -70,6 +70,30 @@ section 只能是：{sections}"""
 
 # ── what is new since the last pass ───────────────────────────────────────────────────────────────
 
+def _chat_untouched_since(chat_store: Any, chat_id: str, meta: dict[str, Any], since_ms: int) -> bool:
+    """Fast skip for transcripts untouched since ``since_ms`` without parsing their JSONL lines."""
+    if since_ms <= 0:
+        return False
+    cutoff_s = (since_ms - 2000) / 1000.0
+    get_path = getattr(chat_store, "_path", None)
+    if not callable(get_path):
+        return False
+    try:
+        st = get_path(chat_id).stat()
+    except OSError:
+        return True
+    if st.st_mtime >= cutoff_s:
+        return False
+    raw_updated = meta.get("updated_at")
+    if isinstance(raw_updated, str) and raw_updated:
+        try:
+            if datetime.fromisoformat(raw_updated).timestamp() >= cutoff_s:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
 def _conversation(chat_store: Any, since_ms: int) -> tuple[str, int]:
     """The user's messages and the replies since ``since_ms`` in every chat, oldest first, as text
     (the newest part when it is long), and the newest time seen."""
@@ -78,6 +102,8 @@ def _conversation(chat_store: Any, since_ms: int) -> tuple[str, int]:
     for chat_id, meta in list(chat_store._read_index().items()):
         if meta.get("helper") or meta.get("desk"):
             continue  # a helper's (or the browser desk's) working chat: the main agent's instructions, not the user's words
+        if _chat_untouched_since(chat_store, chat_id, meta, since_ms):
+            continue
         for event in chat_store.events(chat_id):
             at = int(event.get("created_at_ms") or 0)
             text = " ".join(str(event.get("text") or "").split())
@@ -189,11 +215,17 @@ def learn(chat_store: Any, force: bool = False) -> dict[str, Any]:
         return {"learned": 0, "running": True}
     try:
         meta = _read_meta()
-        since = int(meta.get("learned_until_ms") or 0)
-        if not since:
-            # The first pass reads the last week, not everything ever said.
-            since = int((time.time() - 7 * 86400) * 1000)
+        saved_since = int(meta.get("learned_until_ms") or 0)
+        since = saved_since or int((time.time() - 7 * 86400) * 1000)
         conversation, newest = _conversation(chat_store, since)
+        if not conversation and force:
+            # 「现在更新」: re-read recent conversations even when nothing newer than learned_until_ms arrived.
+            for window_s in (24 * 3600, 7 * 86400):
+                lookback = max(0, int((time.time() - window_s) * 1000))
+                conversation, lookback_newest = _conversation(chat_store, lookback)
+                if conversation:
+                    newest = max(saved_since, lookback_newest)
+                    break
         if not conversation:
             return {"learned": 0}
         store = _store()

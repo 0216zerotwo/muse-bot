@@ -43,6 +43,24 @@ class ChatSearchTest(unittest.TestCase):
         self.assertTrue(text.startswith("…") and text.endswith("…") and "关键词" in text)
         self.assertLess(len(text), 70)
 
+    def test_multi_keyword_matching_and_markdown_image_stripping(self):
+        self.add(
+            self.main,
+            "message",
+            "周六去西湖骑车，看 ![活动海报](https://cdn.example.com/poster-secret.png) 和 [路线说明](https://example.com/map)",
+            3000,
+        )
+        # Non-adjacent multi-word query matches when all tokens appear in the message.
+        hits = self.search.search(self.store, "周六 西湖 路线", main_chat=self.main)["hits"]
+        self.assertEqual(len(hits), 1)
+        self.assertNotIn("poster-secret.png", hits[0]["text"])
+        self.assertNotIn("![", hits[0]["text"])
+        self.assertIn("路线说明", hits[0]["text"])
+        # Image URL itself is stripped from searchable plain text so internal CDN tokens don't false-match.
+        self.assertEqual(self.search.search(self.store, "poster-secret")["hits"], [])
+        # Missing any token does not match.
+        self.assertEqual(self.search.search(self.store, "周六 灵隐寺")["hits"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

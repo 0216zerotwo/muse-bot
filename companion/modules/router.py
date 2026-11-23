@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Optional
@@ -138,6 +139,7 @@ def classify(user_message: str, history: list[Any]) -> Optional[dict[str, str]]:
 # Asked as soon as the app hands a message over, so the answer is ready (or nearly) when Hermes,
 # after setting up the turn (~1–2 s), asks for it: message text -> its pending choice.
 _pending: dict[str, Future] = {}
+_PENDING_LOCK = threading.Lock()
 _workers = ThreadPoolExecutor(max_workers=2, thread_name_prefix="companion-router")
 
 
@@ -146,9 +148,11 @@ def prefetch(user_message: str, history: list[Any]) -> None:
     text = _text(user_message)
     if not text or text.startswith(("【系统通知】", "/")) or quick_choice(text) is not None:
         return
-    while len(_pending) >= 8:  # a turn that never reached the model leaves its entry behind
-        _pending.pop(next(iter(_pending)))
-    _pending[text] = _workers.submit(classify, text, history)
+    future = _workers.submit(classify, text, history)
+    with _PENDING_LOCK:
+        while len(_pending) >= 8:  # a turn that never reached the model leaves its entry behind
+            _pending.pop(next(iter(_pending)))
+        _pending[text] = future
 
 
 def instruction(choice: dict[str, str]) -> str:
@@ -176,10 +180,12 @@ def on_pre_llm_call(platform: str = "", user_message: Any = None, conversation_h
     choice = quick_choice(text)
     how = "rule"
     if choice is None:
-        pending = _pending.pop(text, None)
+        with _PENDING_LOCK:
+            pending = _pending.pop(text, None)
+            missed_keys = [k[:40] for k in _pending] if (pending is None and _pending) else []
         how = "prefetched" if pending else "model"
-        if pending is None and _pending:
-            logger.info("companion: router prefetch missed: %r not in %r", text[:40], [k[:40] for k in _pending])
+        if missed_keys:
+            logger.info("companion: router prefetch missed: %r not in %r", text[:40], missed_keys)
         try:
             choice = pending.result(timeout=_TIMEOUT_S) if pending else classify(text, list(conversation_history or []))
         except Exception:  # timed out: the companion decides by its own rules

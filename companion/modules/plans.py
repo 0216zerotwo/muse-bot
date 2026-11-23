@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .companion_state import read_companion_state
+from .fs_atomic import atomic_write_json
 from .paths import get_webui_dir
 
 TOOLSET = "companion"
@@ -58,11 +59,7 @@ def _read() -> list[dict[str, Any]]:
 
 
 def _write(goals: list[dict[str, Any]]) -> None:
-    path = _path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(goals, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_json(_path(), goals)
 
 
 def _find(goals: list[dict[str, Any]], goal_id: Any) -> dict[str, Any]:
@@ -91,7 +88,7 @@ def log_event(goal_id: str, kind: str, text: str, **extra: Any) -> None:
 
 def _steps(raw: Any) -> list[dict[str, str]]:
     if not isinstance(raw, list):
-        raise ValueError("steps must be a list of strings")
+        raise ValueError("步骤列表格式不对")
     steps = [{"text": " ".join(str(s).split())[:120], "status": "pending"} for s in raw if str(s).strip()]
     return steps[:_MAX_STEPS]
 
@@ -100,7 +97,7 @@ def cron_expr(cadence: str) -> str:
     """``daily 08:00`` / ``weekdays 07:30`` / ``weekly mon 09:00`` / ``monthly 1 09:00`` as cron."""
     match = _CADENCE.match(cadence or "")
     if not match:
-        raise ValueError("checkin must look like 'daily 08:00', 'weekdays 07:30', 'weekly mon 09:00' or 'monthly 1 09:00'")
+        raise ValueError("跟进时间格式不对（例如 daily 08:00、weekdays 07:30、weekly mon 09:00 或 monthly 1 09:00）")
     every, weekday, day, hour, minute = match.groups()
     hour, minute = int(hour), int(minute)
     if every == "daily":
@@ -134,6 +131,43 @@ def _sync_job(goal: dict[str, Any]) -> None:
                          name=CHECKIN_JOB_PREFIX + goal["title"], deliver=f"companion:{chat_id}",
                          attach_to_session=True, failure_deliver="local")
         goal["job_id"] = job.get("id") if isinstance(job, dict) else None
+
+
+def ensure_jobs() -> None:
+    """Create missing goal check-in cron jobs once ``chat_id`` is populated."""
+    from cron.jobs import get_job
+
+    with _LOCK:
+        goals = _read()
+        changed = False
+        for goal in goals:
+            if not goal.get("checkin") or goal.get("done") or goal.get("paused"):
+                continue
+            job_id = goal.get("job_id")
+            if job_id and get_job(job_id) is not None:
+                continue
+            goal["job_id"] = None
+            _sync_job(goal)
+            if goal.get("job_id"):
+                changed = True
+        if changed:
+            _write(goals)
+
+
+def clear_job_ref(job_id: str) -> None:
+    """Clean up goal check-in reference when its cron job is deleted from the 任务 page."""
+    if not job_id:
+        return
+    with _LOCK:
+        goals = _read()
+        changed = False
+        for goal in goals:
+            if goal.get("job_id") == job_id:
+                goal["job_id"] = None
+                goal["checkin"] = None
+                changed = True
+        if changed:
+            _write(goals)
 
 
 def _next_run_ms(job_id: Optional[str]) -> Optional[int]:
@@ -171,11 +205,11 @@ def add_goal(title: str, steps: Any = None, checkin: Optional[str] = None, due: 
              category: Optional[str] = None) -> dict[str, Any]:
     title = " ".join(str(title or "").split())[:60]
     if not title:
-        raise ValueError("title is required")
+        raise ValueError("请填写目标名称")
     if checkin:
         cron_expr(checkin)
     if due and not _DATE.match(due):
-        raise ValueError("due must be YYYY-MM-DD")
+        raise ValueError("截止日期格式应为 YYYY-MM-DD")
     if category and category not in CATEGORIES:
         category = "other"
     goal = {"id": f"g_{uuid.uuid4().hex[:8]}", "title": title, "steps": _steps(steps or []),
@@ -201,24 +235,24 @@ def update_goal(goal_id: str, changes: dict[str, Any]) -> dict[str, Any]:
         if "due" in changes:
             due = changes["due"] or None
             if due and not _DATE.match(due):
-                raise ValueError("due must be YYYY-MM-DD")
+                raise ValueError("截止日期格式应为 YYYY-MM-DD")
             goal["due"] = due
         if "category" in changes:
             category = changes["category"] or None
             if category is not None and category not in CATEGORIES:
-                raise ValueError(f"category must be one of {', '.join(CATEGORIES)}")
+                raise ValueError("不支持这个目标分类")
             goal["category"] = category
         if changes.get("add_step"):
             if len(goal["steps"]) >= _MAX_STEPS:
-                raise ValueError(f"a goal has at most {_MAX_STEPS} steps")
+                raise ValueError(f"一个目标最多设置 {_MAX_STEPS} 步")
             goal["steps"] += _steps([changes["add_step"]])
         if "step" in changes:
             index = changes["step"]
             if not isinstance(index, int) or not 1 <= index <= len(goal["steps"]):
-                raise ValueError("step is the 1-based number of an existing step")
+                raise ValueError("找不到对应的步骤编号")
             status = changes.get("status")
             if status not in STATUSES:
-                raise ValueError(f"status must be one of {', '.join(STATUSES)}")
+                raise ValueError("步骤状态无效")
             goal["steps"][index - 1]["status"] = status
             if changes.get("note"):
                 goal["steps"][index - 1]["note"] = str(changes["note"])[:120]

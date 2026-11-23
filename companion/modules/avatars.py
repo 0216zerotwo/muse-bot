@@ -43,27 +43,32 @@ def avatars_root() -> Path:
     return get_webui_dir() / "avatars"
 
 
+_FIELD_LABELS = {"image": "图片", "sheet": "宠物图集", "actions": "动作图集"}
+
+
 def _decode(data: Any, field: str) -> bytes:
     """Bytes from a ``data:image/...;base64,`` URL (or bare base64)."""
+    label = _FIELD_LABELS.get(field, "图片")
     if not isinstance(data, str) or not data:
-        raise ValueError(f"{field} is required")
+        raise ValueError(f"请提供{label}")
     payload = _DATA_URL.sub("", data, count=1)
     if len(payload) > MAX_UPLOAD_BYTES * 4 // 3 + 4:
-        raise ValueError(f"{field} is too large")
+        raise ValueError(f"{label}太大了")
     try:
         return base64.b64decode(payload, validate=True)
     except (binascii.Error, ValueError):
-        raise ValueError(f"{field} is not valid base64 image data") from None
+        raise ValueError(f"{label}数据格式不正确") from None
 
 
 def _open(data: bytes, field: str) -> Image.Image:
+    label = _FIELD_LABELS.get(field, "图片")
     try:
         image = Image.open(io.BytesIO(data))
         if image.width * image.height > MAX_PIXELS:
-            raise ValueError(f"{field} is too large")
+            raise ValueError(f"{label}尺寸太大了")
         image.load()
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
-        raise ValueError(f"{field} is not an image") from None
+        raise ValueError(f"{label}不是有效的图片") from None
     return image
 
 
@@ -138,10 +143,10 @@ def set_flag(avatar_id: str, key: str, value: bool) -> None:
 def save_pet(sheet: bytes, actions: bytes | None, *, name: str) -> dict[str, Any]:
     atlas = _open(sheet, "sheet")
     if atlas.size != SHEET_SIZE:
-        raise ValueError(f"a pet sheet must be {SHEET_SIZE[0]}×{SHEET_SIZE[1]} (Codex pet spritesheet)")
+        raise ValueError(f"宠物图集尺寸必须是 {SHEET_SIZE[0]}×{SHEET_SIZE[1]}")
     extra = _open(actions, "actions") if actions else None
     if extra is not None and extra.size != ACTIONS_SIZE:
-        raise ValueError(f"an errands sheet must be {ACTIONS_SIZE[0]}×{ACTIONS_SIZE[1]}")
+        raise ValueError(f"动作图集尺寸必须是 {ACTIONS_SIZE[0]}×{ACTIONS_SIZE[1]}")
     avatar_id, folder = _new_folder()
     files = {"sheet": "spritesheet.webp"}
     atlas.convert("RGBA").save(folder / "spritesheet.webp", "WEBP", lossless=True, method=6)
@@ -165,22 +170,22 @@ def upload(payload: dict[str, Any]) -> dict[str, Any]:
             _decode(actions, "actions") if actions else None,
             name=_name(payload.get("name"), "我的宠物"),
         )
-    raise ValueError("kind must be image or pet")
+    raise ValueError("形象类型只能是图片或宠物")
 
 
 def from_creation(path: Path, *, name: str) -> dict[str, Any]:
     """A picture from 创意 (``path`` already resolved inside it by the caller)."""
     if not path.is_file() or path.stat().st_size > MAX_UPLOAD_BYTES:
-        raise ValueError("unknown or too large picture")
+        raise ValueError("找不到这张图片，或图片太大了")
     return save_picture(path.read_bytes(), name=_name(name, "我的图片"))
 
 
 def _folder(avatar_id: str) -> Path:
     if not isinstance(avatar_id, str) or not _ID.match(avatar_id):
-        raise ValueError("unknown avatar")
+        raise ValueError("找不到这个形象")
     folder = avatars_root() / avatar_id
     if not (folder / "meta.json").is_file():
-        raise ValueError("unknown avatar")
+        raise ValueError("找不到这个形象")
     return folder
 
 

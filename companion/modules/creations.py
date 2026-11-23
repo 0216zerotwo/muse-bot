@@ -140,7 +140,7 @@ def hide_creation(creation_id: str) -> None:
     root = creations_root()
     path = (root / creation_id).resolve()
     if root.resolve() not in path.parents or not path.is_file():
-        raise ValueError("unknown creation")
+        raise ValueError("找不到这个作品")
     with _LOCK:
         data = _read_index(root)
         data["entries"].setdefault(creation_id, {})["hidden"] = True

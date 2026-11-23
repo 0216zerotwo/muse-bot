@@ -178,18 +178,27 @@ def list_automations() -> dict[str, Any]:
 
 def run_action(action: str, job_id: str) -> dict[str, Any]:
     """``enable`` (resume), ``disable`` (pause), ``delete`` or ``run`` (now)."""
+    import contextlib
     from cron import jobs
 
-    if not isinstance(job_id, str) or jobs.get_job(job_id) is None:
+    job = jobs.get_job(job_id) if isinstance(job_id, str) else None
+    if job is None:
         raise ValueError("这个任务已经不在了")
     if action == "enable":
         jobs.resume_job(job_id)
     elif action == "disable":
         jobs.pause_job(job_id, reason="在 App 里暂停")
     elif action == "delete":
+        if job.get("name") in (CHECKIN_JOB_NAME, FEED_JOB_NAME):
+            raise ValueError("系统内置任务不能删除，请在对应设置里关闭")
         jobs.remove_job(job_id)
+        with contextlib.suppress(Exception):
+            from . import plans, triggers
+
+            triggers.clear_job_ref(job_id)
+            plans.clear_job_ref(job_id)
     elif action == "run":
         jobs.trigger_job(job_id)
     else:
-        raise ValueError(f"unknown action: {action}")
+        raise ValueError(f"不支持的操作：{action}")
     return list_automations()
