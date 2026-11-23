@@ -17,15 +17,16 @@
   body {
     margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
     font: 16px/1.5 system-ui, -apple-system, "PingFang SC", "Noto Sans CJK SC", sans-serif;
-    display: flex; flex-direction: column; align-items: center; padding: 48px 20px 32px;
+    display: flex; flex-direction: column; align-items: center;
+    padding: calc(44px + env(safe-area-inset-top, 0px)) 20px calc(32px + env(safe-area-inset-bottom, 0px));
   }
   main { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 20px; }
   .hello { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; }
   .hello svg { width: 88px; height: 88px; }
   h1 { margin: 8px 0 0; font-size: 26px; }
   p { margin: 0; }
-  .muted { color: var(--muted); font-size: 15px; }
-  form { display: flex; flex-direction: column; gap: 12px; }
+  .muted { color: var(--muted); font-size: 15px; word-break: break-all; }
+  .stack, form { display: flex; flex-direction: column; gap: 12px; }
   label { font-size: 14px; font-weight: 600; }
   input {
     width: 100%; min-height: 52px; padding: 0 18px; border-radius: 26px; font-size: 17px;
@@ -34,7 +35,10 @@
   input:focus { border-color: var(--primary); }
   button {
     min-height: 52px; border: 0; border-radius: 26px; font-size: 17px; font-weight: 600;
-    background: var(--primary); color: #fff;
+    background: var(--primary); color: #fff; cursor: pointer;
+  }
+  button.secondary {
+    background: var(--surface); color: var(--text); border: 1px solid var(--border); font-weight: 500;
   }
   button:active { opacity: .8; }
   .error { color: var(--danger); font-size: 15px; }
@@ -44,7 +48,8 @@
   .help ol { margin: 0 0 14px; padding-left: 20px; }
   .help ol:last-child { margin-bottom: 0; }
   code { font-family: ui-monospace, monospace; font-size: 13px; background: var(--bg); padding: 1px 6px; border-radius: 6px; white-space: nowrap; }
-  code.line { display: block; width: fit-content; margin-top: 4px; }
+  code.line { display: block; width: fit-content; max-width: 100%; overflow-x: auto; margin-top: 4px; }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
@@ -65,40 +70,93 @@
       <ellipse cx="44" cy="40" rx="4" ry="2.3" fill="#ff8a8a" opacity="0.35"/>
       <path d="M29.5 39.5q2.5 2 5 0" stroke="#3a2d27" stroke-width="1.4" stroke-linecap="round" fill="none"/>
     </svg>
-    <h1>连接你的伙伴</h1>
-    <p class="muted">伙伴运行在你自己的服务器上。连一次就行，以后打开直接用。</p>
+    <h1 id="heading">连接你的伙伴</h1>
+    <p class="muted" id="subtitle">伙伴运行在你自己的服务器上。连一次就行，以后打开直接用。</p>
   </section>
 
-  <form id="form">
-    <label for="server">服务器地址，或连接链接</label>
-    <input id="server" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
-           placeholder="https://你的域名">
-    <p class="error" id="error" role="alert"></p>
-    <button type="submit">连接</button>
-  </form>
-
-  <section class="help">
-    <h2>连服务器</h2>
-    <ol>
-      <li>在服务器上运行<code class="line">python tools/companion-pair.py https://你的域名</code></li>
-      <li>把它给出的「一键连接」链接粘贴到上面；或者只填地址，下一步再输入配对码</li>
-    </ol>
-    <h2>用数据线连电脑测试</h2>
-    <ol>
-      <li>手机打开「USB 调试」，用数据线连上电脑</li>
-      <li>电脑上运行<code class="line">adb reverse tcp:8766 tcp:8766</code></li>
-      <li>地址填 <code>http://127.0.0.1:8766</code></li>
-    </ol>
+  <section class="stack" id="reconnect-panel" hidden>
+    <p class="error" id="reconnect-error" role="alert"></p>
+    <button type="button" id="retry-btn">重新连接</button>
+    <button type="button" class="secondary" id="switch-btn">更换服务器地址</button>
   </section>
+
+  <div class="stack" id="setup-panel">
+    <form id="form">
+      <label for="server">服务器地址，或连接链接</label>
+      <input id="server" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
+             placeholder="https://你的域名">
+      <p class="error" id="error" role="alert"></p>
+      <button type="submit">连接</button>
+    </form>
+
+    <section class="help">
+      <h2>连服务器</h2>
+      <ol>
+        <li>在服务器上运行<code class="line">python tools/companion-pair.py https://你的域名</code></li>
+        <li>把它给出的「一键连接」链接粘贴到上面；或者只填地址，下一步再输入配对码</li>
+      </ol>
+      <h2>用数据线连电脑测试</h2>
+      <ol>
+        <li>手机打开「USB 调试」，用数据线连上电脑</li>
+        <li>电脑上运行<code class="line">adb reverse tcp:8766 tcp:8766</code></li>
+        <li>地址填 <code>http://127.0.0.1:8766</code></li>
+      </ol>
+    </section>
+  </div>
 </main>
 <script>
   var bridge = window.PersonalBotAndroid;
+  var heading = document.getElementById("heading");
+  var subtitle = document.getElementById("subtitle");
+  var reconnectPanel = document.getElementById("reconnect-panel");
+  var reconnectError = document.getElementById("reconnect-error");
+  var setupPanel = document.getElementById("setup-panel");
   var input = document.getElementById("server");
   var error = document.getElementById("error");
-  if (bridge) {
-    input.value = bridge.server();
-    error.textContent = bridge.error();
+
+  function showSetupForm() {
+    heading.textContent = "连接你的伙伴";
+    subtitle.textContent = "伙伴运行在你自己的服务器上。连一次就行，以后打开直接用。";
+    reconnectPanel.hidden = true;
+    setupPanel.hidden = false;
+    input.focus();
   }
+
+  if (bridge) {
+    var saved = bridge.server();
+    var lastErr = bridge.error();
+    var configured = bridge.hasServer ? bridge.hasServer() : false;
+    input.value = saved;
+    if (configured && lastErr) {
+      heading.textContent = "暂时连不上伙伴";
+      subtitle.textContent = "已记住服务器：" + saved;
+      reconnectError.textContent = lastErr;
+      reconnectPanel.hidden = false;
+      setupPanel.hidden = true;
+    } else {
+      error.textContent = lastErr || "";
+    }
+  }
+
+  document.getElementById("retry-btn").addEventListener("click", function () {
+    if (bridge && bridge.retry) {
+      reconnectError.textContent = "正在重新连接…";
+      bridge.retry();
+    }
+  });
+
+  document.getElementById("switch-btn").addEventListener("click", function () {
+    error.textContent = "";
+    showSetupForm();
+  });
+
+  window.addEventListener("online", function () {
+    if (!reconnectPanel.hidden && bridge && bridge.retry) {
+      reconnectError.textContent = "网络已恢复，正在重新连接…";
+      bridge.retry();
+    }
+  });
+
   document.getElementById("form").addEventListener("submit", function (event) {
     event.preventDefault();
     if (!bridge) return;

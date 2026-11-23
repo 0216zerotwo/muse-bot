@@ -1,7 +1,13 @@
 ﻿# 用数据线把 Muse Bot 安卓 App 装到手机上（PowerShell），在仓库根目录运行：
 #   powershell -ExecutionPolicy Bypass -File android\install.ps1
+# 多台设备同时连接时可指定序列号：
+#   powershell -ExecutionPolicy Bypass -File android\install.ps1 -Serial <设备序列号>
 # 手机先打开「开发者选项 → USB 调试」，连上数据线，手机上弹出「允许 USB 调试吗？」时点允许。
 # 安装包：android\dist 里最新的 .apk（bash android/build.sh 打的，或从 GitHub Actions 下载后放进去）。
+
+param(
+    [string]$Serial = $env:ANDROID_SERIAL
+)
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -19,23 +25,44 @@ if ($null -eq $apk) { Write-Host "找不到安装包：先运行 bash android/bu
 
 Write-Host "==> 找手机"
 & $adb start-server | Out-Null
-$state = (& $adb get-state 2>$null)
-if ($state -ne "device") {
+$lines = & $adb devices
+$online = @()
+foreach ($line in $lines) {
+    if ($line -match '^(\S+)\s+device$') {
+        $online += $Matches[1]
+    }
+}
+
+$target = $Serial.Trim()
+if ($target) {
+    if ($online -notcontains $target) {
+        & $adb devices
+        Write-Host "指定的设备「$target」当前不可用，请确认序列号并允许 USB 调试。"
+        exit 1
+    }
+} elseif ($online.Count -eq 0) {
     & $adb devices
     Write-Host "没找到可用的手机：确认数据线连好、手机上打开了 USB 调试，并在手机弹窗里点了允许（显示 unauthorized 就是还没点）。"
     exit 1
+} elseif ($online.Count -gt 1) {
+    & $adb devices
+    Write-Host "检测到多台在线设备（$($online -join ', ')），请用 -Serial 指定要安装的那台："
+    Write-Host "  powershell -ExecutionPolicy Bypass -File android\install.ps1 -Serial $($online[0])"
+    exit 1
+} else {
+    $target = $online[0]
 }
 
-Write-Host "==> 安装 $($apk.Name)"
-& $adb install -r $apk.FullName
+Write-Host "==> 安装 $($apk.Name) 到 $target"
+& $adb -s $target install -r $apk.FullName
 if ($LASTEXITCODE -ne 0) {
     Write-Host "安装失败。如果提示 INSTALL_FAILED_UPDATE_INCOMPATIBLE（旧版用别的密钥签名），先卸载旧版再装："
-    Write-Host "  & `"$adb`" uninstall com.personalbot.companion"
+    Write-Host "  & `"$adb`" -s $target uninstall com.personalbot.companion"
     exit 1
 }
 
 Write-Host "==> 让手机的 127.0.0.1:8766 连到这台电脑上的 Muse Bot 服务器"
-& $adb reverse tcp:8766 tcp:8766
+& $adb -s $target reverse tcp:8766 tcp:8766
 if ($LASTEXITCODE -ne 0) { Write-Host "端口转发失败：App 装好了，但用数据线连不上电脑上的服务器"; exit 1 }
 
 Write-Host ""

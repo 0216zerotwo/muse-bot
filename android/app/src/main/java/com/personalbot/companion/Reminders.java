@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * The phone's own notifications for reminders coming up. This app gets no push, so a reminder
@@ -44,7 +45,19 @@ final class Reminders {
     /** The plan covers two days: it is set again at least this often while the app stays closed. */
     private static final long REFRESH_EVERY_MS = 6L * 60 * 60 * 1000;
 
+    private static final Object PLAN_LOCK = new Object();
+    private static final Object ALARM_LOCK = new Object();
+
     private Reminders() {}
+
+    static final class AuthException extends Exception {
+        final int status;
+
+        AuthException(int status, String path) {
+            super("HTTP " + status + " " + path);
+            this.status = status;
+        }
+    }
 
     static final class Time {
         final String id;
@@ -97,30 +110,66 @@ final class Reminders {
         }, "reminders").start();
     }
 
+    /** Cancel any scheduled alarms off the calling thread (unpair, server switch, toggle off). */
+    static void clearInBackground(Context context) {
+        final Context app = context.getApplicationContext();
+        new Thread(() -> schedule(app, Collections.<Time>emptyList(), ""), "reminders-clear").start();
+    }
+
     /** Blocking: asks the server, then sets the alarms. Returns how many were set. */
     static int plan(Context context) throws Exception {
-        SharedPreferences prefs = prefs(context);
-        String server = prefs.getString("server", null);
-        if (server == null) return 0;
-        if (!enabled(context)) {
-            schedule(context, Collections.<Time>emptyList(), "");
-            return 0;
+        synchronized (PLAN_LOCK) {
+            SharedPreferences prefs = prefs(context);
+            String server = prefs.getString("server", null);
+            if (server == null) {
+                schedule(context, Collections.<Time>emptyList(), "");
+                return 0;
+            }
+            if (!enabled(context)) {
+                schedule(context, Collections.<Time>emptyList(), "");
+                return 0;
+            }
+            String device = prefs.getString("device", "");
+            try {
+                String token = bootstrap(server, device);
+                JSONObject automations = new JSONObject(get(server + "/api/webui/automations", token));
+                String title = "Muse Bot";
+                try {
+                    title = new JSONObject(get(server + "/api/webui/companion", token)).optString("name", title);
+                } catch (Exception e) {
+                    Log.w(TAG, "no companion name: " + e.getMessage());
+                }
+                List<Time> times = times(automations.optJSONArray("jobs"), System.currentTimeMillis());
+                synchronized (ALARM_LOCK) {
+                    if (!enabled(context)
+                            || !server.equals(prefs.getString("server", null))
+                            || !Objects.equals(device, prefs.getString("device", ""))) {
+                        scheduleLocked(context, Collections.<Time>emptyList(), "");
+                        return 0;
+                    }
+                    scheduleLocked(context, times, title.isEmpty() ? "Muse Bot" : title);
+                }
+                return times.size();
+            } catch (AuthException e) {
+                synchronized (ALARM_LOCK) {
+                    if (server.equals(prefs.getString("server", null))
+                            && Objects.equals(device, prefs.getString("device", ""))) {
+                        scheduleLocked(context, Collections.<Time>emptyList(), "");
+                    }
+                }
+                throw e;
+            }
         }
-        String token = bootstrap(server, prefs.getString("device", ""));
-        JSONObject automations = new JSONObject(get(server + "/api/webui/automations", token));
-        String title = "Muse Bot";
-        try {
-            title = new JSONObject(get(server + "/api/webui/companion", token)).optString("name", title);
-        } catch (Exception e) {
-            Log.w(TAG, "no companion name: " + e.getMessage());
-        }
-        List<Time> times = times(automations.optJSONArray("jobs"), System.currentTimeMillis());
-        schedule(context, times, title.isEmpty() ? "Muse Bot" : title);
-        return times.size();
     }
 
     /** Cancel the last plan's alarms, then set these. */
     static void schedule(Context context, List<Time> times, String title) {
+        synchronized (ALARM_LOCK) {
+            scheduleLocked(context, times, title);
+        }
+    }
+
+    private static void scheduleLocked(Context context, List<Time> times, String title) {
         try {
             setAlarms(context, times, title);
         } catch (RuntimeException e) {
@@ -130,6 +179,7 @@ final class Reminders {
 
     private static void setAlarms(Context context, List<Time> times, String title) {
         AlarmManager alarms = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+        if (alarms == null) return;
         SharedPreferences prefs = prefs(context);
         int planned = prefs.getInt(KEY_PLANNED, 0);
         for (int i = 0; i < planned; i++) {
@@ -151,7 +201,12 @@ final class Reminders {
             PendingIntent pending = PendingIntent.getBroadcast(context, FIRST_CODE + i, intent,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             if (exact) {
-                alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, time.at, pending);
+                try {
+                    alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, time.at, pending);
+                } catch (SecurityException e) {
+                    exact = false;
+                    alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, time.at, pending);
+                }
             } else {
                 alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, time.at, pending);
             }
@@ -191,6 +246,7 @@ final class Reminders {
 
     private static HttpURLConnection open(String url) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        connection.setInstanceFollowRedirects(false);
         connection.setConnectTimeout(10_000);
         connection.setReadTimeout(15_000);
         connection.setRequestProperty("Accept", "application/json");
@@ -200,7 +256,9 @@ final class Reminders {
     private static String read(HttpURLConnection connection) throws Exception {
         try {
             int status = connection.getResponseCode();
-            if (status / 100 != 2) throw new IllegalStateException("HTTP " + status + " " + connection.getURL().getPath());
+            String path = connection.getURL() == null ? "" : connection.getURL().getPath();
+            if (status == 401 || status == 403) throw new AuthException(status, path);
+            if (status / 100 != 2) throw new IllegalStateException("HTTP " + status + " " + path);
             try (InputStream in = connection.getInputStream()) {
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
                 byte[] buffer = new byte[8192];
