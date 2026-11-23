@@ -103,6 +103,18 @@ def _is_loopback_netloc(netloc: str | None) -> bool:
     return _is_loopback_ip(host)
 
 
+def _normalize_netloc(netloc: str | None, scheme: str) -> str:
+    raw = (netloc or "").strip().lower()
+    if not raw:
+        return ""
+    default_port = ":443" if scheme == "https" else ":80" if scheme == "http" else ""
+    if default_port and raw.endswith(default_port):
+        host_part = raw[: -len(default_port)]
+        if host_part.startswith("[") or ":" not in host_part:
+            return host_part
+    return raw
+
+
 def _origin_allowed(conn: HTTPConnection, *, local_only: bool = False) -> bool:
     """Validate browser ``Origin`` against ``Host`` (or loopback in local mode) to prevent CSRF and
     cross-site WebSocket hijacking. Non-browser clients (native iOS, CLI scripts) omit ``Origin``."""
@@ -115,20 +127,23 @@ def _origin_allowed(conn: HTTPConnection, *, local_only: bool = False) -> bool:
         parsed = urlsplit(origin)
     except ValueError:
         return False
-    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname or not parsed.netloc:
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https") or not parsed.hostname or not parsed.netloc:
         return False
     if local_only:
         return _is_loopback_netloc(parsed.netloc)
-    origin_netloc = parsed.netloc.strip().lower()
-    host_header = (conn.headers.get("host") or "").strip().lower()
-    if _is_loopback_netloc(origin_netloc) and _is_loopback_netloc(host_header):
+    origin_netloc = _normalize_netloc(parsed.netloc, scheme)
+    raw_host = (conn.headers.get("host") or "").strip().lower()
+    host_netloc = _normalize_netloc(raw_host, scheme)
+    if _is_loopback_netloc(origin_netloc) and _is_loopback_netloc(raw_host):
         return True
-    if host_header and origin_netloc == host_header:
+    if host_netloc and origin_netloc == host_netloc:
         return True
     peer = conn.client.host if conn.client else None
     if _is_trusted_proxy_peer(peer):
-        forwarded_host = (conn.headers.get("x-forwarded-host") or "").split(",", 1)[0].strip().lower()
-        if forwarded_host and origin_netloc == forwarded_host:
+        raw_forwarded_host = (conn.headers.get("x-forwarded-host") or "").split(",", 1)[0].strip().lower()
+        forwarded_netloc = _normalize_netloc(raw_forwarded_host, scheme)
+        if forwarded_netloc and origin_netloc == forwarded_netloc:
             return True
     return False
 

@@ -23,11 +23,16 @@ _LOCAL_TOOLS = re.compile(
 # Browser tools (Playwright MCP ``mcp__browser__*`` / ``mcp_browser_*`` and Hermes ``browser_*``).
 _BROWSER_TOOLS = re.compile(r"^(?:browser_|mcp__?.+?__?browser_)", re.IGNORECASE)
 _FILE_URL = re.compile(r"(?:^|[\s'\"(=])file://", re.IGNORECASE)
+_HTTP_URL = re.compile(r"https?://[^\s'\"`()<>]+", re.IGNORECASE)
+_URL_SCHEMES = ("http://", "https://", "mailto:", "data:", "javascript:", "about:", "blob:")
+_WRITE_ONLY_TOOLS = frozenset({"write_file", "edit_file"})
+_WRITE_PATH_KEYS = frozenset({"path", "file_path", "filepath", "file", "filename", "target_file", "destination", "dest"})
+_BROWSER_LOCAL_KEYS = frozenset({"path", "paths", "file", "files", "file_path", "filepath", "code", "script"})
 
 # What a call or staged path may not name. ``.env.example`` / ``.env.sample`` / ``.env.template`` stay readable.
 _PROTECTED = re.compile(
-    r"(?:^|[\s/\\'\"`=:(])\.env(?!(?:\.example|\.sample|\.template)\b)(?:\.[a-z0-9_-]+)?(?=$|[\s'\"`;|&)>,])"
-    r"|(?:^|[\s/\\'\"`=:()])(?:auth\.json|media\.key|vapid_private\.pem|devices\.json|triggers\.json"
+    r"(?:^|[\s/\\'\"`=:(,@])\.env(?!(?:\.example|\.sample|\.template)\b)(?:\.[a-z0-9_-]+)?(?=$|[\s'\"`;|&)>,])"
+    r"|(?:^|[\s/\\'\"`=:(@])(?:auth\.json|media\.key|vapid_private\.pem|devices\.json|triggers\.json"
     r"|subscriptions\.json|vault-keys\.json|approval-grants\.json)(?=$|[\s/\\'\"`;|&)>,])"
     r"|browser-profile|hermes-home[/\\]+vault|hermes_home[^\s]*[/\\]+vault"
     r"|[/\\]vault(?:[/\\]|$)|[/\\](?:Login Data|Cookies|Web Data|Local State)\b"
@@ -76,13 +81,25 @@ def _hermes_home() -> Optional[Path]:
     return None
 
 
+def _without_http_urls(text: str) -> str:
+    return _HTTP_URL.sub(" ", text) if ("http://" in text.lower() or "https://" in text.lower()) else text
+
+
 def is_secret_path(path_or_text: str | Path) -> bool:
     """True when ``path_or_text`` names or resolves to a protected secret file or directory."""
     raw = str(path_or_text or "").strip()
     if not raw:
         return False
-    if _PROTECTED.search(raw):
+    lower = raw.lower()
+    if lower.startswith(_URL_SCHEMES):
+        return False
+    if lower.startswith("file://"):
         return True
+    cleaned = _without_http_urls(raw)
+    if _PROTECTED.search(cleaned):
+        return True
+    if "\n" in raw or "\r" in raw or len(raw) > 1024:
+        return False
     with contextlib.suppress(OSError, RuntimeError, ValueError):
         resolved = Path(raw).expanduser().resolve()
         if _PROTECTED.search(str(resolved)) or _PROTECTED.search(resolved.as_posix()):
@@ -114,13 +131,27 @@ def _targets_hermes_config(texts: list[str]) -> bool:
     config_file = home / "config.yaml"
     plugins_dir = home / "plugins"
     for text in texts:
-        if "config.yaml" not in text and "plugins" not in text:
+        raw = text.strip()
+        if not raw or "\n" in raw or "\r" in raw or len(raw) > 1024:
+            continue
+        if "config.yaml" not in raw and "plugins" not in raw:
             continue
         with contextlib.suppress(OSError, RuntimeError, ValueError):
-            resolved = Path(text.strip()).expanduser().resolve()
+            resolved = Path(raw).expanduser().resolve()
             if resolved == config_file or plugins_dir == resolved or plugins_dir in resolved.parents:
                 return True
     return False
+
+
+def _browser_local_texts(name: str, args: Any, all_texts: list[str]) -> list[str]:
+    low = name.lower()
+    if low == "browser_exec" or any(tok in low for tok in ("upload", "drop", "file")):
+        candidates = all_texts
+    elif isinstance(args, dict):
+        candidates = _strings({k: v for k, v in args.items() if str(k).lower() in _BROWSER_LOCAL_KEYS})
+    else:
+        return []
+    return [t for t in candidates if not t.lstrip().lower().startswith(_URL_SCHEMES)]
 
 
 def check(tool_name: str, args: Any) -> Optional[str]:
@@ -133,9 +164,22 @@ def check(tool_name: str, args: Any) -> Optional[str]:
     texts = _strings(args)
     if is_browser and any(_FILE_URL.search(text) for text in texts):
         return MESSAGE
-    if any(_PROTECTED.search(text) or is_secret_path(text) for text in texts):
+    if is_browser and not is_local:
+        local_texts = _browser_local_texts(name, args, texts)
+        if any(_PROTECTED.search(_without_http_urls(text)) or is_secret_path(text) for text in local_texts):
+            return MESSAGE
+        return None
+    target_texts = texts
+    if name in _WRITE_ONLY_TOOLS and isinstance(args, dict):
+        extracted = _strings({k: v for k, v in args.items() if str(k).lower() in _WRITE_PATH_KEYS})
+        if extracted:
+            target_texts = extracted
+    if any(_PROTECTED.search(_without_http_urls(text)) or is_secret_path(text) for text in target_texts):
         return MESSAGE
     # Reading its own config is fine; running these commands or writing those files is not.
-    if is_local and name not in _READS and (any(_SELF_CHANGE.search(text) for text in texts) or _targets_hermes_config(texts)):
+    if is_local and name not in _READS and (
+        any(_SELF_CHANGE.search(_without_http_urls(text)) for text in target_texts)
+        or _targets_hermes_config(target_texts)
+    ):
         return SELF_CHANGE_MESSAGE
     return None

@@ -38,15 +38,38 @@ class SecretsGuardTest(unittest.TestCase):
             ("read_file", {"path": "companion/push/subscriptions.json"}),
             ("read_file", {"path": "/home/u/.ssh/id_ed25519"}),
             ("browser_exec", {"code": "goto_url('file:///etc/passwd')"}),
+            ("browser_navigate", {"url": "file:///opt/data/.env"}),
             ("mcp__browser__browser_navigate", {"url": "file:///C:/hermes-home/.env"}),
-            ("mcp__browser__browser_file_upload", {"paths": ["/app/hermes-home/.env"]}),
+            ("mcp__browser__browser_file_upload", {"paths": ["/opt/data/.env"]}),
+            ("write_file", {"path": ".env", "content": "X=1"}),
+            ("edit_file", {"path": "companion/devices.json", "old_string": "[]", "new_string": "[1]"}),
         ):
             with self.subTest(tool=tool, args=args):
                 self.assertEqual(check(tool, args), self.guard.MESSAGE)
 
-        self.assertIsNone(check("read_file", {"path": "deploy/.env.example"}))
-        self.assertIsNone(check("mcp__browser__browser_navigate", {"url": "https://example.com"}))
+        # Public URLs containing /vault or /cookies, clicking elements mentioning /Cookies, and
+        # writing ordinary docs whose body mentions .env / ~/.ssh/config must NEVER false-positive.
+        for tool, args in (
+            ("read_file", {"path": "deploy/.env.example"}),
+            ("mcp__browser__browser_navigate", {"url": "https://example.com"}),
+            ("browser_navigate", {"url": "https://github.com/hashicorp/vault"}),
+            ("browser_navigate", {"url": "https://example.com/cookies"}),
+            ("mcp__browser__browser_click", {"element": "Accept /Cookies"}),
+            ("browser_exec", {"code": "goto_url('https://github.com/hashicorp/vault')\nprint(page_text())"}),
+            ("write_file", {"path": "README.md", "content": "Copy .env.example to .env and check ~/.ssh/config"}),
+            ("edit_file", {"path": "docs/setup.md", "old_string": "a", "new_string": "Put keys in .env or auth.json"}),
+        ):
+            with self.subTest(tool=tool, args=args):
+                self.assertIsNone(check(tool, args))
+
+        self.assertFalse(self.guard.is_secret_path("https://github.com/hashicorp/vault"))
+        self.assertFalse(self.guard.is_secret_path("https://example.com/cookies"))
+        self.assertFalse(self.guard.is_secret_path("line1\n/opt/other\n" * 100))
         self.assertEqual(check("terminal", {"command": "hermes gateway restart"}), self.guard.SELF_CHANGE_MESSAGE)
+        self.assertEqual(
+            check("write_file", {"path": "hermes-home/config.yaml", "content": "model: test"}),
+            self.guard.SELF_CHANGE_MESSAGE,
+        )
 
     def test_prevents_secret_exfiltration_via_media_widgets_creations_and_avatar_reference(self):
         env_file = self.folder / ".env"

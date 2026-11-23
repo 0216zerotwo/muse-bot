@@ -201,6 +201,45 @@ class ServerOriginAndRebindingTest(unittest.TestCase):
                 ready = ws.receive_json()
                 self.assertEqual(ready["event"], "ready")
 
+    def test_origin_allowed_normalizes_default_ports_behind_reverse_proxy(self):
+        dev_tok = self.adapter.devices.pair(self.adapter.devices.new_code()["code"], "iPhone")["token"]
+        with TestClient(self.app, client=("172.18.0.2", 51234), base_url="http://172.18.0.3:8766") as proxy:
+            # Browser omits :443 in Origin while ALB/Traefik sends Host or X-Forwarded-Host with :443.
+            ok_host = proxy.get(
+                "/webui/bootstrap",
+                headers={
+                    "Authorization": f"Device {dev_tok}",
+                    "Origin": "https://bot.example.com",
+                    "Host": "bot.example.com:443",
+                    "X-Forwarded-Proto": "https",
+                },
+            )
+            self.assertEqual(ok_host.status_code, 200)
+
+            ok_xfh = proxy.get(
+                "/webui/bootstrap",
+                headers={
+                    "Authorization": f"Device {dev_tok}",
+                    "Origin": "https://bot.example.com",
+                    "Host": "127.0.0.1:8766",
+                    "X-Forwarded-Host": "bot.example.com:443",
+                    "X-Forwarded-Proto": "https",
+                },
+            )
+            self.assertEqual(ok_xfh.status_code, 200)
+
+            # Scheme/port mismatch (http Origin vs :443 Host, or non-default :8443) still fails closed.
+            mismatch = proxy.get(
+                "/webui/bootstrap",
+                headers={
+                    "Authorization": f"Device {dev_tok}",
+                    "Origin": "https://bot.example.com",
+                    "Host": "bot.example.com:8443",
+                    "X-Forwarded-Proto": "https",
+                },
+            )
+            self.assertEqual(mismatch.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()
