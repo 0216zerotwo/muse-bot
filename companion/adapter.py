@@ -95,6 +95,8 @@ class CompanionAdapter(BasePlatformAdapter):
         self._subs: dict[str, set[Any]] = {}
         # chat_id -> the turn the agent is answering, and any queued follow-up turn ids behind it
         self._turns: dict[str, str] = {}
+        self._chain_root: dict[str, str] = {}
+        self._inband_active: set[str] = set()
         self._pending_turns: dict[str, list[str]] = {}
         # Helpers working on something another chat handed them: chat -> (turn id, the answer).
         self._helper_waits: dict[str, tuple[str, asyncio.Future]] = {}
@@ -280,14 +282,41 @@ class CompanionAdapter(BasePlatformAdapter):
         task.add_done_callback(tasks.discard)
         return task
 
-    def _set_active_turn(self, chat_id: str, turn_id: str) -> None:
+    def _chain_root_map(self) -> dict[str, str]:
+        roots = getattr(self, "_chain_root", None)
+        if roots is None:
+            roots = {}
+            self._chain_root = roots
+        return roots
+
+    def _inband_set(self) -> set[str]:
+        inband = getattr(self, "_inband_active", None)
+        if inband is None:
+            inband = set()
+            self._inband_active = inband
+        return inband
+
+    def _pending_map(self) -> dict[str, list[str]]:
+        pending = getattr(self, "_pending_turns", None)
+        if pending is None:
+            pending = {}
+            self._pending_turns = pending
+        return pending
+
+    def _set_active_turn(self, chat_id: str, turn_id: str, *, as_root: bool = False) -> None:
         self._turns[chat_id] = turn_id
+        roots = self._chain_root_map()
+        if as_root or chat_id not in roots:
+            roots[chat_id] = turn_id
+            self._inband_set().discard(chat_id)
         idle = getattr(self, "_turn_idle", None)
         if idle is not None and chat_id in idle:
             idle[chat_id].clear()
 
     def _clear_active_turn(self, chat_id: str) -> Optional[str]:
         popped = self._turns.pop(chat_id, None)
+        self._chain_root_map().pop(chat_id, None)
+        self._inband_set().discard(chat_id)
         idle = getattr(self, "_turn_idle", None)
         if idle is not None and chat_id in idle:
             idle[chat_id].set()
@@ -686,22 +715,20 @@ class CompanionAdapter(BasePlatformAdapter):
             raise ValueError("带图片或文件的消息暂时不能重新生成")  # /retry can't send them again
         await asyncio.to_thread(self.store.remove_events, chat_id,
                                 lambda e: e.get("turn_id") == turn_id and e.get("event") != "user_message")
-        self._set_active_turn(chat_id, turn_id)  # at work from now: a reload shows it so
+        self._set_active_turn(chat_id, turn_id, as_root=True)  # at work from now: a reload shows it so
         asyncio.ensure_future(self._start_turn(chat_id, RETRY_COMMAND, turn_id))
 
     async def _start_turn(self, chat_id: str, text: str, turn_id: str,
                           files: Optional[list[tuple[str, str]]] = None) -> str:
         active = self._turns.get(chat_id)
+        queued_here = False
         if active is None or active == turn_id:
-            self._set_active_turn(chat_id, turn_id)
+            self._set_active_turn(chat_id, turn_id, as_root=True)
         else:
-            pending_map = getattr(self, "_pending_turns", None)
-            if pending_map is None:
-                pending_map = {}
-                self._pending_turns = pending_map
-            queue = pending_map.setdefault(chat_id, [])
+            queue = self._pending_map().setdefault(chat_id, [])
             if turn_id not in queue:
                 queue.append(turn_id)
+                queued_here = True
         event = self._event(chat_id, text, turn_id)
         if files:
             event.media_urls = [path for path, _ in files]
@@ -713,7 +740,19 @@ class CompanionAdapter(BasePlatformAdapter):
                 event.message_type = MessageType.PHOTO
             elif not any(mime.startswith(("image/", "audio/", "video/")) for _, mime in files):
                 event.message_type = MessageType.DOCUMENT
-        await self.handle_message(event)
+        try:
+            await self.handle_message(event)
+        except BaseException:
+            if queued_here:
+                queue = self._pending_map().get(chat_id)
+                if queue and turn_id in queue:
+                    queue.remove(turn_id)
+                    if not queue:
+                        self._pending_map().pop(chat_id, None)
+            elif self._turns.get(chat_id) == turn_id:
+                self._discard_turn_output(chat_id, turn_id)
+                self._clear_active_turn(chat_id)
+            raise
         return turn_id
 
     def _event(self, chat_id: str, text: str, message_id: str) -> MessageEvent:
@@ -764,7 +803,7 @@ class CompanionAdapter(BasePlatformAdapter):
         if not chat_id:
             return
         msg_id = event.message_id or ""
-        pending_map = getattr(self, "_pending_turns", None) or {}
+        pending_map = self._pending_map()
         queue = pending_map.get(chat_id)
         active = self._turns.get(chat_id)
         if active is None:
@@ -772,17 +811,20 @@ class CompanionAdapter(BasePlatformAdapter):
                 queue.remove(msg_id)
                 if not queue:
                     pending_map.pop(chat_id, None)
-            self._set_active_turn(chat_id, msg_id or uuid.uuid4().hex)
+            self._set_active_turn(chat_id, msg_id or uuid.uuid4().hex, as_root=True)
             return
-        # In-band queued follow-up (Hermes run_turn): close the finished active turn before starting msg_id.
+        # In-band queued follow-up (Hermes run_turn): close the finished active turn before starting msg_id,
+        # while keeping _chain_root set to the outer base.py turn that opened the chain.
         if msg_id and msg_id != active and queue and msg_id in queue and self._has_turn_output(chat_id, active):
             queue.remove(msg_id)
             if not queue:
                 pending_map.pop(chat_id, None)
+            self._chain_root_map().setdefault(chat_id, active)
+            self._inband_set().add(chat_id)
             self._discard_turn_output(chat_id, active)
             await self._close_draft(chat_id)
             await self._emit(chat_id, {"event": "turn_end", "turn_id": active, "turn_phase": "complete"}, persist=True)
-            self._set_active_turn(chat_id, msg_id)
+            self._set_active_turn(chat_id, msg_id, as_root=False)
 
     async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
         chat_id = event.source.chat_id if event.source else None
@@ -792,7 +834,13 @@ class CompanionAdapter(BasePlatformAdapter):
         msg_id = event.message_id or ""
         if active is None:
             return
-        if msg_id and msg_id != active:
+        chain_root = self._chain_root_map().get(chat_id, active)
+        inband = chat_id in self._inband_set()
+        if inband and msg_id == active and msg_id != chain_root:
+            # Hermes run_turn.py fires the inner follow-up completion hook BEFORE base.py delivers the
+            # terminal final send(); wait for the final send() + outer chain_root completion hook.
+            return
+        if msg_id and msg_id != active and not (inband and msg_id == chain_root):
             # A mid-turn steered or intake-queued message finished its outer hook while ``active`` is still running.
             return
         succeeded = getattr(outcome, "value", outcome) == "success"
@@ -802,9 +850,9 @@ class CompanionAdapter(BasePlatformAdapter):
             return
         self._discard_turn_output(chat_id, active)
         await self._close_draft(chat_id)
-        turn_id = self._clear_active_turn(chat_id) or msg_id
-        pending_map = getattr(self, "_pending_turns", None)
-        if pending_map and chat_id in pending_map and not pending_map[chat_id]:
+        turn_id = self._clear_active_turn(chat_id) or active
+        pending_map = self._pending_map()
+        if chat_id in pending_map and not pending_map[chat_id]:
             pending_map.pop(chat_id, None)
         await self._emit(chat_id, {"event": "turn_end", "turn_id": turn_id, "turn_phase": "complete"}, persist=True)
         await self.push_goal_state(chat_id)

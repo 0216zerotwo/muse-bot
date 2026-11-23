@@ -593,8 +593,7 @@ def remove_preset(name: str) -> dict[str, Any]:
 
 def _provider_key(name: str) -> str:
     ascii_slug = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-").lower()
-    simple = re.sub(r"\s+", "-", name.strip()).strip("-").lower()
-    if ascii_slug and all(ord(ch) < 128 for ch in name) and ascii_slug == simple:
+    if ascii_slug and all(ord(ch) < 128 for ch in name):
         return f"{_PROVIDER_PREFIX}{ascii_slug}"
     digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
     if ascii_slug:

@@ -31,6 +31,9 @@ class ModelsConfigAndHealthTest(unittest.TestCase):
             self.assertTrue(key.startswith("m-"))
             self.assertGreater(len(key), 2)
         self.assertEqual(self.models._provider_key("DeepSeek V3"), "m-deepseek-v3")
+        self.assertEqual(self.models._provider_key("Claude Sonnet 4.6"), "m-claude-sonnet-4-6")
+        self.assertEqual(self.models._provider_key("GPT-5.4"), "m-gpt-5-4")
+        self.assertEqual(self.models._provider_key("Gemini 2.5 Pro"), "m-gemini-2-5-pro")
         # Deterministic across calls.
         self.assertEqual(self.models._provider_key("通义千问"), self.models._provider_key("通义千问"))
 
