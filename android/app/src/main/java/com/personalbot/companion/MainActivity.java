@@ -358,15 +358,31 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static int countChar(String text, char target) {
+        int count = 0;
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) == target) count++;
+        }
+        return count;
+    }
+
     private static String stripTrailingSentencePunctuation(String value) {
         if (value == null) return null;
         String out = value.trim();
         while (!out.isEmpty()) {
             char tail = out.charAt(out.length() - 1);
-            if (tail == '.' || tail == ',' || tail == ';' || tail == '!' || tail == '?'
-                    || tail == ')' || tail == ']' || tail == '>' || tail == '\'' || tail == '"'
-                    || tail == '。' || tail == '，' || tail == '；' || tail == '！' || tail == '？'
-                    || tail == '）' || tail == '】' || tail == '》' || tail == '」' || tail == '』') {
+            boolean strip;
+            if (tail == ']') {
+                strip = countChar(out, ']') > countChar(out, '[');
+            } else if (tail == ')') {
+                strip = countChar(out, ')') > countChar(out, '(');
+            } else {
+                strip = tail == '.' || tail == ',' || tail == ';' || tail == '!' || tail == '?'
+                        || tail == '>' || tail == '\'' || tail == '"'
+                        || tail == '。' || tail == '，' || tail == '；' || tail == '！' || tail == '？'
+                        || tail == '）' || tail == '】' || tail == '》' || tail == '」' || tail == '』';
+            }
+            if (strip) {
                 out = out.substring(0, out.length() - 1).trim();
             } else {
                 break;
@@ -813,12 +829,14 @@ public class MainActivity extends Activity {
             }
         }
         attachFlushInFlight = true;
-        String script = "(function(){var ready=window.__pbAttachHooked"
-                + "?!!(window.__pbAttachListeners&&window.__pbAttachListeners.size>0)"
-                + ":!!document.querySelector('button[aria-label=\"添加文件\"]');"
-                + "if(!ready){var tab=document.querySelector('nav[aria-label=\"主导航\"] button[aria-label^=\"主要聊天\"]:not([aria-current=\"page\"])');"
+        String script = "(function(){var hasSet=!!(window.__pbAttachListeners&&window.__pbAttachListeners.size>0);"
+                + "var hasBtn=!!document.querySelector('button[aria-label=\"添加文件\"]');"
+                + "if(!hasSet&&!hasBtn){"
+                + "var tab=document.querySelector('nav[aria-label=\"主导航\"] button[aria-label^=\"主要聊天\"]:not([aria-current=\"page\"])');"
                 + "if(tab)tab.click();return 'wait';}"
-                + "window.dispatchEvent(new CustomEvent('companion:attach',{detail:" + files + "}));"
+                + "var detail=" + files + ";"
+                + "if(hasSet)window.dispatchEvent(new CustomEvent('companion:attach',{detail:detail}));"
+                + "else setTimeout(function(){window.dispatchEvent(new CustomEvent('companion:attach',{detail:detail}));},0);"
                 + "return 'ok';})()";
         web.evaluateJavascript(script, result -> {
             attachFlushInFlight = false;
