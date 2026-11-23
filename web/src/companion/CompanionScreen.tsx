@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Menu, Settings2, SlidersHorizontal, X } from "lucide-react";
 
 import { useNanobotStream, type SendAttachment } from "@/hooks/useNanobotStream";
@@ -48,14 +48,15 @@ import { approvalCallIds, awaitingReply, chatItems, currentActivity } from "./pr
 import { IdeasView } from "./TabViews";
 import { usePetMood } from "./usePetMood";
 import { usePetScale } from "./appearance";
+import { LazyBoundary, lazyScreen } from "./Screen";
 import { ViewerProvider } from "./Viewer";
 
-const FeedScreen = lazy(() => import("./muse/Feed").then((m) => ({ default: m.FeedScreen })));
-const FeedSettingsSheet = lazy(() => import("./muse/Feed").then((m) => ({ default: m.FeedSettingsSheet })));
-const GoalsScreen = lazy(() => import("./muse/GoalsScreen").then((m) => ({ default: m.GoalsScreen })));
-const HelpersScreen = lazy(() => import("./muse/Helpers").then((m) => ({ default: m.HelpersScreen })));
-const TeachSheet = lazy(() => import("./muse/TeachSheet").then((m) => ({ default: m.TeachSheet })));
-const CreationsView = lazy(() => import("./Creations").then((m) => ({ default: m.CreationsView })));
+const FeedScreen = lazyScreen(() => import("./muse/Feed").then((m) => ({ default: m.FeedScreen })));
+const FeedSettingsSheet = lazyScreen(() => import("./muse/Feed").then((m) => ({ default: m.FeedSettingsSheet })));
+const GoalsScreen = lazyScreen(() => import("./muse/GoalsScreen").then((m) => ({ default: m.GoalsScreen })));
+const HelpersScreen = lazyScreen(() => import("./muse/Helpers").then((m) => ({ default: m.HelpersScreen })));
+const TeachSheet = lazyScreen(() => import("./muse/TeachSheet").then((m) => ({ default: m.TeachSheet })));
+const CreationsView = lazyScreen(() => import("./Creations").then((m) => ({ default: m.CreationsView })));
 
 export type CompanionTab = MuseTab;
 
@@ -621,7 +622,7 @@ export function LiveScreen({
             style={{ paddingTop: insets.top, paddingBottom: insets.bottom + 16 }}
           >
             <div className="mx-auto max-w-2xl">
-              <Suspense fallback={null}>
+              <LazyBoundary>
                 {key === "feed" && (
                   <FeedScreen
                     data={feedData}
@@ -655,7 +656,7 @@ export function LiveScreen({
                 )}
                 {key === "helpers" && <HelpersScreen active={tab === "helpers"} onOpenChat={onOpenChat} />}
                 {key === "creations" && <CreationsView active={tab === "creations"} />}
-              </Suspense>
+              </LazyBoundary>
             </div>
           </div>
         ) : null,
@@ -768,7 +769,7 @@ export function LiveScreen({
       </MuseSheet>
 
       {feedSettings && (
-        <Suspense fallback={null}>
+        <LazyBoundary onClose={() => setFeedSettings(false)}>
           <FeedSettingsSheet
             open={feedSettings}
             data={feedData}
@@ -779,56 +780,50 @@ export function LiveScreen({
               if (wroteNow) setWritingSince(Date.now());
             }}
           />
-        </Suspense>
+        </LazyBoundary>
       )}
 
-      {statusOpen && (
-        <Suspense fallback={null}>
-          <StatusSheet
-            open={statusOpen}
-            onClose={() => setStatusOpen(false)}
-            face={<PetView value={companion.avatar} animation={pet.animation} loop={pet.loop} onDone={pet.onDone} size={72} />}
-            name={companion.name}
-            statusLine={status}
-            working={isStreaming}
-            onStop={() => {
-              stop();
+      <StatusSheet
+        open={statusOpen}
+        onClose={() => setStatusOpen(false)}
+        face={<PetView value={companion.avatar} animation={pet.animation} loop={pet.loop} onDone={pet.onDone} size={72} />}
+        name={companion.name}
+        statusLine={status}
+        working={isStreaming}
+        onStop={() => {
+          stop();
+          setStatusOpen(false);
+        }}
+        approvals={mergedApprovals}
+        sessionKey={sessionKey}
+        history={messages}
+        computer={computer}
+        onDecide={decide}
+        onTaught={setTaught}
+        identity={
+          <NameLookRow
+            companion={companion}
+            onUpdate={onUpdateCompanion}
+            onChangeLook={() => {
               setStatusOpen(false);
+              onChangeLook();
             }}
-            approvals={mergedApprovals}
-            sessionKey={sessionKey}
-            history={messages}
-            computer={computer}
-            onDecide={decide}
-            onTaught={setTaught}
-            identity={
-              <NameLookRow
-                companion={companion}
-                onUpdate={onUpdateCompanion}
-                onChangeLook={() => {
-                  setStatusOpen(false);
-                  onChangeLook();
-                }}
-              />
-            }
           />
-        </Suspense>
-      )}
+        }
+      />
 
       {teaching && (
-        <Suspense fallback={null}>
-          <BrowserFullscreen
-            name={companion.name}
-            teach
-            onTaught={setTaught}
-            onClose={() => setTeaching(false)}
-          />
-        </Suspense>
+        <BrowserFullscreen
+          name={companion.name}
+          teach
+          onTaught={setTaught}
+          onClose={() => setTeaching(false)}
+        />
       )}
       {taught && (
-        <Suspense fallback={null}>
+        <LazyBoundary onClose={() => setTaught(null)}>
           <TeachSheet steps={taught} name={companion.name} onClose={() => setTaught(null)} />
-        </Suspense>
+        </LazyBoundary>
       )}
     </div>
     </ViewerProvider>

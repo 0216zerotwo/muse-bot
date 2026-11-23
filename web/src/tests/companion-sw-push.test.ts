@@ -117,4 +117,90 @@ describe("companion push", () => {
     expect(store.has(`${ORIGIN}/companion-manifest.json`)).toBe(true);
     expect(store.has(`${ORIGIN}/brand/companion_icon_192.png`)).toBe(true);
   });
+
+  it("pre-warms lazy src/companion/* chunks and worker assets on install while skipping heavy katex/markdown/non-default locales", async () => {
+    const manifest = {
+      "companion.html": {
+        file: "assets/companion-MAIN.js",
+        css: ["assets/companion-MAIN.css"],
+        imports: ["_react-vendor-A.js"],
+      },
+      "_react-vendor-A.js": { file: "assets/react-vendor-A.js" },
+      "_ProactivePanel-B.js": { file: "assets/ProactivePanel-B.js" },
+      "src/companion/muse/GoalsScreen.tsx": {
+        file: "assets/GoalsScreen-C.js",
+        imports: ["_react-vendor-A.js", "_ProactivePanel-B.js"],
+      },
+      "_worker_imageEncode.worker-D.js": { file: "assets/imageEncode.worker-D.js" },
+      "src/i18n/locales/zh-CN/common.json": { file: "assets/locale-zh-CN-E.js" },
+      "src/i18n/locales/fr/common.json": { file: "assets/locale-fr-F.js" },
+      "src/lib/markdown-math.ts": {
+        file: "assets/markdown-math-G.js",
+        imports: ["_katex-H.js"],
+      },
+      "_katex-H.js": { file: "assets/katex-H.js" },
+    };
+
+    const cached = new Map<string, { ok: boolean; headers: Headers; json: () => Promise<unknown>; text: () => Promise<string> }>();
+    const makeRes = (body: unknown) => ({
+      ok: true,
+      headers: new Headers(),
+      json: async () => body,
+      text: async () => (typeof body === "string" ? body : JSON.stringify(body)),
+    });
+
+    const cache = {
+      addAll: vi.fn(async (paths: string[]) => {
+        for (const p of paths) {
+          const url = new URL(p, ORIGIN).href;
+          cached.set(url, p === "/asset-manifest.json" ? makeRes(manifest) : makeRes("shell"));
+        }
+      }),
+      match: vi.fn(async (key: string | { url: string }) => {
+        const raw = typeof key === "string" ? key : key.url;
+        return cached.get(new URL(raw, ORIGIN).href);
+      }),
+      put: vi.fn(async (key: string | { url: string }, res: ReturnType<typeof makeRes>) => {
+        const raw = typeof key === "string" ? key : key.url;
+        cached.set(new URL(raw, ORIGIN).href, res);
+      }),
+      keys: vi.fn(async () => Array.from(cached.keys()).map((url) => ({ url }))),
+      delete: vi.fn(async (req: { url: string }) => cached.delete(req.url)),
+    };
+    const caches = {
+      keys: vi.fn(async () => ["nanobot-static-v3"]),
+      delete: vi.fn(async () => true),
+      open: vi.fn(async () => cache),
+    };
+    const fetchMock = vi.fn(async () => makeRes("chunk"));
+
+    const listeners = new Map<string, (event: Record<string, unknown>) => void>();
+    const self = {
+      location: { origin: ORIGIN },
+      skipWaiting: vi.fn(),
+      registration: { showNotification: vi.fn() },
+      clients: { claim: vi.fn(), matchAll: vi.fn(async () => []), openWindow: vi.fn() },
+      addEventListener: (type: string, cb: (event: Record<string, unknown>) => void) => listeners.set(type, cb),
+    };
+    new Function("self", "caches", "fetch", SW_SCRIPT)(self, caches, fetchMock);
+
+    let installWait: Promise<unknown> = Promise.resolve();
+    listeners.get("install")?.({ waitUntil: (p: Promise<unknown>) => (installWait = p) });
+    await installWait;
+
+    expect(cached.has(`${ORIGIN}/assets/companion-MAIN.js`)).toBe(true);
+    expect(cached.has(`${ORIGIN}/assets/GoalsScreen-C.js`)).toBe(true);
+    expect(cached.has(`${ORIGIN}/assets/ProactivePanel-B.js`)).toBe(true);
+    expect(cached.has(`${ORIGIN}/assets/imageEncode.worker-D.js`)).toBe(true);
+    expect(cached.has(`${ORIGIN}/assets/locale-zh-CN-E.js`)).toBe(true);
+    // Heavy markdown/KaTeX and unused locales remain on-demand.
+    expect(cached.has(`${ORIGIN}/assets/locale-fr-F.js`)).toBe(false);
+    expect(cached.has(`${ORIGIN}/assets/katex-H.js`)).toBe(false);
+
+    // Activate pruning preserves the manifested worker asset too.
+    let activateWait: Promise<unknown> = Promise.resolve();
+    listeners.get("activate")?.({ waitUntil: (p: Promise<unknown>) => (activateWait = p) });
+    await activateWait;
+    expect(cached.has(`${ORIGIN}/assets/imageEncode.worker-D.js`)).toBe(true);
+  });
 });

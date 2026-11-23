@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { BarChart3, Cpu, GraduationCap, KeyRound, Palette, PlugZap, Server, ShieldCheck, Smartphone, Volume2 } from "lucide-react";
 
 import { fetchMcpPresets } from "@/lib/api";
@@ -19,16 +19,16 @@ import { readsAfterVoice, setReadsAfterVoice } from "./MessageActions";
 import { usePetSize, useThemeMode } from "./appearance";
 import { MODE_LABEL, SIZE_LABEL } from "./AppearanceDock";
 import { NotificationsRow, notificationsNote, useNotifications } from "./NotificationsAction";
-import { PageSheet } from "./Screen";
+import { LazyBoundary, lazyScreen, PageSheet } from "./Screen";
 import { ConnectionsView } from "./TabViews";
 import { formatCost, formatTokens, UsagePanel } from "./UsagePanel";
 
-const ModelPanel = lazy(() => import("./ModelPanel").then((m) => ({ default: m.ModelPanel })));
-const ModelDetail = lazy(() => import("./ModelPanel").then((m) => ({ default: m.ModelDetail })));
-const SkillsPanel = lazy(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })));
-const PermissionLevels = lazy(() => import("./PermissionLevels").then((m) => ({ default: m.PermissionLevels })));
-const VaultPanel = lazy(() => import("./VaultPanel").then((m) => ({ default: m.VaultPanel })));
-const DevicesPanel = lazy(() => import("./DevicesPanel").then((m) => ({ default: m.DevicesPanel })));
+const ModelPanel = lazyScreen(() => import("./ModelPanel").then((m) => ({ default: m.ModelPanel })));
+const ModelDetail = lazyScreen(() => import("./ModelPanel").then((m) => ({ default: m.ModelDetail })));
+const SkillsPanel = lazyScreen(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })));
+const PermissionLevels = lazyScreen(() => import("./PermissionLevels").then((m) => ({ default: m.PermissionLevels })));
+const VaultPanel = lazyScreen(() => import("./VaultPanel").then((m) => ({ default: m.VaultPanel })));
+const DevicesPanel = lazyScreen(() => import("./DevicesPanel").then((m) => ({ default: m.DevicesPanel })));
 
 export type SettingsPage = "root" | "models" | "model" | "usage" | "skills" | "connections" | "permissions" | "vault" | "devices";
 
@@ -224,7 +224,7 @@ export function SettingsScreen({
     >
       {page === "root" && <SettingsRoot onOpen={push} onAppearance={onAppearance} />}
       {page !== "root" && (
-        <Suspense fallback={null}>
+        <LazyBoundary key={page}>
           {page === "models" && (
             <ModelPanel
               active
@@ -241,7 +241,7 @@ export function SettingsScreen({
           {page === "permissions" && <PermissionLevels />}
           {page === "vault" && <VaultPanel />}
           {page === "devices" && <DevicesPanel onDisconnect={onLogout} />}
-        </Suspense>
+        </LazyBoundary>
       )}
     </PageSheet>
   );

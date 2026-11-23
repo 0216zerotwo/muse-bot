@@ -68,6 +68,9 @@ export async function fetchBoundedTextPreview(
     headers: { Range: `bytes=0-${maxBytes - 1}` },
     signal,
   });
+  if (res.status === 416 && /\/0\s*$/.test(res.headers.get("Content-Range") ?? "")) {
+    return { text: "", bytes: 0 };
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
   const chunks: Uint8Array[] = [];

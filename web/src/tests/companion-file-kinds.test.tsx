@@ -136,6 +136,18 @@ describe("files in the chat", () => {
     unmount();
     expect(capturedSignal?.aborted).toBe(true);
   });
+
+  it("treats HTTP 416 with Content-Range: bytes */0 from Starlette on 0 B text files as empty 0 B preview", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 416, headers: { "Content-Range": "bytes */0" } })),
+    );
+    const empty = await fetchBoundedTextPreview("/api/media/a/empty.md", TEXT_PREVIEW);
+    expect(empty).toEqual({ text: "", bytes: 0 });
+
+    render(<FileCard item={{ kind: "file", url: "/api/media/a/empty.md", name: "空笔记.md" }} onOpen={vi.fn()} />);
+    expect(await screen.findByText("文档 · 0 B")).toBeInTheDocument();
+  });
 });
 
 describe("a reply's words, read out", () => {

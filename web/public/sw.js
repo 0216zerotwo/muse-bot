@@ -81,10 +81,70 @@ async function cacheFirstPublicIcon(request) {
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE))
+    caches.open(CACHE_NAME).then(async (cache) => {
+      await cache.addAll(PRECACHE);
+      await warmCompanionChunks(cache);
+    })
   );
   self.skipWaiting();
 });
+
+const DEFERRED_HEAVY_CHUNK_RE = /(?:^|\/)assets\/(?:katex-|markdown-|streamdown-|syntax-highlight-|ViewportCodeRows-)/;
+
+// Pre-warm Companion's code-split screen/sheet chunks, default locales, and web
+// workers in the background so switching tabs or opening Settings works offline
+// right after the first visit without inflating the entry bundle.
+async function warmCompanionChunks(cache) {
+  const response = await cache.match(ASSET_MANIFEST_PATH);
+  if (!response) return;
+  let manifest;
+  try {
+    manifest = await response.json();
+  } catch {
+    return;
+  }
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return;
+
+  const visited = new Set();
+  const urls = new Set();
+  const visit = (key) => {
+    if (!key || visited.has(key)) return;
+    visited.add(key);
+    const entry = manifest[key];
+    if (!entry || typeof entry !== "object") return;
+    for (const file of [entry.file, ...(entry.css ?? [])]) {
+      if (typeof file !== "string" || DEFERRED_HEAVY_CHUNK_RE.test(file)) continue;
+      const url = new URL(file, self.location.origin);
+      if (url.origin === self.location.origin) urls.add(url.pathname + url.search);
+    }
+    for (const dep of entry.imports ?? []) {
+      visit(dep);
+    }
+  };
+
+  for (const key of Object.keys(manifest)) {
+    if (
+      key === "companion.html"
+      || key.startsWith("src/companion/")
+      || key.startsWith("_worker_")
+      || key === "src/i18n/locales/zh-CN/common.json"
+      || key === "src/i18n/locales/en/common.json"
+    ) {
+      visit(key);
+    }
+  }
+
+  await Promise.allSettled(
+    Array.from(urls).map(async (assetPath) => {
+      const existing = await cache.match(assetPath);
+      if (existing) return;
+      const res = await fetch(assetPath);
+      if (responseMayBeCached(res)) {
+        await cache.put(assetPath, res);
+      }
+    })
+  );
+}
 
 // Collect same-origin paths referenced by the given HTML document.
 function referencedAssetPaths(html) {
@@ -252,7 +312,10 @@ self.addEventListener("fetch", (event) => {
         // change index.html without changing sw.js, so this cannot rely only
         // on the manifest cached when the worker was installed.
         if (isNavigation || path === "/" || path === COMPANION_SHELL) {
-          if (await refreshAssetManifest(cache)) await pruneStaleEntries();
+          if (await refreshAssetManifest(cache)) {
+            await warmCompanionChunks(cache);
+            await pruneStaleEntries();
+          }
         }
       })
       .catch(() => undefined)

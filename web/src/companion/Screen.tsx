@@ -1,7 +1,103 @@
-import { useEffect, useRef, type ReactNode, type RefObject } from "react";
+import {
+  Component,
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  type ComponentProps,
+  type ComponentType,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { ChevronLeft, X } from "lucide-react";
 
 import { useSheetDrag } from "./sheetDrag";
+
+const lazyResetters = new Set<() => void>();
+
+/**
+ * Wraps ``React.lazy`` so a rejected dynamic import (offline or stale deploy hash) can be reset
+ * and retried cleanly inside ``LazyBoundary`` without reloading the active chat session.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function lazyScreen<T extends ComponentType<any>>(
+  factory: () => Promise<{ default: T }>,
+): ComponentType<ComponentProps<T>> {
+  let Inner = lazy(factory);
+  lazyResetters.add(() => {
+    Inner = lazy(factory);
+  });
+  const RetryableLazy = (props: ComponentProps<T>) => <Inner {...props} />;
+  return RetryableLazy;
+}
+
+export class LazyBoundary extends Component<
+  { children: ReactNode; fallback?: ReactNode; onClose?: () => void },
+  { failed: boolean; retryKey: number }
+> {
+  state = { failed: false, retryKey: 0 };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  private retry = () => {
+    for (const reset of lazyResetters) reset();
+    this.setState((prev) => ({ failed: false, retryKey: prev.retryKey + 1 }));
+  };
+
+  render() {
+    if (this.state.failed) {
+      const card = (
+        <div
+          className="c-card flex max-w-xs flex-col items-center justify-center gap-3 rounded-3xl px-6 py-6 text-center"
+          role="alert"
+        >
+          <p className="c-muted text-[14px]">这一页没加载出来，检查一下网络或刷新试试。</p>
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <button
+              type="button"
+              onClick={this.retry}
+              className="c-primary min-h-10 rounded-full px-4 text-[14px] font-semibold"
+            >
+              重试
+            </button>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="c-pressable min-h-10 rounded-full px-4 text-[14px]"
+              style={{ background: "var(--c-fill)" }}
+            >
+              刷新页面
+            </button>
+            {this.props.onClose && (
+              <button
+                type="button"
+                onClick={this.props.onClose}
+                className="c-muted c-pressable min-h-10 rounded-full px-3 text-[14px]"
+              >
+                关闭
+              </button>
+            )}
+          </div>
+        </div>
+      );
+      if (this.props.onClose) {
+        return (
+          <div className="fixed inset-0 z-50 grid place-items-center bg-black/45 p-6" onClick={this.props.onClose}>
+            <div onClick={(e) => e.stopPropagation()}>{card}</div>
+          </div>
+        );
+      }
+      return <div className="flex justify-center px-6 py-10">{card}</div>;
+    }
+    return (
+      <Suspense key={this.state.retryKey} fallback={this.props.fallback ?? null}>
+        {this.props.children}
+      </Suspense>
+    );
+  }
+}
 
 /**
  * Open overlays/pages, numbered when they enter the active stack: a layer opened on top

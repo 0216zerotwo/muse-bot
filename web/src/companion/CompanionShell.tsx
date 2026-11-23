@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useSessions } from "@/hooks/useSessions";
 import type { ChatSummary } from "@/lib/types";
@@ -23,15 +23,15 @@ import { androidShell } from "./android-shell";
 import { adoptAppearance, followSystemTheme, setAppearanceSaver } from "./appearance";
 import { useTabOrder, type MuseTab } from "./muse/Shell";
 import { CompanionAvatarContext, lastLook, NO_LOOK, PetLibraryProvider, PetView } from "./Pet";
-import { useEdgeSwipe } from "./Screen";
+import { LazyBoundary, lazyScreen, useEdgeSwipe } from "./Screen";
 import type { SettingsPage } from "./Settings";
 
-const Onboarding = lazy(() => import("./Onboarding").then((m) => ({ default: m.Onboarding })));
-const SettingsScreen = lazy(() => import("./Settings").then((m) => ({ default: m.SettingsScreen })));
-const AppearanceDock = lazy(() => import("./AppearanceDock").then((m) => ({ default: m.AppearanceDock })));
-const SideChatSheet = lazy(() => import("./muse/SideChatSheet").then((m) => ({ default: m.SideChatSheet })));
-const HelperProfileSheet = lazy(() => import("./muse/Helpers").then((m) => ({ default: m.HelperProfileSheet })));
-const GroupSheet = lazy(() => import("./muse/Helpers").then((m) => ({ default: m.GroupSheet })));
+const Onboarding = lazyScreen(() => import("./Onboarding").then((m) => ({ default: m.Onboarding })));
+const SettingsScreen = lazyScreen(() => import("./Settings").then((m) => ({ default: m.SettingsScreen })));
+const AppearanceDock = lazyScreen(() => import("./AppearanceDock").then((m) => ({ default: m.AppearanceDock })));
+const SideChatSheet = lazyScreen(() => import("./muse/SideChatSheet").then((m) => ({ default: m.SideChatSheet })));
+const HelperProfileSheet = lazyScreen(() => import("./muse/Helpers").then((m) => ({ default: m.HelperProfileSheet })));
+const GroupSheet = lazyScreen(() => import("./muse/Helpers").then((m) => ({ default: m.GroupSheet })));
 
 /** Session summary for the companion chat, even before its first message is persisted. */
 function companionSession(chatId: string, sessions: ChatSummary[]): ChatSummary {
@@ -227,9 +227,9 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
     <CompanionTheme avatar={companion?.avatar ?? null} />
     <div className="companion h-full">
       {session && companion && !companion.onboarded ? (
-        <Suspense fallback={null}>
+        <LazyBoundary>
           <Onboarding companion={companion} onDone={setCompanion} />
-        </Suspense>
+        </LazyBoundary>
       ) : session && companion ? (
         <CompanionScreen
           key={session.key}
@@ -311,7 +311,7 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
       )}
 
       {editingHelper && (
-        <Suspense fallback={null}>
+        <LazyBoundary onClose={() => setEditingHelper(null)}>
           <HelperProfileSheet
             chatId={editingHelper}
             onClose={() => setEditingHelper(null)}
@@ -323,10 +323,10 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
               void refresh();
             }}
           />
-        </Suspense>
+        </LazyBoundary>
       )}
       {editingGroup && (
-        <Suspense fallback={null}>
+        <LazyBoundary onClose={() => setEditingGroup(false)}>
           <GroupSheet
             open={editingGroup}
             group={openGroup}
@@ -338,11 +338,11 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
               void refresh();
             }}
           />
-        </Suspense>
+        </LazyBoundary>
       )}
 
       {editingChat && (
-        <Suspense fallback={null}>
+        <LazyBoundary onClose={() => setEditingChat(null)}>
           <SideChatSheet
             chat={editingChat}
             onClose={() => setEditingChat(null)}
@@ -352,11 +352,11 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
               void changeChat(client, id, "delete").then(() => refresh());
             }}
           />
-        </Suspense>
+        </LazyBoundary>
       )}
 
       {settings && companion && (
-        <Suspense fallback={null}>
+        <LazyBoundary onClose={() => setSettings(null)}>
           <SettingsScreen
             start={settings}
             onClose={() => setSettings(null)}
@@ -377,12 +377,12 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
               setAppearance(true);
             }}
           />
-        </Suspense>
+        </LazyBoundary>
       )}
       {appearance && (
-        <Suspense fallback={null}>
+        <LazyBoundary onClose={() => setAppearance(false)}>
           <AppearanceDock onDone={() => setAppearance(false)} />
-        </Suspense>
+        </LazyBoundary>
       )}
     </div>
     </CompanionAvatarContext.Provider>

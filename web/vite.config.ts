@@ -1,6 +1,6 @@
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 
@@ -44,6 +44,33 @@ export function writeCompressedWebuiAssets(outputDir: string, fileNames: string[
   }
 }
 
+export function syncWorkerAssetsToManifest(outputDir: string): string[] {
+  const assetsDir = path.resolve(outputDir, "assets");
+  const manifestPath = path.resolve(outputDir, "asset-manifest.json");
+  if (!existsSync(assetsDir) || !existsSync(manifestPath)) return [];
+  const workerFiles = readdirSync(assetsDir)
+    .filter((name) => /\.worker-[^/]+\.js$/i.test(name))
+    .map((name) => `assets/${name}`);
+  if (workerFiles.length === 0) return [];
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, { file?: string }>;
+    const known = new Set(Object.values(manifest).map((entry) => entry?.file).filter(Boolean));
+    let changed = false;
+    for (const rel of workerFiles) {
+      if (!known.has(rel)) {
+        manifest[`_worker_${path.basename(rel)}`] = { file: rel };
+        changed = true;
+      }
+    }
+    if (changed) {
+      writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    }
+  } catch {
+    // Non-JSON manifest in custom builds: leave untouched.
+  }
+  return workerFiles;
+}
+
 export function gzipWebuiAssets(): Plugin {
   return {
     name: "gzip-assets",
@@ -53,7 +80,9 @@ export function gzipWebuiAssets(): Plugin {
       if (!outputDir) {
         throw new Error("WebUI gzip build requires a Rollup output directory");
       }
-      writeCompressedWebuiAssets(outputDir, Object.keys(bundle));
+      const workerFiles = syncWorkerAssetsToManifest(outputDir);
+      const allFiles = Array.from(new Set([...Object.keys(bundle), ...workerFiles]));
+      writeCompressedWebuiAssets(outputDir, allFiles);
     },
   };
 }
