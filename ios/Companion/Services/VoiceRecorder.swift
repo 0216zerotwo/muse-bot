@@ -20,9 +20,7 @@ final class VoiceRecorder: ObservableObject {
         requestingPermission = true
         defer { requestingPermission = false }
         error = nil
-        let allowed = await withCheckedContinuation { continuation in
-            AVAudioSession.sharedInstance().requestRecordPermission { continuation.resume(returning: $0) }
-        }
+        let allowed = await AVAudioApplication.requestRecordPermission()
         guard generation == attempt else { return }
         guard allowed else { error = "请在系统设置中允许 Muse Bot 使用麦克风。"; return }
         do {
@@ -74,6 +72,6 @@ final class VoiceRecorder: ObservableObject {
     }
     private func stopRecording() {
         limit?.cancel(); limit = nil; recorder?.stop(); recorder = nil; recording = false
-        try? AVAudioSession.sharedInstance().setActive(false)
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 }

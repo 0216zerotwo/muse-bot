@@ -258,7 +258,8 @@ extension CompanionStore {
         projection.messages.append(optimistic(queued))
         projections[targetChatID] = projection
         persistOutbox()
-        publishCurrent()
+        publishChat(targetChatID)
+        if targetChatID != currentChatID { publishCurrent() }
         beginFlush()
         return true
     }
@@ -316,13 +317,15 @@ extension CompanionStore {
                 try await write(frame)
                 flushRetryAttempt = 0
                 runningChats.insert(queued.chatID)
-                publishCurrent()
+                publishChat(queued.chatID)
+                if queued.chatID != currentChatID { publishCurrent() }
             } catch {
                 uploading = false
                 guard attempt == generation else { return }
                 if markedSent {
                     markOptimisticDelivery(turnID: queued.id, chatID: queued.chatID, status: "failed")
-                    publishCurrent()
+                    publishChat(queued.chatID)
+                    if queued.chatID != currentChatID { publishCurrent() }
                     show(error)
                 } else if let service = error as? ServiceError, service.isAuthentication {
                     show(error)
@@ -333,7 +336,8 @@ extension CompanionStore {
                         persistOutbox()
                     }
                     markOptimisticDelivery(turnID: queued.id, chatID: queued.chatID, status: "failed")
-                    publishCurrent()
+                    publishChat(queued.chatID)
+                    if queued.chatID != currentChatID { publishCurrent() }
                     show(error)
                 } else {
                     show(error)
@@ -398,8 +402,8 @@ extension CompanionStore {
     }
 
     /// Stops an active `/goal` loop via silent system control frame, interrupting any in-flight turn first.
-    func stopGoal() async {
-        let id = currentChatID
+    func stopGoal(chatID: String? = nil) async {
+        let id = chatID ?? currentChatID
         guard connected, !id.isEmpty else { show(ServiceError.message("连接后再试一次")); return }
         if runningChats.contains(id) {
             cancelGoalAfterStop.insert(id)
@@ -464,28 +468,22 @@ extension CompanionStore {
         guard id != mainChatID else { return }
         do {
             _ = try await requestMutation("companion.chats.change", payload: ["id": .string(id), "action": .string("delete")])
-            outbox.removeAll { $0.chatID == id }
-            persistOutbox()
-            knownChats.remove(id)
-            goalStates.removeValue(forKey: id)
-            cancelGoalAfterStop.remove(id)
-            projections.removeValue(forKey: id)
-            historyEvents.removeValue(forKey: id)
-            savedEvents.removeValue(forKey: id)
-            LocalStore.remove(LocalStore.url("chats", server: serverAddress, name: id))
+            purgeLocalChat(id)
             if currentChatID == id { await changeChat(mainChatID) }
             await refreshSessions()
         } catch { show(error) }
     }
 
-    func deleteMessage(_ message: ChatMessage) async {
+    func deleteMessage(_ message: ChatMessage, chatID: String? = nil) async {
         guard let turnID = message.turnId, !turnID.isEmpty else { return }
-        let id = currentChatID
-        if outbox.contains(where: { $0.id == turnID && $0.state == "queued" }) {
-            outbox.removeAll { $0.id == turnID }
+        let id = chatID ?? currentChatID
+        guard !id.isEmpty else { return }
+        if outbox.contains(where: { $0.id == turnID && $0.chatID == id && $0.state == "queued" }) {
+            outbox.removeAll { $0.id == turnID && $0.chatID == id }
             projections[id]?.messages.removeAll { $0.turnId == turnID }
             persistOutbox()
-            publishCurrent()
+            publishChat(id)
+            if id != currentChatID { publishCurrent() }
             return
         }
         do {
@@ -507,9 +505,9 @@ extension CompanionStore {
 
     /// 重新生成: the newest answer again. The server takes the old one out and asks the question
     /// again under the same turn; the chat is read again, so it shows the question at work.
-    func regenerate(_ message: ChatMessage) async {
-        guard let turnID = message.turnId, !turnID.isEmpty, connected, !running else { return }
-        let id = currentChatID
+    func regenerate(_ message: ChatMessage, chatID: String? = nil) async {
+        let id = chatID ?? currentChatID
+        guard let turnID = message.turnId, !turnID.isEmpty, !id.isEmpty, connected, !runningChats.contains(id) else { return }
         do {
             _ = try await requestMutation("companion.chats.change", payload: [
                 "id": .string(id), "action": .string("regenerate"), "turn_id": .string(turnID),
@@ -519,15 +517,16 @@ extension CompanionStore {
     }
 
     /// Used only for a user-requested retry of an uncertain write, after checking the transcript.
-    func retryMessage(_ message: ChatMessage) async {
-        guard let turnID = message.turnId, connected else { return }
-        let id = currentChatID
+    func retryMessage(_ message: ChatMessage, chatID: String? = nil) async {
+        let id = chatID ?? currentChatID
+        guard let turnID = message.turnId, !id.isEmpty, connected else { return }
         guard await hydrate(id) else { return }
         guard let index = outbox.firstIndex(where: { $0.id == turnID && $0.chatID == id }) else { return }
         outbox[index].state = "queued"
         markOptimisticDelivery(turnID: turnID, chatID: id, status: "sending")
         persistOutbox()
-        publishCurrent()
+        publishChat(id)
+        if id != currentChatID { publishCurrent() }
         beginFlush()
     }
 
@@ -572,6 +571,7 @@ extension CompanionStore {
             projections[item.chatID] = projection
         }
         publishCurrent()
+        if !helperChatID.isEmpty { publishHelper() }
     }
 
     func persistOutbox() {

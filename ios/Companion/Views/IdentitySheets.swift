@@ -141,7 +141,7 @@ struct TaskSheet: View {
 
     private func loadReport() async {
         guard let job = task.jobID, let run = task.runID else { return }
-        do { report = try await store.getResource("/api/webui/automations/\(job)/runs/\(run)") }
+        do { report = try await store.getResource(Schedules.automationRunPath(jobID: job, runID: run)) }
         catch { reportError = "这次运行的记录没能读取。" }
     }
 }
@@ -412,7 +412,7 @@ private struct RunReportView: View {
         .navigationTitle("这次运行").navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .task {
-            do { report = try await store.getResource("/api/webui/automations/\(jobID)/runs/\(run["id"].stringValue)") }
+            do { report = try await store.getResource(Schedules.automationRunPath(jobID: jobID, runID: run["id"].stringValue)) }
             catch { self.error = "这次运行的记录没能读取。" }
         }
     }

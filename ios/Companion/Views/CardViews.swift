@@ -48,7 +48,16 @@ struct NativeCardView: View {
         case "form": form
         case "trains": trains
         case "ui", "widget": EmbeddedCardView(card: card, baseURL: baseURL, send: locked ? nil : send)
-        case "connect", "credential": nativeServiceCard
+        case "credential": credentialCard
+        case "connect":
+            NativeConnectCardView(
+                serviceName: data["service"].stringValue,
+                reason: data["reason"].nonemptyString,
+                submitted: submitted,
+                locked: locked,
+                openSettings: { settingsPage = "connect" },
+                onConnected: { finish($0) }
+            )
         default: webPlaceholder
         }
     }
@@ -288,17 +297,35 @@ struct NativeCardView: View {
         }
     }
 
-    private var nativeServiceCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(card.type == "connect" ? "连接服务" : "安全填写凭证", systemImage: card.type == "connect" ? "powerplug" : "key")
+    private var credentialCard: some View {
+        let kind = data["kind"].nonemptyString ?? "login"
+        let service = data["service"].nonemptyString ?? "服务"
+        let what = kind == "login" ? "登录" : "密钥"
+        return VStack(alignment: .leading, spacing: 12) {
+            Label("\(service) 的\(what)", systemImage: "lock.fill")
                 .font(.headline)
-            Text(data["reason"].nonemptyString ?? data["summary"].nonemptyString ?? data["service"].stringValue)
-                .font(.subheadline).foregroundStyle(.secondary)
-            if card.type == "credential" {
-                Text("请在安全凭证中填写，密码和密钥不会进入聊天。").font(.footnote).foregroundStyle(.secondary)
+            if let reason = data["reason"].nonemptyString {
+                Text(reason).font(.subheadline).foregroundStyle(.secondary)
             }
-            Button(card.type == "connect" ? "管理服务连接" : "打开安全凭证") { settingsPage = card.type }
-                .buttonStyle(.borderedProminent).frame(minHeight: 44)
+            if submitted {
+                Label("已加密保存", systemImage: "checkmark.circle.fill")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else if !locked {
+                VaultCredentialForm(
+                    kind: kind,
+                    initialService: service,
+                    initialOrigin: data["origin"].stringValue,
+                    initialEnv: data["env"].stringValue,
+                    compact: true
+                ) { _ in
+                    finish("\(service) 的\(what)存好了，接着做")
+                }
+            } else {
+                Text("密码和密钥不会进入聊天，可在安全凭证里查看或管理。")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Button("打开安全凭证") { settingsPage = "credential" }
+                    .buttonStyle(.bordered).frame(minHeight: 44)
+            }
         }
     }
 
@@ -512,5 +539,181 @@ struct NativeApprovalView: View {
             if !ids.isEmpty { return ids.joined(separator: "、") }
         }
         return argumentText(value)
+    }
+}
+
+@MainActor
+private struct NativeConnectCardView: View {
+    @EnvironmentObject private var store: CompanionStore
+    let serviceName: String
+    let reason: String?
+    let submitted: Bool
+    let locked: Bool
+    var openSettings: () -> Void
+    var onConnected: (String) -> Void
+
+    @State private var preset: JSONValue = .null
+    @State private var loading = true
+    @State private var values: [String: String] = [:]
+    @State private var busy = false
+    @State private var error: String?
+
+    private var displayName: String {
+        preset["display_name"].nonemptyString ?? (serviceName.isEmpty ? "服务" : serviceName)
+    }
+    private var isConnected: Bool {
+        submitted || preset["installed"].boolValue || preset["configured"].boolValue
+    }
+    private var fields: [JSONValue] {
+        preset["required_fields"].array.filter { $0["name"].nonemptyString != nil }
+    }
+    private var missingRequired: Bool {
+        fields.contains { field in
+            field["required"].boolValue && !field["configured"].boolValue
+                && (values[field["name"].stringValue] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                if preset != .null {
+                    VendorLogo(vendor: .object([
+                        "name": .string(displayName),
+                        "logo_url": preset["logo_url"],
+                        "color": preset["brand_color"],
+                    ]), size: 36)
+                } else {
+                    Image(systemName: "powerplug").font(.title3).foregroundStyle(CompanionPalette.primary)
+                        .frame(width: 36, height: 36).background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(displayName).font(.headline)
+                    Text(isConnected ? "已连接" : (reason ?? preset["description"].nonemptyString ?? "连上后才能接着做"))
+                        .font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                if isConnected {
+                    Label("已连接", systemImage: "checkmark.circle.fill")
+                        .font(.footnote.weight(.medium)).foregroundStyle(.secondary)
+                }
+            }
+
+            if loading {
+                ProgressView().frame(maxWidth: .infinity, minHeight: 36)
+            } else if isConnected {
+                EmptyView()
+            } else if preset != .null && !locked {
+                if let note = preset["note"].nonemptyString {
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(fields, id: \.selfID) { field in
+                    let key = field["name"].stringValue
+                    let label = field["label"].nonemptyString ?? key
+                    let placeholder = field["configured"].boolValue ? "已保存，留空不变" : field["placeholder"].stringValue
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(label + (field["required"].boolValue ? "" : "（可选）")).font(.caption.weight(.medium))
+                        Group {
+                            if field["secret"].boolValue {
+                                SecureField(placeholder, text: binding(for: key))
+                            } else {
+                                TextField(placeholder, text: binding(for: key))
+                            }
+                        }
+                        .font(.system(size: 15))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 42)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+                        .accessibilityLabel(label)
+                    }
+                }
+                if let error {
+                    Text(error).font(.footnote).foregroundStyle(.red)
+                }
+                HStack(spacing: 10) {
+                    Button {
+                        Task { await connectService() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if busy { ProgressView().controlSize(.small) }
+                            Text(busy ? "连接中…" : (fields.isEmpty ? "连接" : "保存并连接"))
+                                .font(.system(size: 15, weight: .semibold))
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(CompanionPalette.primary, in: Capsule())
+                        .foregroundStyle(CompanionPalette.primaryText)
+                        .opacity(missingRequired || busy ? 0.45 : 1)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(missingRequired || busy)
+
+                    if fields.isEmpty {
+                        Button("设置", action: openSettings)
+                            .font(.subheadline)
+                            .padding(.horizontal, 14)
+                            .frame(minHeight: 44)
+                            .background(Color.primary.opacity(0.07), in: Capsule())
+                            .buttonStyle(.plain)
+                    }
+                }
+            } else {
+                Button("管理服务连接", action: openSettings)
+                    .buttonStyle(.borderedProminent)
+                    .frame(minHeight: 44)
+            }
+        }
+        .task(id: serviceName) { await loadPreset() }
+    }
+
+    private func binding(for key: String) -> Binding<String> {
+        Binding(get: { values[key] ?? "" }, set: { values[key] = $0; error = nil })
+    }
+
+    private func loadPreset() async {
+        guard !serviceName.isEmpty else { loading = false; return }
+        loading = true
+        defer { loading = false }
+        do {
+            let payload = try await store.getResource("/api/settings/mcp-presets")
+            if let found = payload["presets"].array.first(where: { $0["name"].stringValue == serviceName }) {
+                preset = found
+            }
+        } catch {
+            // Falls back to opening ConnectionsSettingsPage when preset metadata cannot be loaded.
+        }
+    }
+
+    private func connectService() async {
+        guard !busy, !missingRequired else { return }
+        busy = true
+        error = nil
+        defer { busy = false }
+        var payload: [String: JSONValue] = ["name": .string(serviceName)]
+        for (key, value) in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { payload[key] = .string(trimmed) }
+        }
+        do {
+            let result = try await store.changeResource("settings.mcp.enable", payload: payload)
+            if let updated = result["presets"].array.first(where: { $0["name"].stringValue == serviceName }) {
+                preset = updated
+            }
+            if result["last_action"]["ok"] == .bool(false) {
+                error = result["last_action"]["error"].nonemptyString ?? result["last_action"]["message"].nonemptyString ?? "连接没有完成，请重试。"
+                return
+            }
+            if result["hot_reload"]["ok"] == .bool(false) {
+                error = result["hot_reload"]["message"].nonemptyString ?? "设置已保存，服务器还没有重新连接这个服务。"
+                return
+            }
+            values = [:]
+            if preset["installed"].boolValue || preset["configured"].boolValue {
+                onConnected("\(displayName) 连好了，接着做刚才的事")
+            }
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 }

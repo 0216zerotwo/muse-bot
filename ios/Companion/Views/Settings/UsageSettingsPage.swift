@@ -21,15 +21,15 @@ struct UsageSettingsPage: View {
                 Section {
                     Text("\(SettingsDecoding.tokens(total)) token").font(.title.bold())
                     if let input = period["input_tokens"].doubleValue, input > 0 {
-                        let share = ((period["cached_tokens"].doubleValue ?? 0) / input) * 100
-                        Text("其中 \(Int(share))% 是缓存命中").font(.subheadline)
+                        let share = Self.clampedPercent(part: period["cached_tokens"].doubleValue ?? 0, whole: input)
+                        Text("其中 \(share)% 是缓存命中").font(.subheadline)
                     }
                     Text(SettingsDecoding.cost(period["cost"])).foregroundStyle(.secondary)
                     ForEach(period["by_source"].object.keys.sorted(), id: \.self) { key in
                         let value = period["by_source"][key].doubleValue ?? 0
                         VStack(alignment: .leading, spacing: 5) {
                             LabeledContent(sourceName(key), value: SettingsDecoding.tokens(value))
-                            ProgressView(value: total > 0 ? value / total : 0)
+                            ProgressView(value: Self.clampedProgress(value: value, total: total))
                         }
                     }
                 }
@@ -57,4 +57,14 @@ struct UsageSettingsPage: View {
         }.settingsStyle("用量").task { await resource.load(store) }.refreshable { await resource.load(store) }
     }
     private func sourceName(_ key: String) -> String { ["user": "聊天", "cron": "后台任务", "router": "挑模型", "dream": "整理记忆", "system": "系统", "api": "API"][key] ?? key }
+
+    nonisolated static func clampedProgress(value: Double, total: Double) -> Double {
+        guard total > 0, value.isFinite, total.isFinite else { return 0 }
+        return min(1, max(0, value / total))
+    }
+
+    nonisolated static func clampedPercent(part: Double, whole: Double) -> Int {
+        guard whole > 0, part.isFinite, whole.isFinite else { return 0 }
+        return Int(min(100, max(0, (part / whole) * 100)))
+    }
 }

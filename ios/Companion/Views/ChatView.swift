@@ -20,6 +20,8 @@ private struct ThreadEntry: Identifiable {
 @MainActor
 struct ChatView: View {
     var topInset: CGFloat = 174
+    /// Explicit chat ID when presenting an isolated helper/group conversation (`HelperChatScreen`).
+    var chatID: String? = nil
     /// A helper's or a group's chat: shown chat-app style (faces beside messages).
     var messenger: MessengerStyle? = nil
     @EnvironmentObject private var store: CompanionStore
@@ -40,6 +42,9 @@ struct ChatView: View {
     @State private var media: MediaDestination?
     @State private var followingBottom = true
     @State private var positioned = false
+    /// Prevents async media/file card expansion during initial open from clearing `followingBottom`.
+    @State private var settlingBottom = false
+    @State private var settleGeneration = UUID()
     /// Shown once it sits at the newest message (opening a chat never shows it scrolling down).
     @State private var revealed = false
     @State private var paging = false
@@ -49,6 +54,12 @@ struct ChatView: View {
     @State private var openTask: ActivityTask?
     /// 选择文字: a message's text in a sheet where any part of it can be selected.
     @State private var selecting: SelectableText?
+    /// Learned skills refreshed whenever `/` autocomplete opens.
+    @State private var learnedSkills: [JSONValue] = []
+    @State private var skillsLoadedOnce = false
+    @State private var loadingSkills = false
+    /// Empty-chat model onboarding sheet when no chat model is configured yet.
+    @State private var modelSetup = false
     /// The words in the box came from voice input; the answer to them is read out (设置 can turn it off).
     @State private var dictated = false
     @State private var readReply = false
@@ -56,12 +67,28 @@ struct ChatView: View {
     @StateObject private var voice = VoiceRecorder()
     @FocusState private var focused: Bool
 
+    private var isIsolatedHelperChat: Bool { chatID != nil }
+    private var activeChatID: String { chatID ?? store.currentChatID }
+    private var chatMessages: [ChatMessage] { isIsolatedHelperChat ? store.helperMessages : store.messages }
+    private var chatApprovals: [JSONValue] { isIsolatedHelperChat ? store.helperApprovals : store.approvals }
+    private var chatRunning: Bool { isIsolatedHelperChat ? store.helperRunning : store.running }
+    private var chatHasOlder: Bool { isIsolatedHelperChat ? store.helperHasOlder : store.hasOlder }
+    private var chatLoadingHistory: Bool { isIsolatedHelperChat ? store.helperLoadingHistory : store.loadingHistory }
+    private var chatGoal: GoalState? { isIsolatedHelperChat ? store.helperGoal : store.currentGoal }
+    private var chatActivityLabel: String {
+        if !isIsolatedHelperChat { return store.activityLabel }
+        if chatApprovals.contains(where: { $0["status"].stringValue == "pending" }) { return "等你确认" }
+        return Presentation.currentActivity(messages: chatMessages, streaming: chatRunning)?.label ?? (store.connected ? "正在做事" : "等待连接")
+    }
+
     private var entries: [ThreadEntry] {
         var items: [ThreadEntry] = []
         var placed: Set<String> = []
-        for message in store.messages {
+        let currentMessages = chatMessages
+        let currentApprovals = chatApprovals
+        for message in currentMessages {
             for event in message.toolEvents {
-                if let approval = store.approvals.first(where: { $0["call_id"].nonemptyString == event["call_id"].nonemptyString && $0["call_id"].nonemptyString != nil }),
+                if let approval = currentApprovals.first(where: { $0["call_id"].nonemptyString == event["call_id"].nonemptyString && $0["call_id"].nonemptyString != nil }),
                    placed.insert(approval["id"].stringValue).inserted {
                     items.append(ThreadEntry(id: "approval-" + approval["id"].stringValue, at: approval["created_at_ms"].doubleValue ?? message.createdAt, message: nil, approval: approval))
                 }
@@ -70,7 +97,7 @@ struct ChatView: View {
                 items.append(ThreadEntry(id: "message-" + message.id, at: message.createdAt, message: message, approval: nil))
             }
         }
-        for approval in store.approvals where !placed.contains(approval["id"].stringValue) {
+        for approval in currentApprovals where !placed.contains(approval["id"].stringValue) {
             let recent = approval["decided_at_ms"].doubleValue.map { Date().timeIntervalSince1970 * 1_000 - $0 < 15 * 60 * 1_000 } ?? false
             if approval["status"].stringValue == "pending" || recent {
                 items.append(ThreadEntry(id: "approval-" + approval["id"].stringValue, at: approval["created_at_ms"].doubleValue ?? 0, message: nil, approval: approval))
@@ -78,14 +105,14 @@ struct ChatView: View {
         }
         guard messenger == nil else { return items }
         var tasks: [String: ActivityTask] = [:]
-        for task in ActivityLog.tasks(messages: store.messages, running: store.running, jobs: [], detailed: false) where task.status != .running {
+        for task in ActivityLog.tasks(messages: currentMessages, running: chatRunning, jobs: [], detailed: false) where task.status != .running {
             tasks[task.id] = task
         }
         var lastReply: [String: Int] = [:]
         for (index, item) in items.enumerated() {
             if let message = item.message, message.role != "user", let turn = message.turnId { lastReply[turn] = index }
         }
-        let notes = MemoryNotes.byTurn(store.messages)
+        let notes = MemoryNotes.byTurn(currentMessages)
         for (turn, index) in lastReply {
             items[index].task = tasks[turn]
             items[index].remembered = notes[turn] ?? []
@@ -93,7 +120,7 @@ struct ChatView: View {
         return items
     }
     /// The one reply whose cards still answer (worked out once per update, not once per row).
-    private var answerableID: String? { store.running ? nil : Presentation.answerableReplyID(messages: store.messages) }
+    private var answerableID: String? { chatRunning ? nil : Presentation.answerableReplyID(messages: chatMessages) }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -101,17 +128,18 @@ struct ChatView: View {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     let answerable = answerableID
                     let items = entries  // built once per redraw (each use of `entries` rebuilds it)
+                    let currentMessages = chatMessages
                     // The newest reply: copy, read out and 重新生成 under it, as ChatGPT and Claude show them.
                     let lastReplyID = items.last(where: { entry in
                         entry.message.map { $0.role != "user" && $0.source?["kind"].stringValue != "notice" } ?? false
                     })?.id
-                    if store.hasOlder {
+                    if chatHasOlder {
                         Button { loadOlder(proxy) } label: {
-                            HStack { Spacer(); if store.loadingHistory || paging { ProgressView() }; Text("载入更早的消息"); Spacer() }.frame(minHeight: 44)
-                        }.font(.footnote).disabled(store.loadingHistory || paging)
+                            HStack { Spacer(); if chatLoadingHistory || paging { ProgressView() }; Text("载入更早的消息"); Spacer() }.frame(minHeight: 44)
+                        }.font(.footnote).disabled(chatLoadingHistory || paging)
                             .onAppear { if positioned && !followingBottom { loadOlder(proxy) } }
                     }
-                    if items.isEmpty && !store.loadingHistory { emptyState }
+                    if items.isEmpty && !chatLoadingHistory { emptyState }
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, entry in
                         if showDate(index, in: items) {
                             Text(dateLabel(entry.at)).font(.caption).foregroundStyle(.secondary)
@@ -122,7 +150,8 @@ struct ChatView: View {
                                        answerable: answerable == message.id,
                                        speaker: message.role == "user" ? nil : messenger?.speaker(message),
                                        messenger: messenger != nil,
-                                       chatKey: "\(store.serverAddress).\(store.currentChatID)",
+                                       chatID: activeChatID,
+                                       chatKey: "\(store.serverAddress).\(activeChatID)",
                                        onQuote: { quote = quoteText(message); focused = true; Haptics.selection() },
                                        onMedia: { media = MediaDestination(item: $0, baseURL: store.baseURL) },
                                        onSelect: { selecting = SelectableText(text: $0) })
@@ -134,45 +163,47 @@ struct ChatView: View {
                                     }
                                 }.padding(.horizontal, 6).accessibilityElement(children: .combine)
                             }
-                            let latest = entry.id == lastReplyID && !store.running
+                            let latest = entry.id == lastReplyID && !chatRunning
                             if entry.task != nil || latest {
                                 HStack(spacing: 6) {
                                     if let task = entry.task {
                                         TaskChip(task: task) {
                                             // The full task (what was asked, the answer) only when it is opened.
-                                            openTask = ActivityLog.tasks(messages: store.messages, running: store.running, jobs: []).first { $0.id == task.id } ?? task
+                                            openTask = ActivityLog.tasks(messages: currentMessages, running: chatRunning, jobs: []).first { $0.id == task.id } ?? task
                                         }
                                     }
                                     if latest {
-                                        let again: (() -> Void)? = canRegenerate(message) ? { Task { await store.regenerate(message) } } : nil
+                                        let targetChat = activeChatID
+                                        let again: (() -> Void)? = canRegenerate(message) ? { Task { await store.regenerate(message, chatID: targetChat) } } : nil
                                         ReplyActions(message: message, regenerate: again)
                                     }
                                 }.padding(.top, -6)
                             }
                         } else if let approval = entry.approval {
+                            let targetChat = activeChatID
                             NativeApprovalView(approval: approval) { decision, scope in
-                                await store.approve(id: approval["id"].stringValue, decision: decision, scope: scope)
+                                await store.approve(id: approval["id"].stringValue, decision: decision, scope: scope, chatID: targetChat)
                             }.frame(maxWidth: 520, alignment: .leading).id(entry.id)
                         }
                     }
-                    if Presentation.awaitingReply(messages: store.messages, streaming: store.running) {
-                        let current = ActivityLog.current(store.messages)
+                    if Presentation.awaitingReply(messages: currentMessages, streaming: chatRunning) {
+                        let current = ActivityLog.current(currentMessages)
                         // A document it is writing shows as it will look, before it is sent.
-                        if let draft = FileKinds.draft(store.messages) { DraftCard(draft: draft).equatable() }
-                        WorkingCard(label: store.activityLabel, steps: current.steps, since: current.since, open: $stepsOpen)
+                        if let draft = FileKinds.draft(currentMessages) { DraftCard(draft: draft).equatable() }
+                        WorkingCard(label: chatActivityLabel, steps: current.steps, since: current.since, open: $stepsOpen)
                     }
                     Color.clear.frame(height: 1).id("bottom")
                         .onAppear { followingBottom = true }
-                        .onDisappear { if positioned { followingBottom = false } }
+                        .onDisappear { if positioned && !settlingBottom { followingBottom = false } }
                 }
-                .frame(maxWidth: 700, alignment: .leading).padding(.horizontal, 16).padding(.bottom, 16).padding(.top, topInset)
-                .opacity(revealed || store.messages.isEmpty ? 1 : 0)
+                .frame(maxWidth: 700, alignment: .leading).padding(.horizontal, 16).padding(.bottom, 24).padding(.top, topInset)
+                .opacity(revealed || chatMessages.isEmpty ? 1 : 0)
                 .frame(maxWidth: .infinity)
             }
             .scrollDismissesKeyboard(.interactively)
-            .overlay { if store.loadingHistory && store.messages.isEmpty { ProgressView("正在载入聊天…") } }
+            .overlay { if chatLoadingHistory && chatMessages.isEmpty { ProgressView("正在载入聊天…") } }
             .overlay(alignment: .bottomTrailing) {
-                if !followingBottom && !store.messages.isEmpty {
+                if !followingBottom && !chatMessages.isEmpty {
                     Button { followingBottom = true; scrollBottom(proxy) } label: {
                         Image(systemName: "arrow.down").frame(width: 44, height: 44).background(.regularMaterial, in: Circle())
                     }.accessibilityLabel("滚动到最新消息").padding(16)
@@ -180,31 +211,43 @@ struct ChatView: View {
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 6) {
-                    if messenger == nil, let goal = store.currentGoal, goal.active {
+                    if messenger == nil, let goal = chatGoal, goal.active {
+                        let targetChat = activeChatID
                         GoalBannerView(goal: goal) {
                             Haptics.selection()
-                            Task { await store.stopGoal() }
+                            Task { await store.stopGoal(chatID: targetChat) }
                         }
                         .padding(.horizontal, 12)
                     }
                     composer
                 }
             }
-            .onChange(of: store.messages.last?.id) { _, _ in followIfNeeded(proxy) }
+            .onChange(of: chatMessages.last?.id) { _, _ in followIfNeeded(proxy) }
             // A reply growing stays pinned to the bottom, without an animation for every chunk.
-            .onChange(of: store.messages.last?.content) { _, _ in followIfNeeded(proxy, animated: false) }
-            .onChange(of: store.approvals) { _, _ in followIfNeeded(proxy) }
-            .onChange(of: store.currentGoal) { _, _ in followIfNeeded(proxy) }
-            .onChange(of: store.loadingHistory) { _, loading in if !loading && !positioned { followIfNeeded(proxy) } }
-            .onChange(of: store.currentChatID) { _, _ in
+            .onChange(of: chatMessages.last?.content) { _, _ in followIfNeeded(proxy, animated: false) }
+            .onChange(of: chatApprovals) { _, _ in followIfNeeded(proxy) }
+            .onChange(of: chatGoal) { _, _ in followIfNeeded(proxy) }
+            .onChange(of: chatLoadingHistory) { _, loading in if !loading && !positioned { followIfNeeded(proxy) } }
+            .onChange(of: activeChatID) { _, _ in
                 voice.cancel()
                 drafts.forEach { $0.removeStagedBlob() }
-                positioned = false; revealed = false; followingBottom = true; quote = nil; drafts = []; restoreDraft()
+                positioned = false; settlingBottom = false; settleGeneration = UUID()
+                revealed = false; followingBottom = true; quote = nil; drafts = []; restoreDraft()
                 followIfNeeded(proxy); revealSoon()
             }
             .onChange(of: focused) { _, value in if value && followingBottom { scrollBottom(proxy) } }
-            .onChange(of: text) { _, newValue in if !draftKey.isEmpty { UserDefaults.standard.set(newValue, forKey: draftKey) } }
-            .onAppear { restoreDraft(); acceptDraft(); followIfNeeded(proxy); revealSoon() }
+            .onChange(of: text) { oldValue, newValue in
+                if !draftKey.isEmpty { UserDefaults.standard.set(newValue, forKey: draftKey) }
+                if composerError != nil && !newValue.isEmpty { composerError = nil }
+                loadAutocompleteContextIfNeeded(from: oldValue, to: newValue)
+            }
+            .onAppear {
+                restoreDraft()
+                acceptDraft()
+                loadAutocompleteContextIfNeeded(from: "", to: text)
+                followIfNeeded(proxy)
+                revealSoon()
+            }
             .onChange(of: store.suggestedDraft) { _, _ in acceptDraft() }
             .onChange(of: revealed) { _, _ in revealSearchHit(proxy) }
             .onChange(of: store.revealTurn) { _, _ in revealSearchHit(proxy) }
@@ -216,6 +259,13 @@ struct ChatView: View {
                         onAsset: { asset in attach = false; Task { await importAsset(asset) } })
                 .presentationDetents([.height(330)]).presentationCornerRadius(36)
                 .presentationBackground(.regularMaterial).presentationDragIndicator(.visible)
+                .tint(CompanionPalette.primary)
+        }
+        .sheet(isPresented: $modelSetup, onDismiss: { Task { await store.refreshModelStatus() } }) {
+            NavigationStack { ModelsSettingsPage() }
+                .environment(\.settingsClose, { modelSetup = false })
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
                 .tint(CompanionPalette.primary)
         }
         .fullScreenCover(isPresented: $camera) {
@@ -232,13 +282,14 @@ struct ChatView: View {
         .sheet(item: $openTask) { TaskSheet(task: $0) }
         .sheet(item: $selecting) { SelectTextSheet(text: $0.text) }
         .onChange(of: text) { _, value in if value.isEmpty { dictated = false } }
-        .onChange(of: store.running) { was, now in
+        .onChange(of: chatRunning) { was, now in
             // The answer to a question asked by voice, read out when it is done.
             guard was, !now, readReply else { return }
             readReply = false
-            let lastAsked = store.messages.lastIndex { $0.role == "user" } ?? -1
-            if let reply = store.messages.indices.last(where: { $0 > lastAsked && store.messages[$0].role != "user" && Presentation.isVisibleReply(store.messages[$0]) }) {
-                ReadAloud.shared.speak(store.messages[reply].id, text: store.messages[reply].content)
+            let currentMessages = chatMessages
+            let lastAsked = currentMessages.lastIndex { $0.role == "user" } ?? -1
+            if let reply = currentMessages.indices.last(where: { $0 > lastAsked && currentMessages[$0].role != "user" && Presentation.isVisibleReply(currentMessages[$0]) }) {
+                ReadAloud.shared.speak(currentMessages[reply].id, text: currentMessages[reply].content)
             }
         }
     }
@@ -247,7 +298,7 @@ struct ChatView: View {
     /// pictures or files again).
     private func canRegenerate(_ message: ChatMessage) -> Bool {
         guard store.connected, message.source == nil, let turn = message.turnId, !turn.isEmpty,
-              let asked = store.messages.last(where: { $0.role == "user" }) else { return false }
+              let asked = chatMessages.last(where: { $0.role == "user" }) else { return false }
         return asked.turnId == turn && asked.media.isEmpty
     }
 
@@ -263,9 +314,9 @@ struct ChatView: View {
                 Text(messenger.hint).font(.system(size: 14)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 300)
                 if !messenger.starters.isEmpty {
                     VStack(spacing: 8) {
-                        ForEach(messenger.starters, id: \.self) { text in
-                            Button { _ = store.send(text: text); Haptics.send() } label: {
-                                Text(text).font(.system(size: 14.5)).frame(maxWidth: .infinity, alignment: .leading)
+                        ForEach(messenger.starters, id: \.self) { starter in
+                            Button { _ = store.send(text: starter, chatID: activeChatID); Haptics.send() } label: {
+                                Text(starter).font(.system(size: 14.5)).frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(.horizontal, 16).padding(.vertical, 10).modifier(FloatingPanel(radius: 16))
                             }.buttonStyle(.plain)
                         }
@@ -276,7 +327,53 @@ struct ChatView: View {
             VStack(spacing: 16) {
                 AvatarView(value: store.companionState["avatar"].string, library: store.avatars, size: 168, baseURL: store.baseURL)
                 Text(greeting).font(.title2.weight(.semibold))
-            }.frame(maxWidth: .infinity).padding(.top, 24).padding(.bottom, 64)
+                if store.connected && store.modelsChecked && !store.hasConfiguredChatModel {
+                    VStack(spacing: 10) {
+                        Label("先配一个对话模型", systemImage: "sparkles")
+                            .font(.headline)
+                        Text("添加模型密钥或连接账号后，\(store.companionName)就能开始回复你。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button {
+                            modelSetup = true
+                        } label: {
+                            Text("去设置对话模型")
+                                .font(.system(size: 15, weight: .semibold))
+                                .padding(.horizontal, 22)
+                                .frame(minHeight: 44)
+                                .background(CompanionPalette.primary, in: Capsule())
+                                .foregroundStyle(CompanionPalette.primaryText)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 2)
+                    }
+                    .padding(18)
+                    .frame(maxWidth: 320)
+                    .modifier(FloatingPanel(radius: 22))
+                    .padding(.top, 4)
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(ComposerAutocomplete.homeStarters, id: \.self) { starter in
+                            Button {
+                                _ = store.send(text: starter, chatID: activeChatID)
+                                Haptics.send()
+                            } label: {
+                                Text(starter)
+                                    .font(.system(size: 14.5))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 10)
+                                    .modifier(FloatingPanel(radius: 16))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .frame(maxWidth: 300)
+                    .padding(.top, 6)
+                    .accessibilityLabel("可以这样问")
+                }
+            }.frame(maxWidth: .infinity).padding(.horizontal, 24).padding(.top, 24).padding(.bottom, 64)
         }
     }
     private var greeting: String {
@@ -284,8 +381,122 @@ struct ChatView: View {
         return hour < 5 ? "这么晚还没睡？" : hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好"
     }
 
+    private var slashMenuItems: [ComposerAutocomplete.SlashItem] {
+        guard messenger == nil, let query = ComposerAutocomplete.slashQuery(in: text) else { return [] }
+        return ComposerAutocomplete.matchingSlashItems(query: query, learnedSkills: learnedSkills)
+    }
+
+    private var mentionMenuHelpers: [JSONValue] {
+        guard messenger == nil || messenger?.isGroup == true,
+              let query = ComposerAutocomplete.mentionQuery(in: text) else { return [] }
+        let pool: [JSONValue]
+        if let messenger, messenger.isGroup, !messenger.groupMembers.isEmpty {
+            pool = messenger.groupMembers
+        } else {
+            pool = store.helpers
+        }
+        return ComposerAutocomplete.matchingHelpers(query: query, helpers: pool)
+    }
+
+    private func loadAutocompleteContextIfNeeded(from oldText: String, to currentText: String) {
+        let wasSlashOpen = ComposerAutocomplete.slashQuery(in: oldText) != nil
+        let isSlashOpen = ComposerAutocomplete.slashQuery(in: currentText) != nil
+        if messenger == nil, isSlashOpen, (!wasSlashOpen || !skillsLoadedOnce), !loadingSkills, store.connected {
+            loadingSkills = true
+            Task {
+                defer { loadingSkills = false }
+                do {
+                    let payload = try await store.getResource("/api/webui/companion/skills")
+                    learnedSkills = payload["learned"].array
+                    skillsLoadedOnce = true
+                } catch {
+                    // Keep prior skills without locking out retry on next `/` open or keystroke.
+                }
+            }
+        }
+        let wasMentionOpen = ComposerAutocomplete.mentionQuery(in: oldText) != nil
+        let isMentionOpen = ComposerAutocomplete.mentionQuery(in: currentText) != nil
+        if (messenger == nil || messenger?.isGroup == true),
+           isMentionOpen, (!wasMentionOpen || store.helpers.isEmpty), store.connected {
+            Task { await store.refreshLibrary() }
+        }
+    }
+
+    @ViewBuilder private var autocompleteMenu: some View {
+        let slashes = slashMenuItems
+        let mentions = mentionMenuHelpers
+        if !slashes.isEmpty {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(slashes) { item in
+                        Button {
+                            text = item.text
+                            Haptics.selection()
+                            Task { @MainActor in focused = true }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: item.isSkill ? "graduationcap" : "command")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(CompanionPalette.primary)
+                                    .frame(width: 24)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.label).font(.system(size: 14.5, weight: .semibold)).foregroundStyle(.primary)
+                                    Text(item.detail).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(6)
+            }
+            .frame(maxHeight: 220)
+            .modifier(FloatingPanel(radius: 20))
+            .accessibilityLabel("快捷指令建议")
+        } else if !mentions.isEmpty {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(mentions, id: \.selfID) { helper in
+                        let name = helper["name"].stringValue
+                        Button {
+                            text = ComposerAutocomplete.replacingMention(in: text, with: name)
+                            Haptics.selection()
+                            Task { @MainActor in focused = true }
+                        } label: {
+                            HStack(spacing: 10) {
+                                HelperAvatar(emoji: helper["emoji"].stringValue, avatar: helper["avatar"].stringValue, size: 28, baseURL: store.baseURL)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("@" + name).font(.system(size: 14.5, weight: .semibold)).foregroundStyle(.primary)
+                                    if let job = helper["title"].nonemptyString {
+                                        Text(job).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(6)
+            }
+            .frame(maxHeight: 210)
+            .modifier(FloatingPanel(radius: 20))
+            .accessibilityLabel("选择帮手")
+        }
+    }
+
     private var composer: some View {
         VStack(spacing: 8) {
+            autocompleteMenu
             if let quote {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "quote.opening").foregroundStyle(CompanionPalette.primary).accessibilityHidden(true)
@@ -324,7 +535,7 @@ struct ChatView: View {
                     Button("取消") { voice.cancel() }.frame(minHeight: 44)
                 }
             }
-            if store.queuedCount > 0 {
+            if !isIsolatedHelperChat && store.queuedCount > 0 {
                 Text("\(store.queuedCount) 条消息等待发送").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack(alignment: .bottom, spacing: 8) {
@@ -341,8 +552,9 @@ struct ChatView: View {
                         Image(systemName: "stop.circle.fill").font(.system(size: 22)).foregroundStyle(.red).frame(width: 44, height: 44)
                     }.accessibilityLabel("结束录音并识别")
                 }
-                else if store.running && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && drafts.isEmpty {
-                    Button { Task { await store.stop() }; Haptics.selection() } label: {
+                else if chatRunning && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && drafts.isEmpty {
+                    let targetChat = activeChatID
+                    Button { Task { await store.stop(chatID: targetChat) }; Haptics.selection() } label: {
                         Image(systemName: "stop.fill").font(.body.weight(.bold)).frame(width: 44, height: 44)
                             .background(Color.primary.opacity(0.09), in: Circle())
                     }.accessibilityLabel("停止回复")
@@ -351,11 +563,21 @@ struct ChatView: View {
                         Image(systemName: "arrow.up").font(.title3.weight(.bold)).foregroundStyle(CompanionPalette.primaryText)
                             .frame(width: 44, height: 44).background(CompanionPalette.primary, in: Circle())
                     }.disabled(!canSend).accessibilityLabel(store.connected ? "发送消息" : "加入待发送队列")
-                } else {
+                } else if store.sttAvailable {
                     Button { Task { await toggleVoice() } } label: {
                         Image(systemName: voice.recording ? "stop.circle.fill" : "mic").font(.system(size: 22)).frame(width: 44, height: 44)
                             .foregroundStyle(voice.recording ? Color.red : Color.primary)
                     }.disabled(!store.connected).accessibilityLabel(voice.recording ? "结束录音并识别" : "语音输入")
+                } else {
+                    Button {
+                        composerError = "服务器还没有开启语音识别，先打字跟我说吧"
+                        Haptics.selection()
+                    } label: {
+                        Image(systemName: "mic.slash").font(.system(size: 20)).frame(width: 44, height: 44)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .disabled(!store.connected)
+                    .accessibilityLabel("语音输入未开启")
                 }
             }.padding(.horizontal, 4).padding(.vertical, 4).modifier(FloatingPanel(radius: 28))
         }.padding(.horizontal, 12).padding(.vertical, 4)
@@ -364,9 +586,9 @@ struct ChatView: View {
     private func toggleVoice() async {
         focused = false; Haptics.selection()
         if voice.recording {
-            let chat = store.currentChatID
+            let chat = activeChatID
             let server = store.serverAddress
-            if let transcript = await voice.finish(using: store), !transcript.isEmpty, chat == store.currentChatID, server == store.serverAddress {
+            if let transcript = await voice.finish(using: store), !transcript.isEmpty, chat == activeChatID, server == store.serverAddress {
                 text += (text.isEmpty ? "" : " ") + transcript; focused = true
                 dictated = true
             }
@@ -376,7 +598,7 @@ struct ChatView: View {
         }
     }
     private func acceptDraft() {
-        guard let next = store.suggestedDraft else { return }
+        guard !isIsolatedHelperChat, let next = store.suggestedDraft else { return }
         text = next; store.suggestedDraft = nil; focused = true
     }
 
@@ -384,7 +606,7 @@ struct ChatView: View {
     private func send() {
         guard canSend else { return }
         let content = UserQuote.format(content: text, quotedContext: quote)
-        guard store.send(text: content, attachments: drafts) else { return }
+        guard store.send(text: content, attachments: drafts, chatID: activeChatID) else { return }
         readReply = dictated && readAfterVoice
         dictated = false
         ReadAloud.shared.stop()
@@ -396,34 +618,60 @@ struct ChatView: View {
         return content.isEmpty ? (message.media.first?.name ?? "附件") : content
     }
     private func restoreDraft() {
-        let key = "draft.\(store.serverAddress).\(store.currentChatID)"
+        let key = "draft.\(store.serverAddress).\(activeChatID)"
         guard key != draftKey else { return }
         draftKey = key; text = UserDefaults.standard.string(forKey: key) ?? ""
     }
     private func followIfNeeded(_ proxy: ScrollViewProxy, animated: Bool = true) {
         guard !paging, followingBottom || !positioned else { return }
         let first = !positioned
-        positioned = !store.loadingHistory && !entries.isEmpty
+        positioned = !chatLoadingHistory && !entries.isEmpty
         guard first else { scrollBottom(proxy, animated: animated); return }
-        // Opening: straight to the newest while unseen, then shown — no run down from the top. Lazy
-        // rows and pictures take their real height a moment later, so it settles once more.
+        // Opening: straight to the newest while unseen, then shown — no run down from the top.
+        // Async file/picture/chart cards grow over the first second; keep `settlingBottom` active
+        // so card expansion never flips `followingBottom` to false before the final settle scroll.
+        guard positioned else {
+            Task { @MainActor in
+                await Task.yield()
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
+            return
+        }
+        let token = UUID()
+        settleGeneration = token
+        settlingBottom = true
         Task { @MainActor in
             await Task.yield()
+            guard settleGeneration == token else { return }
             proxy.scrollTo("bottom", anchor: .bottom)
-            guard positioned else { return }
             try? await Task.sleep(for: .milliseconds(120))
+            guard settleGeneration == token else { return }
             proxy.scrollTo("bottom", anchor: .bottom)
             revealed = true
-            try? await Task.sleep(for: .milliseconds(600))
-            if followingBottom { proxy.scrollTo("bottom", anchor: .bottom) }
+            try? await Task.sleep(for: .milliseconds(450))
+            guard settleGeneration == token else { return }
+            followingBottom = true
+            proxy.scrollTo("bottom", anchor: .bottom)
+            try? await Task.sleep(for: .milliseconds(550))
+            guard settleGeneration == token else { return }
+            followingBottom = true
+            proxy.scrollTo("bottom", anchor: .bottom)
+            try? await Task.sleep(for: .milliseconds(550))
+            guard settleGeneration == token else { return }
+            followingBottom = true
+            proxy.scrollTo("bottom", anchor: .bottom)
+            try? await Task.sleep(for: .milliseconds(150))
+            if settleGeneration == token { settlingBottom = false }
         }
     }
     /// 查找聊天记录 → a message: once the chat has opened, it scrolls to that turn (when it is among
     /// the messages loaded) and stops following the bottom.
     private func revealSearchHit(_ proxy: ScrollViewProxy) {
-        guard let turn = store.revealTurn, revealed, !store.loadingHistory else { return }
+        guard !isIsolatedHelperChat, let turn = store.revealTurn, revealed, !chatLoadingHistory else { return }
         store.revealTurn = nil
-        guard let message = store.messages.first(where: { $0.turnId == turn && Presentation.isVisible($0) }) else { return }
+        guard let message = chatMessages.first(where: { $0.turnId == turn && Presentation.isVisible($0) }) else { return }
+        settlingBottom = false
+        settleGeneration = UUID()
         followingBottom = false
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(700))  // after the opening settles at the bottom
@@ -448,11 +696,12 @@ struct ChatView: View {
         }
     }
     private func loadOlder(_ proxy: ScrollViewProxy) {
-        guard !paging, !store.loadingHistory, store.hasOlder else { return }
+        guard !paging, !chatLoadingHistory, chatHasOlder else { return }
         paging = true
         let anchor = entries.first?.id
+        let targetChat = activeChatID
         Task { @MainActor in
-            await store.loadOlder(); await Task.yield()
+            await store.loadOlder(chatID: targetChat); await Task.yield()
             if let anchor { proxy.scrollTo(anchor, anchor: .top) }
             paging = false
         }
@@ -477,7 +726,7 @@ struct ChatView: View {
 
     private func importPhotos(_ selection: [PhotosPickerItem]) async {
         guard !selection.isEmpty else { return }
-        let chat = store.currentChatID
+        let chat = activeChatID
         encoding = true; composerError = nil
         defer { encoding = false; photos = [] }
         for item in selection {
@@ -487,7 +736,7 @@ struct ChatView: View {
             }
             do {
                 guard let data = try await item.loadTransferable(type: Data.self) else { throw URLError(.cannotDecodeContentData) }
-                guard chat == store.currentChatID else { return }
+                guard chat == activeChatID else { return }
                 let type = item.supportedContentTypes.first(where: { $0.conforms(to: .image) || $0.conforms(to: .movie) }) ?? .data
                 let mime = type.preferredMIMEType ?? "application/octet-stream"
                 guard data.count <= 20 * 1024 * 1024 || mime.hasPrefix("image/") else {
@@ -496,7 +745,7 @@ struct ChatView: View {
                 }
                 let name = "附件-\(drafts.count + 1).\(type.preferredFilenameExtension ?? "bin")"
                 let staged = try await AttachmentEncoder.stagedDraft(data: data, name: name, mimeType: mime)
-                guard chat == store.currentChatID else { staged.removeStagedBlob(); return }
+                guard chat == activeChatID else { staged.removeStagedBlob(); return }
                 drafts.append(staged)
             } catch { composerError = "这个附件暂时无法读取，请尝试从「选择文件」添加。" }
         }
@@ -523,10 +772,10 @@ struct ChatView: View {
             composerError = "一次最多添加 \(Self.maxAttachments) 个附件。"
             return
         }
-        let chat = store.currentChatID
+        let chat = activeChatID
         encoding = true; composerError = nil
         defer { encoding = false }
-        guard let file = await RecentPhotos.file(for: asset), chat == store.currentChatID else {
+        guard let file = await RecentPhotos.file(for: asset), chat == activeChatID else {
             composerError = "这张没能读取（可能还在 iCloud 里），请从「查看全部」选择。"; return
         }
         guard file.data.count <= 20 * 1024 * 1024 || file.mimeType.hasPrefix("image/") else {
@@ -535,7 +784,7 @@ struct ChatView: View {
         do {
             let name = file.name.replacingOccurrences(of: ".", with: "-\(drafts.count + 1).", options: [], range: file.name.range(of: "."))
             let staged = try await AttachmentEncoder.stagedDraft(data: file.data, name: name, mimeType: file.mimeType)
-            guard chat == store.currentChatID else { staged.removeStagedBlob(); return }
+            guard chat == activeChatID else { staged.removeStagedBlob(); return }
             drafts.append(staged)
         } catch { composerError = "这个附件暂时无法读取，请尝试从「添加文件」添加。" }
     }
@@ -549,7 +798,7 @@ struct ChatView: View {
             composerError = "一次最多添加 \(Self.maxAttachments) 个附件。"
             return
         }
-        let chat = store.currentChatID
+        let chat = activeChatID
         encoding = true; composerError = nil
         defer { encoding = false }
         do {
@@ -557,20 +806,20 @@ struct ChatView: View {
             case .photo(let image):
                 guard let data = image.jpegData(compressionQuality: 0.9) else { throw URLError(.cannotDecodeContentData) }
                 let staged = try await AttachmentEncoder.stagedDraft(data: data, name: "照片-\(drafts.count + 1).jpg", mimeType: "image/jpeg")
-                guard chat == store.currentChatID else { staged.removeStagedBlob(); return }
+                guard chat == activeChatID else { staged.removeStagedBlob(); return }
                 drafts.append(staged)
             case .video(let url):
                 defer { try? FileManager.default.removeItem(at: url) }
                 let data = try Data(contentsOf: url)
                 guard data.count <= 20 * 1024 * 1024 else { composerError = "视频太大了（超过 20 MB），录短一点再试。"; return }
                 let staged = try await AttachmentEncoder.stagedDraft(data: data, name: "视频-\(drafts.count + 1).mov", mimeType: "video/quicktime")
-                guard chat == store.currentChatID else { staged.removeStagedBlob(); return }
+                guard chat == activeChatID else { staged.removeStagedBlob(); return }
                 drafts.append(staged)
             }
         } catch { composerError = "刚拍的内容没能读取，请再拍一次。" }
     }
     private func importFiles(_ result: Result<[URL], Error>) async {
-        let chat = store.currentChatID
+        let chat = activeChatID
         encoding = true; composerError = nil
         defer { encoding = false }
         do {
@@ -589,7 +838,7 @@ struct ChatView: View {
                     continue
                 }
                 let staged = try await AttachmentEncoder.stagedDraft(data: bytes, name: url.lastPathComponent, mimeType: mime)
-                guard chat == store.currentChatID else { staged.removeStagedBlob(); return }
+                guard chat == activeChatID else { staged.removeStagedBlob(); return }
                 drafts.append(staged)
             }
         } catch { composerError = "没有读到文件，请重新选择。" }
@@ -606,13 +855,15 @@ private struct MessageRow: View, Equatable {
     /// Chat-app style: who said this reply (their face beside it, and in a group their name).
     let speaker: Speaker?
     let messenger: Bool
+    let chatID: String
     let chatKey: String
     var onQuote: () -> Void
     var onMedia: (MediaAttachment) -> Void
     var onSelect: (String) -> Void
 
     nonisolated static func == (a: MessageRow, b: MessageRow) -> Bool {
-        a.message == b.message && a.answerable == b.answerable && a.speaker == b.speaker && a.messenger == b.messenger && a.chatKey == b.chatKey
+        a.message == b.message && a.answerable == b.answerable && a.speaker == b.speaker
+            && a.messenger == b.messenger && a.chatID == b.chatID && a.chatKey == b.chatKey
     }
 
     private var isUser: Bool { message.role == "user" }
@@ -661,9 +912,9 @@ private struct MessageRow: View, Equatable {
                         Button("朗读", systemImage: "speaker.wave.2") { ReadAloud.shared.toggle(message.id, text: message.content) }
                     }
                     if message.deliveryStatus == "failed" {
-                        Button("重新发送", systemImage: "arrow.clockwise") { Task { await store.retryMessage(message) } }
+                        Button("重新发送", systemImage: "arrow.clockwise") { Task { await store.retryMessage(message, chatID: chatID) } }
                     }
-                    Button("删除", systemImage: "trash", role: .destructive) { Task { await store.deleteMessage(message) } }
+                    Button("删除", systemImage: "trash", role: .destructive) { Task { await store.deleteMessage(message, chatID: chatID) } }
                 }
                 .simultaneousGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in Haptics.hold() })
                 .accessibilityAction(named: Text("引用"), onQuote)
@@ -721,7 +972,7 @@ private struct MessageRow: View, Equatable {
                         .modifier(BubbleFill(shape: Bubble.reply(messenger: messenger, joined: joined)))
                 case .card(let card):
                     NativeCardView(card: card, stateKey: cardStateKey(card, index: index), baseURL: store.baseURL,
-                                   send: answerable ? { store.send(text: $0) } : nil)
+                                   send: answerable ? { store.send(text: $0, chatID: chatID) } : nil)
                 case .pending(let kind):
                     HStack { ProgressView(); Text(kind == "ui" ? "正在准备互动内容…" : "正在整理…").font(.subheadline).foregroundStyle(.secondary) }
                         .padding(16).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 21))

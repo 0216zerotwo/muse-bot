@@ -79,6 +79,18 @@ struct CompanionRootView: View {
             Button("删除旁聊", role: .destructive) { Task { await store.deleteChat(id: store.currentChatID) } }
             Button("取消", role: .cancel) { }
         }
+        .alert("要切换到新的服务器吗？", isPresented: Binding(
+            get: { store.pendingDeepLink != nil },
+            set: { if !$0 { store.cancelPendingDeepLink() } }
+        )) {
+            Button("取消", role: .cancel) { store.cancelPendingDeepLink() }
+            Button("切换并连接", role: .destructive) {
+                settings = false; identity = false; appearance = false; menu = false
+                Task { await store.confirmPendingDeepLink() }
+            }
+        } message: {
+            Text("当前已配置服务器 \(store.serverAddress)。切换后将连接到 \(store.pendingDeepLink?.server ?? "")。")
+        }
         .task(id: store.connected) {
             guard store.connected else { return }
             while !Task.isCancelled {
@@ -93,9 +105,16 @@ struct CompanionRootView: View {
         .onChange(of: store.currentChatID) { _, _ in deliverAsked() }
         // A reply may have set a reminder (or changed one): the phone's notifications follow.
         .onChange(of: store.running) { was, now in if was && !now { Task { await store.planReminders() } } }
-        .onChange(of: store.connected) { _, on in if on { Task { await store.planReminders() } } }
+        .onChange(of: store.needsPairing) { _, needed in
+            if needed { settings = false; identity = false; appearance = false; menu = false }
+        }
+        .onChange(of: store.needsServer) { _, needed in
+            if needed { settings = false; identity = false; appearance = false; menu = false }
+        }
         .onAppear { deliverAsked() }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in keyboardUp = true }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            if !menu { keyboardUp = true }
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardUp = false }
         .onChange(of: store.suggestedDraft) { _, value in
             if value != nil { selectedTab = .chat; settings = false; identity = false }
@@ -117,7 +136,8 @@ struct CompanionRootView: View {
                     // (A new accent redraws this root view; screens pick the colours up as they redraw.)
                     screen
                         // While typing, the keyboard takes the tab bar's place (it would only crowd the chat).
-                        .safeAreaInset(edge: .bottom, spacing: 0) { if !keyboardUp { tabBar } }
+                        // Keep the obscured main screen's inset stable while the side drawer is open.
+                        .safeAreaInset(edge: .bottom, spacing: 0) { if !keyboardUp || menu { tabBar } }
                         .accessibilityHidden(menu)
                     floatingHeader
                     statusBanner

@@ -63,3 +63,79 @@ enum MemoryNotes {
         return notes
     }
 }
+
+/// Composer `/` presets + learned skills and `@帮手` autocomplete helpers, matching `web/src/companion/Composer.tsx`.
+enum ComposerAutocomplete {
+    struct SlashItem: Equatable, Identifiable, Sendable {
+        let id: String
+        let key: String
+        let label: String
+        let detail: String
+        let text: String
+        let isSkill: Bool
+    }
+
+    static let presets: [SlashItem] = [
+        SlashItem(id: "preset:goal", key: "goal", label: "长任务", detail: "一直做到完成，中途不用你盯着", text: "/goal ", isSkill: false),
+        SlashItem(id: "preset:compact", key: "compact", label: "整理上下文", detail: "聊得太长时压缩一下，更快也更省", text: "/compact", isSkill: false),
+        SlashItem(id: "preset:draw", key: "draw", label: "画一张图", detail: "用生图模型画出来", text: "画一张图：", isSkill: false),
+        SlashItem(id: "preset:search", key: "search", label: "联网查", detail: "搜最新的信息，给出处", text: "联网查一下：", isSkill: false),
+        SlashItem(id: "preset:routine", key: "routine", label: "设个例行", detail: "定时帮你做一件事", text: "帮我设一个定时任务：", isSkill: false),
+    ]
+
+    static let homeStarters: [String] = [
+        "帮我理一下今天要做的事",
+        "联网查一下最近的新闻",
+        "帮我设一个定时提醒",
+    ]
+
+    static func slashQuery(in text: String) -> String? {
+        guard text.hasPrefix("/") else { return nil }
+        let rest = text.dropFirst()
+        guard rest.count <= 24, !rest.contains(where: \.isWhitespace) else { return nil }
+        return String(rest)
+    }
+
+    static func matchingSlashItems(query: String, learnedSkills: [JSONValue] = []) -> [SlashItem] {
+        let skillItems: [SlashItem] = learnedSkills.compactMap { skill in
+            guard let name = skill["name"].nonemptyString else { return nil }
+            let cleanLabel = name.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ")
+            let detail = skill["description"].nonemptyString ?? "已学会的技能"
+            return SlashItem(id: "skill:" + name, key: name, label: cleanLabel, detail: detail, text: "用「\(name)」技能：", isSkill: true)
+        }
+        let all = presets + skillItems
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return Array(all.prefix(8)) }
+        return Array(all.filter { item in
+            item.key.localizedCaseInsensitiveContains(trimmed)
+                || item.label.localizedCaseInsensitiveContains(trimmed)
+                || item.detail.localizedCaseInsensitiveContains(trimmed)
+        }.prefix(8))
+    }
+
+    static func mentionQuery(in text: String) -> String? {
+        guard let atIndex = text.lastIndex(of: "@") else { return nil }
+        if atIndex > text.startIndex {
+            let previous = text[text.index(before: atIndex)]
+            guard previous.isWhitespace else { return nil }
+        }
+        let suffix = text[text.index(after: atIndex)...]
+        guard suffix.count <= 12, !suffix.contains(where: { $0.isWhitespace || $0 == "@" }) else { return nil }
+        return String(suffix)
+    }
+
+    static func matchingHelpers(query: String, helpers: [JSONValue]) -> [JSONValue] {
+        let valid = helpers.filter { $0["name"].nonemptyString != nil }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return Array(valid.prefix(6)) }
+        return Array(valid.filter { helper in
+            helper["name"].stringValue.localizedCaseInsensitiveContains(trimmed)
+                || helper["title"].stringValue.localizedCaseInsensitiveContains(trimmed)
+        }.prefix(6))
+    }
+
+    static func replacingMention(in text: String, with helperName: String) -> String {
+        guard mentionQuery(in: text) != nil, let atIndex = text.lastIndex(of: "@") else { return text }
+        return String(text[..<atIndex]) + "@\(helperName) "
+    }
+}

@@ -7,7 +7,7 @@ import WebKit
 @MainActor
 final class KeyboardDismisser: NSObject, UIGestureRecognizerDelegate {
     static let shared = KeyboardDismisser()
-    private var windows: [ObjectIdentifier] = []
+    private let windows = NSHashTable<UIWindow>.weakObjects()
     private var keyboardTop: CGFloat?
 
     private override init() {
@@ -18,11 +18,11 @@ final class KeyboardDismisser: NSObject, UIGestureRecognizerDelegate {
                                                name: UIResponder.keyboardWillHideNotification, object: nil)
     }
 
-    /// Watches every window of the app's scenes (once each).
+    /// Watches every window of the app's scenes weakly (once each, releasing destroyed windows automatically).
     func installEverywhere() {
         for scene in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
-            for window in scene.windows where !windows.contains(ObjectIdentifier(window)) {
-                windows.append(ObjectIdentifier(window))
+            for window in scene.windows where !windows.contains(window) {
+                windows.add(window)
                 let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
                 tap.cancelsTouchesInView = false  // the tapped button still gets its tap
                 tap.delegate = self
@@ -37,7 +37,10 @@ final class KeyboardDismisser: NSObject, UIGestureRecognizerDelegate {
 
     @objc private func keyboardChanged(_ note: Notification) {
         guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
-        keyboardTop = frame.minY < UIScreen.main.bounds.height ? frame.minY : nil
+        let screenHeight = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.screen.bounds.height }
+            .max() ?? 10_000
+        keyboardTop = frame.minY < screenHeight ? frame.minY : nil
     }
 
     @objc private func keyboardHidden() { keyboardTop = nil }

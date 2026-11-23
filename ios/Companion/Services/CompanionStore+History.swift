@@ -6,7 +6,7 @@ extension CompanionStore {
     func changeChat(_ id: String, forceHistory: Bool = false) async {
         guard !id.isEmpty else { return }
         currentChatID = id
-        approvals = []
+        approvals = approvalsByChat[id] ?? []
         knownChats.insert(id)
         publishCurrent()
         guard connected else { return }
@@ -14,17 +14,17 @@ extension CompanionStore {
         // A socket that has kept receiving this chat already has the complete live prefix.
         // The plugin persists only the final answer, so an in-progress HTTP snapshot is poorer.
         if forceHistory || needsHistoryRefresh.contains(id) || projections[id] == nil || !runningChats.contains(id) { await hydrate(id) }
-        if currentChatID == id { await refreshApprovals() }
+        if currentChatID == id { await refreshApprovals(for: id) }
     }
 
-    func loadOlder() async {
-        let id = currentChatID
+    func loadOlder(chatID: String? = nil) async {
+        let id = chatID ?? currentChatID
         guard !id.isEmpty, !loadingChats.contains(id) else { return }
         let loaded = projections[id]?.messages.count ?? 0
         let visible = visibleCounts[id] ?? 60
         if visible < loaded {
             visibleCounts[id] = visible + 60
-            publishCurrent()
+            publishChat(id)
         } else if connected && serverHasOlder.contains(id) {
             await hydrate(id, older: true)
         }
@@ -74,12 +74,15 @@ extension CompanionStore {
         let attempt = generation
         loadingChats.insert(id)
         if currentChatID == id { loadingHistory = true }
+        if helperChatID == id { helperLoadingHistory = true }
         duringHistory[id] = []
         defer {
             if attempt == generation {
                 loadingChats.remove(id)
                 duringHistory.removeValue(forKey: id)
-                if currentChatID == id { loadingHistory = false; publishCurrent() }
+                if currentChatID == id { loadingHistory = false }
+                if helperChatID == id { helperLoadingHistory = false }
+                publishChat(id)
             }
         }
         // The copy kept on this iPhone shows at once (opening the app, switching chats); the server is
@@ -92,7 +95,7 @@ extension CompanionStore {
                 var projection = project(kept)
                 for queued in outbox where queued.chatID == id { projection.messages.append(optimistic(queued)) }
                 projections[id] = projection
-                if currentChatID == id { publishCurrent() }
+                publishChat(id)
             }
         }
         var query = [URLQueryItem(name: "limit", value: "80"), URLQueryItem(name: "direction", value: "latest")]
@@ -165,8 +168,8 @@ extension CompanionStore {
         } catch let error as ServiceError {
             guard attempt == generation else { return false }
             if case .http(404) = error { projections[id] = projections[id] ?? StreamProjection() }
-            else if id == currentChatID { show(error) }
-        } catch { if attempt == generation && id == currentChatID { show(error) } }
+            else if id == currentChatID || id == helperChatID { show(error) }
+        } catch { if attempt == generation && (id == currentChatID || id == helperChatID) { show(error) } }
         return false
     }
 

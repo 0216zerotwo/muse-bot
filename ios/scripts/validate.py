@@ -112,6 +112,16 @@ def check_resources() -> None:
     for key in ["NSLocalNetworkUsageDescription", "NSCameraUsageDescription", "NSPhotoLibraryUsageDescription",
                 "NSPhotoLibraryAddUsageDescription", "NSMicrophoneUsageDescription"]:
         assert info[key], key
+    assert "fetch" in info.get("UIBackgroundModes", []), "Info.plist must include fetch background mode"
+    assert "com.personalbot.companion.refresh" in info.get("BGTaskSchedulerPermittedIdentifiers", []), (
+        "Info.plist must permit com.personalbot.companion.refresh"
+    )
+    schemes = [
+        scheme
+        for entry in info.get("CFBundleURLTypes", [])
+        for scheme in entry.get("CFBundleURLSchemes", [])
+    ]
+    assert "musebot" in schemes, "Info.plist must register musebot:// custom URL scheme"
     ET.parse(ROOT / "Companion/Resources/LaunchScreen.storyboard")
     count = 0
     for file in (ROOT / "Companion/Resources/Assets.xcassets").rglob("Contents.json"):
@@ -184,7 +194,17 @@ def check_static_invariants() -> None:
     store = (ROOT / "Companion/Services/CompanionStore.swift").read_text(encoding="utf-8")
     for required_event in ('"goal_state"', '"approval_updated"'):
         assert required_event in store, f"CompanionStore.swift must handle {required_event} WebSocket events"
-    print("PASS static invariants: ephemeral WS sessions, immutable formatters, once-guarded PhotoKit, MCP/WS contracts")
+    vault_page = (ROOT / "Companion/Views/Settings/VaultSettingsPage.swift").read_text(encoding="utf-8")
+    assert "SettingsBrowserHandoff" not in vault_page, "VaultSettingsPage.swift must use native credential forms"
+    devices_page = (ROOT / "Companion/Views/Settings/DevicesSettingsPage.swift").read_text(encoding="utf-8")
+    assert "disconnectCurrentDevice" in devices_page, "DevicesSettingsPage.swift must support local device unpair"
+    voice_recorder = (ROOT / "Companion/Services/VoiceRecorder.swift").read_text(encoding="utf-8")
+    assert "notifyOthersOnDeactivation" in voice_recorder and "AVAudioApplication" in voice_recorder, (
+        "VoiceRecorder.swift must use AVAudioApplication and notifyOthersOnDeactivation"
+    )
+    dismisser = (ROOT / "Companion/Services/KeyboardDismisser.swift").read_text(encoding="utf-8")
+    assert "NSHashTable<UIWindow>.weakObjects()" in dismisser, "KeyboardDismisser.swift must track windows weakly"
+    print("PASS static invariants: ephemeral WS sessions, immutable formatters, once-guarded PhotoKit, MCP/WS/UX contracts")
 
 
 def check_swift(required: bool) -> bool:
