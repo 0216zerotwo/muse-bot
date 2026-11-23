@@ -222,4 +222,59 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(MediaAttachment(url: "/api/media/file?sig=x", name: "report.pdf").kind, "file")
         XCTAssertEqual(MediaAttachment(url: "/api/media/opaque.bin?sig=x", kind: "image").kind, "image")
     }
+
+    func testMCPDoubleUnderscoreAndHyphenatedServerTools() {
+        XCTAssertEqual(Presentation.toolActivity("mcp__browser__browser_click").label, "正在点网页")
+        XCTAssertEqual(Presentation.toolActivity("mcp__icloud_calendar__delete_event").label, "正在准备删除日程")
+        XCTAssertEqual(Presentation.toolActivity("mcp__email__send_email").label, "正在准备邮件")
+        XCTAssertEqual(Presentation.toolActivity("mcp__email__reply_email").label, "正在准备邮件")
+        XCTAssertEqual(Presentation.toolActivity("mcp__github__list_issues").label, "正在使用 github")
+        XCTAssertEqual(Presentation.stripMCPPrefix("mcp__icloud_calendar__list_events", server: "icloud-calendar"), "list_events")
+        XCTAssertEqual(Presentation.stripMCPPrefix("mcp_icloud-calendar_list_events", server: "icloud-calendar"), "list_events")
+        XCTAssertEqual(Presentation.stripMCPPrefix("mcp__email__send_email", server: "email"), "send_email")
+    }
+
+    func testGoalStateDecodingAndBlockedStatus() {
+        let active = GoalState(json: json(#"{"active":true,"status":"active","objective":"整理报销发票","ui_summary":"正在核对第 2 张"}"#))
+        XCTAssertTrue(active.active)
+        XCTAssertFalse(active.isBlocked)
+        XCTAssertEqual(active.objective, "整理报销发票")
+        XCTAssertEqual(active.uiSummary, "正在核对第 2 张")
+
+        let blocked = GoalState(json: json(#"{"active":true,"status":"blocked","objective":"登录邮箱","recap":"需要验证码"}"#))
+        XCTAssertTrue(blocked.active)
+        XCTAssertTrue(blocked.isBlocked)
+        XCTAssertEqual(blocked.recap, "需要验证码")
+
+        let finished = GoalState(json: json(#"{"active":false}"#))
+        XCTAssertFalse(finished.active)
+        XCTAssertEqual(finished.status, "idle")
+    }
+
+    func testTabRecordsDayFormattingIsThreadSafe() {
+        let pastMs = 946_684_800_000.0  // 2000-01-01T00:00:00Z
+        let expected = TabRecords.day(pastMs)
+        XCTAssertTrue(expected.contains("年"))
+        DispatchQueue.concurrentPerform(iterations: 32) { index in
+            let sample = index.isMultiple(of: 2) ? pastMs : Date().timeIntervalSince1970 * 1_000
+            XCTAssertFalse(TabRecords.day(sample).isEmpty)
+        }
+        XCTAssertEqual(TabRecords.day(pastMs), expected)
+    }
+
+    func testDraftUploadStagingSpillsBlobOffOutboxJSON() async throws {
+        let payload = Data(repeating: 0x41, count: 32_768)
+        let staged = await DraftUpload.staged(data: payload, mimeType: "application/pdf", name: "报告.pdf")
+        defer { staged.removeStagedBlob() }
+        XCTAssertEqual(staged.byteCount, 32_768)
+        if staged.blobName != nil {
+            XCTAssertTrue(staged.data.isEmpty)
+            XCTAssertTrue(staged.preview.url.hasPrefix("file://"))
+            let encoded = try JSONEncoder().encode(staged)
+            XCTAssertLessThan(encoded.count, 512)
+            let decoded = try JSONDecoder().decode(DraftUpload.self, from: encoded)
+            let restored = try await decoded.loadedForUpload()
+            XCTAssertEqual(restored.data, payload)
+        }
+    }
 }

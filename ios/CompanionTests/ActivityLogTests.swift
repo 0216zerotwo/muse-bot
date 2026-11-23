@@ -69,6 +69,20 @@ final class ActivityLogTests: XCTestCase {
         let press = try approval(#"{"action":"browser_submit","status":"pending","arguments":{"code":"click_at_xy(1, 2)"},"context":{"browser":{"host":"apple.com.cn","paying":true,"summary":"要在 apple.com.cn 上点「立即购买」。点了可能就下单或付款了。"}}}"#)
         XCTAssertEqual(ApprovalWords.title(press), "付款或下单")
         XCTAssertEqual(ApprovalWords.subject(press), "要在 apple.com.cn 上点「立即购买」")
+
+        let stringTo = try approval(#"{"tool_name":"mcp__email__send_email","status":"pending","arguments":{"to":"alice@b.c, bob@b.c; carol@b.c"}}"#)
+        XCTAssertEqual(ApprovalWords.title(stringTo), "邮件")
+        XCTAssertEqual(ApprovalWords.recipients(stringTo["arguments"]), ["alice@b.c", "bob@b.c", "carol@b.c"])
+        XCTAssertEqual(ApprovalWords.subject(stringTo), "发给 alice@b.c、bob@b.c、carol@b.c")
+        XCTAssertEqual(ApprovalWords.argumentLabel("to"), "收件人")
+
+        let subjectOnly = try approval(#"{"tool_name":"mcp__email__send_mail","status":"pending","arguments":{"subject":"周报"}}"#)
+        XCTAssertEqual(ApprovalWords.subject(subjectOnly), "「周报」")
+
+        let trash = try approval(#"{"tool_name":"mcp__email__trash_email","status":"pending","arguments":{"email_ids":[101,102,103]}}"#)
+        XCTAssertEqual(ApprovalWords.action(trash), "delete_emails")
+        XCTAssertEqual(ApprovalWords.emailIDs(trash["arguments"]), ["101", "102", "103"])
+        XCTAssertEqual(ApprovalWords.subject(trash), "共 3 封邮件")
     }
 
     func testTheWorkingTurnShowsItsStepsAndStart() {

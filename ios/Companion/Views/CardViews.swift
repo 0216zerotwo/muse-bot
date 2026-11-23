@@ -416,9 +416,20 @@ struct NativeApprovalView: View {
          "browser_upload": "上传", "run_command": "运行", "goal_plan": "用新计划", "send_private": "允许发送", "payment": "确认付款"][action] ?? "允许"
     }
     private var subject: String {
-        if ["send_email", "forward_email"].contains(action) { return "发给 " + args["recipients"].array.map(\.stringValue).joined(separator: "、") }
-        if action == "run_command" { return args["reason"].stringValue }
-        if action == "send_private" { return "发到 " + approval["context"]["egress"]["host"].stringValue }
+        if ["send_email", "forward_email"].contains(action) {
+            let list = ApprovalWords.recipients(args)
+            if !list.isEmpty { return "发给 " + list.joined(separator: "、") }
+            return args["subject"].nonemptyString ?? ""
+        }
+        if action == "delete_emails" {
+            let ids = ApprovalWords.emailIDs(args)
+            if !ids.isEmpty { return "\(ids.count) 封邮件" }
+        }
+        if action == "run_command" { return args["reason"].nonemptyString ?? args["command"].stringValue }
+        if action == "send_private" {
+            let host = approval["context"]["egress"]["host"].stringValue
+            return host.isEmpty ? "" : "发到 " + host
+        }
         return ""
     }
 
@@ -433,7 +444,7 @@ struct NativeApprovalView: View {
                 if !hiddenKeys.contains(key) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(argumentLabel(key)).font(.caption).foregroundStyle(.secondary)
-                        Text(argumentText(args[key])).font(key == "command" ? .footnote.monospaced() : .subheadline)
+                        Text(argumentValueText(key: key, value: args[key])).font(key == "command" ? .footnote.monospaced() : .subheadline)
                             .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -491,4 +502,15 @@ struct NativeApprovalView: View {
     }
     private func argumentLabel(_ key: String) -> String { ApprovalWords.argumentLabel(key) }
     private func argumentText(_ value: JSONValue) -> String { ApprovalWords.argumentText(value) }
+    private func argumentValueText(key: String, value: JSONValue) -> String {
+        if ["recipients", "to", "cc", "bcc"].contains(key) {
+            let parsed = ApprovalWords.recipients(.object(["recipients": value]))
+            if !parsed.isEmpty { return parsed.joined(separator: "、") }
+        }
+        if key == "email_ids" || key == "email_id" {
+            let ids = ApprovalWords.emailIDs(.object(["email_ids": value]))
+            if !ids.isEmpty { return ids.joined(separator: "、") }
+        }
+        return argumentText(value)
+    }
 }

@@ -89,6 +89,23 @@ struct AttachSheet: View {
     }
 }
 
+private final class OnceBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Never>?
+
+    init(_ continuation: CheckedContinuation<Value, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning value: Value) {
+        lock.lock()
+        let target = continuation
+        continuation = nil
+        lock.unlock()
+        target?.resume(returning: value)
+    }
+}
+
 /// The phone's newest photos and videos, with small thumbnails for the strip.
 @MainActor
 final class RecentPhotos: ObservableObject {
@@ -137,25 +154,59 @@ final class RecentPhotos: ObservableObject {
             let options = PHVideoRequestOptions()
             options.isNetworkAccessAllowed = true
             options.version = .current
+            options.deliveryMode = .highQualityFormat
             let url: URL? = await withCheckedContinuation { continuation in
-                PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { video, _, _ in
-                    continuation.resume(returning: (video as? AVURLAsset)?.url)
+                let box = OnceBox(continuation)
+                PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { video, _, info in
+                    if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
+                    box.resume(returning: (video as? AVURLAsset)?.url)
                 }
             }
-            guard let url, let data = try? Data(contentsOf: url) else { return nil }
-            let type = UTType(filenameExtension: url.pathExtension) ?? .quickTimeMovie
-            return (data, "视频.\(url.pathExtension.isEmpty ? "mov" : url.pathExtension)", type.preferredMIMEType ?? "video/quicktime")
+            if let url, let data = try? Data(contentsOf: url) {
+                let type = UTType(filenameExtension: url.pathExtension) ?? .quickTimeMovie
+                return (data, "视频.\(url.pathExtension.isEmpty ? "mov" : url.pathExtension)", type.preferredMIMEType ?? "video/quicktime")
+            }
+            return await exportVideoResource(for: asset)
         }
         let options = PHImageRequestOptions()
         options.isNetworkAccessAllowed = true
         options.version = .current
         options.deliveryMode = .highQualityFormat
         return await withCheckedContinuation { continuation in
-            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, uti, _, _ in
-                guard let data else { continuation.resume(returning: nil); return }
+            let box = OnceBox(continuation)
+            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, uti, _, info in
+                if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
+                guard let data else { box.resume(returning: nil); return }
                 let type = uti.flatMap { UTType($0) } ?? .jpeg
-                continuation.resume(returning: (data, "照片.\(type.preferredFilenameExtension ?? "jpg")", type.preferredMIMEType ?? "image/jpeg"))
+                box.resume(returning: (data, "照片.\(type.preferredFilenameExtension ?? "jpg")", type.preferredMIMEType ?? "image/jpeg"))
             }
         }
+    }
+
+    /// Exports edited, slow-motion, or Cinematic videos (`AVComposition`) via `PHAssetResourceManager`.
+    private static func exportVideoResource(for asset: PHAsset) async -> (data: Data, name: String, mimeType: String)? {
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let resource = resources.first(where: { $0.type == .fullSizeVideo })
+            ?? resources.first(where: { $0.type == .video })
+            ?? resources.first(where: { $0.type == .pairedVideo }) else {
+            return nil
+        }
+        let rawExt = (resource.originalFilename as NSString).pathExtension
+        let safeExt = rawExt.filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        let ext = safeExt.isEmpty ? "mov" : String(safeExt.prefix(10))
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CompanionPhoto-\(UUID().uuidString).\(ext)")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        let requestOptions = PHAssetResourceRequestOptions()
+        requestOptions.isNetworkAccessAllowed = true
+        let ok: Bool = await withCheckedContinuation { continuation in
+            let box = OnceBox(continuation)
+            PHAssetResourceManager.default().writeData(for: resource, toFile: tempURL, options: requestOptions) { error in
+                box.resume(returning: error == nil)
+            }
+        }
+        guard ok, let data = try? Data(contentsOf: tempURL) else { return nil }
+        let type = UTType(resource.uniformTypeIdentifier) ?? UTType(filenameExtension: ext) ?? .quickTimeMovie
+        return (data, "视频.\(ext)", type.preferredMIMEType ?? "video/quicktime")
     }
 }

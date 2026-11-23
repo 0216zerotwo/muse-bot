@@ -143,10 +143,62 @@ enum Elapsed {
 /// How an approval reads (its kind, title, what it is about, how it ended), for the card that asks
 /// and for 审核记录.
 enum ApprovalWords {
+    private static let actionAliases: [String: String] = [
+        "send_mail": "send_email", "reply_email": "send_email", "send_message": "send_email",
+        "delete_email": "delete_emails", "trash_email": "delete_emails",
+        "remove_event": "delete_event"
+    ]
+
     static func action(_ approval: JSONValue) -> String {
-        if let value = approval["action"].nonemptyString { return value }
+        if let value = approval["action"].nonemptyString { return actionAliases[value] ?? value }
         let tool = approval["tool_name"].stringValue
-        return ["send_email", "forward_email", "delete_emails", "email_command", "delete_event"].first { tool.hasSuffix("_" + $0) } ?? "email_command"
+        if let parsed = Presentation.parseMCPTool(tool) {
+            let candidate = actionAliases[parsed.tool] ?? parsed.tool
+            if titles[candidate] != nil { return candidate }
+        }
+        let suffixes = ["send_email", "send_mail", "reply_email", "forward_email",
+                        "delete_emails", "delete_email", "trash_email", "email_command",
+                        "delete_event", "remove_event"]
+        if let matched = suffixes.first(where: { tool.hasSuffix("_" + $0) }) {
+            return actionAliases[matched] ?? matched
+        }
+        return "email_command"
+    }
+
+    /// Normalizes `recipients` or `to` whether passed as `string[]`, comma-separated `string`, or scalar.
+    static func recipients(_ args: JSONValue) -> [String] {
+        let raw = args["recipients"] != .null ? args["recipients"] : args["to"]
+        let pieces: [String]
+        if !raw.array.isEmpty {
+            pieces = raw.array.compactMap(\.nonemptyString)
+        } else if let single = raw.nonemptyString {
+            pieces = [single]
+        } else {
+            pieces = []
+        }
+        var seen: Set<String> = []
+        var result: [String] = []
+        for item in pieces {
+            for part in item.components(separatedBy: CharacterSet(charactersIn: ",;，；、")) {
+                let clean = part.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !clean.isEmpty, seen.insert(clean.lowercased()).inserted {
+                    result.append(clean)
+                }
+            }
+        }
+        return result
+    }
+
+    /// Normalizes `email_ids` or `email_id` across string/numeric arrays and comma-separated strings.
+    static func emailIDs(_ args: JSONValue) -> [String] {
+        let raw = args["email_ids"] != .null ? args["email_ids"] : args["email_id"]
+        if !raw.array.isEmpty {
+            return raw.array.compactMap(\.nonemptyString)
+        }
+        guard let text = raw.nonemptyString else { return [] }
+        return text.components(separatedBy: CharacterSet(charactersIn: ",;")).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
     }
 
     static let titles = [
@@ -170,8 +222,16 @@ enum ApprovalWords {
         let action = action(approval)
         let args = approval["arguments"]
         if ["send_email", "forward_email"].contains(action) {
-            let to = "发给 " + args["recipients"].array.map(\.stringValue).joined(separator: "、")
-            return args["subject"].nonemptyString.map { to + "「\($0)」" } ?? to
+            let list = recipients(args)
+            let subjectText = args["subject"].nonemptyString.map { "「\($0)」" } ?? ""
+            if !list.isEmpty {
+                return "发给 " + list.joined(separator: "、") + subjectText
+            }
+            return subjectText
+        }
+        if action == "delete_emails" {
+            let ids = emailIDs(args)
+            if !ids.isEmpty { return "共 \(ids.count) 封邮件" }
         }
         if action == "run_command" { return args["reason"].nonemptyString ?? args["command"].stringValue }
         if action == "send_private" { return "发到 " + approval["context"]["egress"]["host"].stringValue }
@@ -207,7 +267,7 @@ enum ApprovalWords {
     }
 
     static func argumentLabel(_ key: String) -> String {
-        ["recipients": "收件人", "cc": "抄送", "bcc": "密送", "subject": "主题", "body": "正文", "command": "命令", "reason": "原因",
+        ["recipients": "收件人", "to": "收件人", "cc": "抄送", "bcc": "密送", "subject": "主题", "body": "正文", "command": "命令", "reason": "原因",
          "paths": "文件", "attachments": "附件", "element": "点击", "email_id": "原邮件", "email_ids": "邮件", "event_id": "日程", "url": "网站", "protocol": "协议"][key] ?? key
     }
 

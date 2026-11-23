@@ -178,14 +178,28 @@ struct ChatView: View {
                     }.accessibilityLabel("滚动到最新消息").padding(16)
                 }
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) { composer }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 6) {
+                    if messenger == nil, let goal = store.currentGoal, goal.active {
+                        GoalBannerView(goal: goal) {
+                            Haptics.selection()
+                            Task { await store.stopGoal() }
+                        }
+                        .padding(.horizontal, 12)
+                    }
+                    composer
+                }
+            }
             .onChange(of: store.messages.last?.id) { _, _ in followIfNeeded(proxy) }
             // A reply growing stays pinned to the bottom, without an animation for every chunk.
             .onChange(of: store.messages.last?.content) { _, _ in followIfNeeded(proxy, animated: false) }
             .onChange(of: store.approvals) { _, _ in followIfNeeded(proxy) }
+            .onChange(of: store.currentGoal) { _, _ in followIfNeeded(proxy) }
             .onChange(of: store.loadingHistory) { _, loading in if !loading && !positioned { followIfNeeded(proxy) } }
             .onChange(of: store.currentChatID) { _, _ in
-                voice.cancel(); positioned = false; revealed = false; followingBottom = true; quote = nil; drafts = []; restoreDraft()
+                voice.cancel()
+                drafts.forEach { $0.removeStagedBlob() }
+                positioned = false; revealed = false; followingBottom = true; quote = nil; drafts = []; restoreDraft()
                 followIfNeeded(proxy); revealSoon()
             }
             .onChange(of: focused) { _, value in if value && followingBottom { scrollBottom(proxy) } }
@@ -207,8 +221,8 @@ struct ChatView: View {
         .fullScreenCover(isPresented: $camera) {
             CameraPicker { shot in Task { await importShot(shot) } }.ignoresSafeArea()
         }
-        .photosPicker(isPresented: $photoPicker, selection: $photos, maxSelectionCount: 6, matching: .any(of: [.images, .videos]))
-        .photosPicker(isPresented: $videoPicker, selection: $photos, maxSelectionCount: 6, matching: .videos)
+        .photosPicker(isPresented: $photoPicker, selection: $photos, maxSelectionCount: max(1, Self.maxAttachments - drafts.count), matching: .any(of: [.images, .videos]))
+        .photosPicker(isPresented: $videoPicker, selection: $photos, maxSelectionCount: max(1, Self.maxAttachments - drafts.count), matching: .videos)
         .onChange(of: photos) { _, selection in Task { await importPhotos(selection) } }
         .fileImporter(isPresented: $filePicker, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             Task { await importFiles(result) }
@@ -286,7 +300,10 @@ struct ChatView: View {
                             HStack(spacing: 6) {
                                 Image(systemName: draft.mimeType.hasPrefix("image/") ? "photo" : draft.mimeType.hasPrefix("video/") ? "video" : "doc")
                                 Text(draft.name).font(.caption).lineLimit(1)
-                                Button { drafts.removeAll { $0.id == draft.id } } label: { Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44) }
+                                Button {
+                                    draft.removeStagedBlob()
+                                    drafts.removeAll { $0.id == draft.id }
+                                } label: { Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44) }
                                     .accessibilityLabel("移除附件 \(draft.name)")
                             }.padding(.leading, 12).background(Color.primary.opacity(0.06), in: Capsule())
                         }
@@ -440,15 +457,22 @@ struct ChatView: View {
             paging = false
         }
     }
+    private static let maxAttachments = 6
     private func showDate(_ index: Int, in items: [ThreadEntry]) -> Bool { index == 0 || items[index].at - items[index - 1].at > 3_600_000 }
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "zh_CN"); return formatter
+    private static let todayTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "zh_CN"); formatter.dateFormat = "HH:mm"; return formatter
+    }()
+    private static let yesterdayTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "zh_CN"); formatter.dateFormat = "昨天 HH:mm"; return formatter
+    }()
+    private static let dayTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "zh_CN"); formatter.dateFormat = "M月d日 HH:mm"; return formatter
     }()
     private func dateLabel(_ milliseconds: Double) -> String {
         let date = Date(timeIntervalSince1970: milliseconds / 1_000)
-        let formatter = Self.dateFormatter  // making a DateFormatter is slow: one, reused
-        formatter.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : Calendar.current.isDateInYesterday(date) ? "昨天 HH:mm" : "M月d日 HH:mm"
-        return formatter.string(from: date)
+        if Calendar.current.isDateInToday(date) { return Self.todayTimeFormatter.string(from: date) }
+        if Calendar.current.isDateInYesterday(date) { return Self.yesterdayTimeFormatter.string(from: date) }
+        return Self.dayTimeFormatter.string(from: date)
     }
 
     private func importPhotos(_ selection: [PhotosPickerItem]) async {
@@ -457,18 +481,31 @@ struct ChatView: View {
         encoding = true; composerError = nil
         defer { encoding = false; photos = [] }
         for item in selection {
+            guard drafts.count < Self.maxAttachments else {
+                composerError = "一次最多添加 \(Self.maxAttachments) 个附件。"
+                break
+            }
             do {
                 guard let data = try await item.loadTransferable(type: Data.self) else { throw URLError(.cannotDecodeContentData) }
                 guard chat == store.currentChatID else { return }
                 let type = item.supportedContentTypes.first(where: { $0.conforms(to: .image) || $0.conforms(to: .movie) }) ?? .data
+                let mime = type.preferredMIMEType ?? "application/octet-stream"
+                guard data.count <= 20 * 1024 * 1024 || mime.hasPrefix("image/") else {
+                    composerError = "单个附件不能超过 20 MB。"
+                    continue
+                }
                 let name = "附件-\(drafts.count + 1).\(type.preferredFilenameExtension ?? "bin")"
-                drafts.append(try AttachmentEncoder.draft(data: data, name: name, mimeType: type.preferredMIMEType ?? "application/octet-stream"))
+                drafts.append(try await AttachmentEncoder.stagedDraft(data: data, name: name, mimeType: mime))
             } catch { composerError = "这个附件暂时无法读取，请尝试从「选择文件」添加。" }
         }
     }
     /// After the ＋ panel has gone: the picker it asked for (a sheet can't open over another).
     private func openChosenPicker() {
         let choice = attachChoice; attachChoice = nil
+        guard choice == nil || drafts.count < Self.maxAttachments else {
+            composerError = "一次最多添加 \(Self.maxAttachments) 个附件。"
+            return
+        }
         switch choice {
         case .camera:
             if CameraPicker.isAvailable { camera = true } else { composerError = "这台设备没有可用的相机。" }
@@ -480,6 +517,10 @@ struct ChatView: View {
     }
     /// A photo or video tapped in the ＋ panel's strip.
     private func importAsset(_ asset: PHAsset) async {
+        guard drafts.count < Self.maxAttachments else {
+            composerError = "一次最多添加 \(Self.maxAttachments) 个附件。"
+            return
+        }
         let chat = store.currentChatID
         encoding = true; composerError = nil
         defer { encoding = false }
@@ -491,21 +532,31 @@ struct ChatView: View {
         }
         do {
             let name = file.name.replacingOccurrences(of: ".", with: "-\(drafts.count + 1).", options: [], range: file.name.range(of: "."))
-            drafts.append(try AttachmentEncoder.draft(data: file.data, name: name, mimeType: file.mimeType))
+            drafts.append(try await AttachmentEncoder.stagedDraft(data: file.data, name: name, mimeType: file.mimeType))
         } catch { composerError = "这个附件暂时无法读取，请尝试从「添加文件」添加。" }
     }
     private func importShot(_ shot: CameraPicker.Shot) async {
+        if case .video(let cleanupURL) = shot, drafts.count >= Self.maxAttachments {
+            try? FileManager.default.removeItem(at: cleanupURL)
+            composerError = "一次最多添加 \(Self.maxAttachments) 个附件。"
+            return
+        }
+        guard drafts.count < Self.maxAttachments else {
+            composerError = "一次最多添加 \(Self.maxAttachments) 个附件。"
+            return
+        }
         encoding = true; composerError = nil
         defer { encoding = false }
         do {
             switch shot {
             case .photo(let image):
                 guard let data = image.jpegData(compressionQuality: 0.9) else { throw URLError(.cannotDecodeContentData) }
-                drafts.append(try AttachmentEncoder.draft(data: data, name: "照片-\(drafts.count + 1).jpg", mimeType: "image/jpeg"))
+                drafts.append(try await AttachmentEncoder.stagedDraft(data: data, name: "照片-\(drafts.count + 1).jpg", mimeType: "image/jpeg"))
             case .video(let url):
+                defer { try? FileManager.default.removeItem(at: url) }
                 let data = try Data(contentsOf: url)
                 guard data.count <= 20 * 1024 * 1024 else { composerError = "视频太大了（超过 20 MB），录短一点再试。"; return }
-                drafts.append(try AttachmentEncoder.draft(data: data, name: "视频-\(drafts.count + 1).mov", mimeType: "video/quicktime"))
+                drafts.append(try await AttachmentEncoder.stagedDraft(data: data, name: "视频-\(drafts.count + 1).mov", mimeType: "video/quicktime"))
             }
         } catch { composerError = "刚拍的内容没能读取，请再拍一次。" }
     }
@@ -514,11 +565,20 @@ struct ChatView: View {
         defer { encoding = false }
         do {
             for url in try result.get() {
+                guard drafts.count < Self.maxAttachments else {
+                    composerError = "一次最多添加 \(Self.maxAttachments) 个附件。"
+                    break
+                }
                 let access = url.startAccessingSecurityScopedResource()
                 defer { if access { url.stopAccessingSecurityScopedResource() } }
                 let bytes = try Data(contentsOf: url)
                 let type = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType ?? UTType(filenameExtension: url.pathExtension) ?? .data
-                drafts.append(try AttachmentEncoder.draft(data: bytes, name: url.lastPathComponent, mimeType: type.preferredMIMEType ?? "application/octet-stream"))
+                let mime = type.preferredMIMEType ?? "application/octet-stream"
+                guard bytes.count <= 20 * 1024 * 1024 || mime.hasPrefix("image/") else {
+                    composerError = "单个附件不能超过 20 MB。"
+                    continue
+                }
+                drafts.append(try await AttachmentEncoder.stagedDraft(data: bytes, name: url.lastPathComponent, mimeType: mime))
             }
         } catch { composerError = "没有读到文件，请重新选择。" }
     }
@@ -855,5 +915,98 @@ private struct ChatCodeBlock: View {
         }
         .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
         .markdownMargin(top: 4, bottom: 8)
+    }
+}
+
+/// Floating card while a `/goal` is in progress: objective, live summary or blocked notice, and stop action (`GoalBanner.tsx`).
+@MainActor
+private struct GoalBannerView: View {
+    let goal: GoalState
+    var onStop: () -> Void
+    @State private var open = false
+
+    private var title: String {
+        let trimmed = goal.objective.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "进行中的目标" : trimmed
+    }
+
+    private var subtitle: String {
+        if goal.isBlocked { return "卡住了，需要你看一下" }
+        if let summary = goal.uiSummary, !summary.isEmpty { return summary }
+        return "正在推进…"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: "target")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(goal.isBlocked ? Color.white : CompanionPalette.primaryText)
+                    .frame(width: 32, height: 32)
+                    .background(goal.isBlocked ? Color.red : CompanionPalette.primary, in: Circle())
+                    .accessibilityHidden(true)
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { open.toggle() }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 4) {
+                            Text(title)
+                                .font(.system(size: 14, weight: .semibold))
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .rotationEffect(.degrees(open ? 180 : 0))
+                                .accessibilityHidden(true)
+                        }
+                        Text(subtitle)
+                            .font(.system(size: 12))
+                            .foregroundStyle(goal.isBlocked ? Color.red : Color.secondary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("进行中的目标：\(title)，\(subtitle)")
+                .accessibilityHint(open ? "点按收起详情" : "点按展开详情")
+
+                Button(action: onStop) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 44, height: 44)
+                        .background(Color.primary.opacity(0.08), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("停止这个目标")
+            }
+
+            if open {
+                Divider()
+                if !goal.objective.isEmpty {
+                    Text(goal.objective)
+                        .font(.system(size: 14))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let summary = goal.uiSummary, !summary.isEmpty {
+                    Text("当前：\(summary)")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let recap = goal.recap, !recap.isEmpty {
+                    Text("回顾：\(recap)")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: 420)
+        .modifier(FloatingPanel(radius: 20))
+        .frame(maxWidth: .infinity)
     }
 }

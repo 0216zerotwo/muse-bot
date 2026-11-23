@@ -3,6 +3,19 @@ import CryptoKit
 import Foundation
 import Network
 
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
+    }
+}
+
 @MainActor
 final class CompanionStore: ObservableObject {
     @Published var serverAddress: String
@@ -24,6 +37,7 @@ final class CompanionStore: ObservableObject {
     @Published var queuedCount = 0
     @Published var uploading = false
     @Published private(set) var currentDeviceID = ""
+    @Published private(set) var currentGoal: GoalState?
     @Published var suggestedDraft: String?
 
     var baseURL: URL? { api?.baseURL ?? (try? APIClient.normalizedServer(serverAddress)) }
@@ -63,14 +77,19 @@ final class CompanionStore: ObservableObject {
     var refreshTask: Task<Void, Never>?
     var heartbeatTask: Task<Void, Never>?
     var flushTask: Task<Void, Never>?
+    var flushRetryTask: Task<Void, Never>?
     let monitor = NWPathMonitor()
     var pathSignature: String?
     var generation = UUID()
     var reconnectAttempt = 0
+    var flushRetryAttempt = 0
+    var tokenRefreshDeadline = Date.distantPast
     var uploadCapability: JSONValue = .null
     var frameLimit = 2 * 1024 * 1024
     var knownChats: Set<String> = []
     var runningChats: Set<String> = []
+    var goalStates: [String: GoalState] = [:]
+    var cancelGoalAfterStop: Set<String> = []
     var projections: [String: StreamProjection] = [:]
     var historyEvents: [String: [JSONValue]] = [:]
     /// Each chat's events as the server last sent them (also kept on this iPhone): what an
@@ -88,6 +107,7 @@ final class CompanionStore: ObservableObject {
     var needsHistoryRefresh: Set<String> = []
     var loadingChats: Set<String> = []
     var outbox: [QueuedTurn] = []
+    var trackedOutboxBlobs: Set<String> = []
     var pendingMutations: [String: PendingMutation] = [:]
     var pendingTranscriptions: [String: PendingTranscription] = [:]
     var pendingNewChat: CheckedContinuation<String, Error>?
@@ -134,9 +154,30 @@ final class CompanionStore: ObservableObject {
         monitor.start(queue: DispatchQueue(label: "com.personalbot.companion.network"))
     }
 
-    /// Called by the app when it enters the foreground; suspended sockets are replaced.
+    deinit {
+        monitor.cancel()
+    }
+
+    /// Called by the app when returning from background; live sockets stay open so active uploads
+    /// and streaming turns continue undisturbed, while stale or expired sessions reconnect cleanly.
     func foreground() async {
         guard !needsServer, !needsPairing, !connecting, !serverAddress.isEmpty else { return }
+        if connected, let currentSocket = socket, uploading || Date() < tokenRefreshDeadline {
+            if await pingSocket(currentSocket, timeoutSeconds: 4) {
+                guard connected, socket === currentSocket else { return }
+                let refreshed = await refreshCompanion()
+                guard connected, socket === currentSocket else { return }
+                if refreshed || uploading {
+                    await refreshSessions()
+                    await refreshApprovals()
+                    if !currentChatID.isEmpty, !runningChats.contains(currentChatID) {
+                        await hydrate(currentChatID)
+                    }
+                    beginFlush()
+                    return
+                }
+            }
+        }
         await connect(server: serverAddress)
     }
 
@@ -204,7 +245,11 @@ final class CompanionStore: ObservableObject {
         do {
             let client: APIClient
             if let existing = api, existing.baseURL == base { client = existing }
-            else { client = APIClient(baseURL: base); api = client }
+            else {
+                api?.invalidate()
+                client = APIClient(baseURL: base)
+                api = client
+            }
             let credential = try DeviceKeychain.read(server: serverAddress)
             let boot = try await client.bootstrap(deviceToken: credential)
             guard attempt == generation else { return }
@@ -212,11 +257,10 @@ final class CompanionStore: ObservableObject {
             currentDeviceID = boot["device_id"].stringValue
             frameLimit = boot["limits"]["transport"]["max_frame_bytes"].intValue ?? 2 * 1024 * 1024
             let url = try client.socketURL(bootstrap: boot)
-            let task = URLSession.shared.webSocketTask(with: url)
+            let task = client.makeWebSocketTask(url: url, maximumMessageSize: frameLimit)
             socket = task
             sessionInitialized = false
             uploadCapability = .null
-            task.maximumMessageSize = max(frameLimit, 1024)
             task.resume()
             receiveTask = Task { [weak self, weak task] in
                 guard let self, let task else { return }
@@ -247,6 +291,7 @@ final class CompanionStore: ObservableObject {
                 DeviceKeychain.remove(server: serverAddress)
                 // Removed from the server (or its pairing reset): what this iPhone kept of it goes too.
                 LocalStore.removeServer(serverAddress)
+                clearServerOutbox()
                 savedEvents = [:]
                 needsPairing = true
                 errorMessage = "输入服务器生成的一次性配对码，即可连接这台 iPhone"
@@ -261,6 +306,7 @@ final class CompanionStore: ObservableObject {
     func scheduleRefresh(expiresIn: Double, generation attempt: UUID) {
         refreshTask?.cancel()
         let seconds = max(5, expiresIn - min(60, expiresIn / 2))
+        tokenRefreshDeadline = Date().addingTimeInterval(seconds)
         refreshTask = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
             catch { return }
@@ -300,6 +346,9 @@ final class CompanionStore: ObservableObject {
         heartbeatTask?.cancel()
         flushTask?.cancel()
         flushTask = nil
+        flushRetryTask?.cancel()
+        flushRetryTask = nil
+        flushRetryAttempt = 0
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
         connected = false
@@ -375,6 +424,10 @@ final class CompanionStore: ObservableObject {
             feedRevision &+= 1
             return
         }
+        if kind == "approval_updated" {
+            Task { [weak self] in await self?.refreshApprovals() }
+            return
+        }
         let id = event["chat_id"].stringValue
         if kind == "attached", let continuation = pendingNewChat, !id.isEmpty, !knownChats.contains(id) {
             pendingNewChat = nil
@@ -389,6 +442,17 @@ final class CompanionStore: ObservableObject {
             return
         }
         guard !id.isEmpty else { return }
+        if kind == "goal_state" {
+            let state = GoalState(json: event["goal_state"])
+            if state.active {
+                goalStates[id] = state
+            } else {
+                goalStates.removeValue(forKey: id)
+                cancelGoalAfterStop.remove(id)
+            }
+            if id == currentChatID { publishCurrent() }
+            return
+        }
         if kind == "message_accepted" || kind == "user_message" {
             let turnID = event["turn_id"].stringValue
             if !turnID.isEmpty {
@@ -437,7 +501,11 @@ final class CompanionStore: ObservableObject {
         }
         if id == currentChatID { publishCurrent() }
         if kind == "turn_end" {
+            let shouldCancelGoal = cancelGoalAfterStop.remove(id) != nil
             let reconcile = reconcileAtTurnEnd.remove(id) != nil
+            if shouldCancelGoal {
+                _ = send(text: "/goal stop", chatID: id)
+            }
             Task { [weak self] in
                 if reconcile { await self?.hydrate(id) }
                 await self?.refreshSessions()
@@ -513,6 +581,11 @@ final class CompanionStore: ObservableObject {
     func computerSocketURL() throws -> URL {
         guard let api, connected else { throw ServiceError.message("连接后再试一次") }
         return try api.socketURL(bootstrap: .object(["ws_path": .string("/ws/computer"), "token": .string(api.apiToken)]))
+    }
+
+    func makeComputerSocketTask() throws -> URLSessionWebSocketTask {
+        guard let api else { throw ServiceError.message("连接后再试一次") }
+        return api.makeWebSocketTask(url: try computerSocketURL(), maximumMessageSize: 8 * 1024 * 1024)
     }
 
     func changeResource(_ action: String, payload: [String: JSONValue] = [:]) async throws -> JSONValue {
@@ -646,12 +719,7 @@ final class CompanionStore: ObservableObject {
                 do { try await Task.sleep(nanoseconds: 20_000_000_000) } catch { return }
                 guard let self, self.generation == attempt, self.connected, let socket = self.socket else { return }
                 do {
-                    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                        socket.sendPing { error in
-                            if let error { continuation.resume(throwing: error) }
-                            else { continuation.resume() }
-                        }
-                    }
+                    try await Self.sendPingOnce(socket, timeoutSeconds: 10)
                     guard self.generation == attempt else { return }
                     await self.refreshApprovals()
                     await self.refreshLibrary()
@@ -661,6 +729,34 @@ final class CompanionStore: ObservableObject {
                     self.connectionDropped()
                     return
                 }
+            }
+        }
+    }
+
+    func pingSocket(_ socket: URLSessionWebSocketTask, timeoutSeconds: Double) async -> Bool {
+        do {
+            try await Self.sendPingOnce(socket, timeoutSeconds: timeoutSeconds)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    nonisolated static func sendPingOnce(_ socket: URLSessionWebSocketTask, timeoutSeconds: Double) async throws {
+        let gate = LockedFlag()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let timeoutTask = Task.detached {
+                do { try await Task.sleep(nanoseconds: UInt64(max(0.5, timeoutSeconds) * 1_000_000_000)) }
+                catch { return }
+                if gate.claim() {
+                    continuation.resume(throwing: ServiceError.message("连接心跳超时"))
+                }
+            }
+            socket.sendPing { error in
+                timeoutTask.cancel()
+                guard gate.claim() else { return }
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
             }
         }
     }
@@ -675,6 +771,8 @@ final class CompanionStore: ObservableObject {
         if hasOlder != older { hasOlder = older }
         let busy = runningChats.contains(currentChatID)
         if running != busy { running = busy }
+        let activeGoal = goalStates[currentChatID].flatMap { $0.active ? $0 : nil }
+        if currentGoal != activeGoal { currentGoal = activeGoal }
         let queued = outbox.filter { $0.state == "queued" }.count
         if queuedCount != queued { queuedCount = queued }
     }
@@ -685,7 +783,9 @@ final class CompanionStore: ObservableObject {
     }
 
     func resetServerState() {
+        api?.invalidate()
         api = nil
+        tokenRefreshDeadline = .distantPast
         currentChatID = ""
         companionState = .object([:])
         messages = []
@@ -694,9 +794,12 @@ final class CompanionStore: ObservableObject {
         avatars = []
         helpers = []
         currentDeviceID = ""
+        currentGoal = nil
         suggestedDraft = nil
         knownChats = []
         runningChats = []
+        goalStates = [:]
+        cancelGoalAfterStop = []
         projections = [:]
         historyEvents = [:]
         savedEvents = [:]
@@ -708,6 +811,7 @@ final class CompanionStore: ObservableObject {
         reconcileAtTurnEnd = []
         needsHistoryRefresh = []
         outbox = []
+        trackedOutboxBlobs = []
         running = false
         hasOlder = false
         loadingHistory = false

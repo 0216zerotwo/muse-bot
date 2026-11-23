@@ -137,7 +137,7 @@ struct ConnectionDetailPage: View {
             allTools = resource.value["last_action"]["tool_names"].array.compactMap(\.nonemptyString)
         }
     }
-    private func rawName(_ name: String) -> String { let prefix = "mcp_\(self.name)_"; return name.hasPrefix(prefix) ? String(name.dropFirst(prefix.count)) : name }
+    private func rawName(_ name: String) -> String { Presentation.stripMCPPrefix(name, server: self.name) }
     private func isReadOnly(_ name: String) -> Bool {
         let raw = rawName(name)
         return raw.range(of: "^(list|get|search|read|query|find|check|debug|fetch|view|describe|count|lookup)_", options: .regularExpression) != nil

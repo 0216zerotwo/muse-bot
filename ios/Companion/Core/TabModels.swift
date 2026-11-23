@@ -24,9 +24,16 @@ enum TabRecords {
         return formatter
     }()
     private static let plain = ISO8601DateFormatter()
-    private static let dayFormatter: DateFormatter = {
+    private static let monthDayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "M月d日"
+        return formatter
+    }()
+    private static let yearMonthDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy年M月d日"
         return formatter
     }()
 
@@ -40,9 +47,8 @@ enum TabRecords {
         guard let date = date(value) else { return "其他日期" }
         if Calendar.current.isDateInToday(date) { return "今天" }
         if Calendar.current.isDateInYesterday(date) { return "昨天" }
-        let formatter = dayFormatter
-        formatter.dateFormat = Calendar.current.component(.year, from: date) == Calendar.current.component(.year, from: Date()) ? "M月d日" : "yyyy年M月d日"
-        return formatter.string(from: date)
+        let sameYear = Calendar.current.component(.year, from: date) == Calendar.current.component(.year, from: Date())
+        return (sameYear ? monthDayFormatter : yearMonthDayFormatter).string(from: date)
     }
 
     static func ago(_ value: JSONValue) -> String {

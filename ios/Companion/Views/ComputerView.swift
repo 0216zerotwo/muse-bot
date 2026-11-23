@@ -29,15 +29,21 @@ private final class ComputerStream: ObservableObject {
     var controlling: Bool { hold == "user" }
     var connected: Bool { socket != nil }
 
-    func connect(_ address: URL) {
+    func connect(_ makeSocket: @escaping @MainActor () throws -> URLSessionWebSocketTask) {
         guard receiveTask == nil else { return }
         let attempt = UUID()
         generation = attempt
         receiveTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled && self.generation == attempt {
-                let task = URLSession.shared.webSocketTask(with: address)
-                task.maximumMessageSize = 8 * 1024 * 1024
+                let task: URLSessionWebSocketTask
+                do {
+                    task = try makeSocket()
+                } catch {
+                    self.error = error.localizedDescription
+                    self.receiveTask = nil
+                    return
+                }
                 self.socket = task
                 task.resume()
                 do {
@@ -151,6 +157,7 @@ struct ComputerView: View {
     @State private var pendingReview = false
     @State private var saving = false
     @State private var localError: String?
+    @State private var wasBackgrounded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -173,7 +180,19 @@ struct ComputerView: View {
             Task { if connected { await reconnect() } else { await stream.disconnect() } }
         }
         .onChange(of: scenePhase) { _, phase in
-            Task { if phase == .active { await reconnect() } else { await stream.disconnect() } }
+            switch phase {
+            case .background:
+                wasBackgrounded = true
+                Task { await stream.disconnect() }
+            case .active:
+                guard wasBackgrounded else { return }
+                wasBackgrounded = false
+                Task { await reconnect() }
+            case .inactive:
+                break
+            @unknown default:
+                break
+            }
         }
         .onDisappear { if !fullScreen && !reviewing { Task { await stream.disconnect() } } }
         .onChange(of: stream.taughtSteps) { _, steps in
@@ -284,8 +303,12 @@ struct ComputerView: View {
     }
 
     private func connect() {
-        do { stream.connect(try store.computerSocketURL()); localError = nil }
-        catch { localError = "连接伙伴后再打开浏览器" }
+        guard store.connected else { localError = "连接伙伴后再打开浏览器"; return }
+        localError = nil
+        stream.connect { [weak store] in
+            guard let store else { throw ServiceError.message("连接后再试一次") }
+            return try store.makeComputerSocketTask()
+        }
     }
 
     private func reconnect() async { await stream.disconnect(); connect() }
@@ -596,13 +619,19 @@ private struct BrowserScreen: View {
         let previous = typingQueue
         typingQueue = Task {
             await previous?.value
-            if new.hasPrefix(old) {
-                let added = String(new.dropFirst(old.count))
-                if !added.isEmpty { await stream.send("text", fields: ["text": .string(added)]) }
-            } else {
-                let common = old.commonPrefix(with: new)
-                for _ in 0..<(old.count - common.count) { await stream.send("key", fields: ["key": .string("Backspace")]) }
-                let added = String(new.dropFirst(common.count))
+            let oldChars = Array(old)
+            let newChars = Array(new)
+            var common = 0
+            let limit = min(oldChars.count, newChars.count)
+            while common < limit && oldChars[common] == newChars[common] {
+                common += 1
+            }
+            let backspaces = max(0, oldChars.count - common)
+            for _ in 0..<backspaces {
+                await stream.send("key", fields: ["key": .string("Backspace")])
+            }
+            if common < newChars.count {
+                let added = String(newChars[common...])
                 if !added.isEmpty { await stream.send("text", fields: ["text": .string(added)]) }
             }
         }

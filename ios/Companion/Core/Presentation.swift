@@ -69,21 +69,68 @@ enum Presentation {
         "browser_vision": "正在看网页", "browser_get_images": "正在看网页上的图"
     ]
 
+    private static let gatedEmailActions: Set<String> = [
+        "send_email", "send_mail", "reply_email", "forward_email",
+        "delete_emails", "delete_email", "trash_email", "email_command", "send_message"
+    ]
+    private static let gatedCalendarActions: Set<String> = ["delete_event", "remove_event"]
+
+    /// Splits both Hermes `mcp__<server>__<tool>` and legacy `mcp_<server>_<tool>` tool names.
+    static func parseMCPTool(_ name: String) -> (server: String, tool: String)? {
+        if name.hasPrefix("mcp__") {
+            let rest = String(name.dropFirst(5))
+            guard let sep = rest.range(of: "__") else { return nil }
+            let server = String(rest[..<sep.lowerBound])
+            let tool = String(rest[sep.upperBound...])
+            return (!server.isEmpty && !tool.isEmpty) ? (server, tool) : nil
+        }
+        guard name.hasPrefix("mcp_") else { return nil }
+        let rest = String(name.dropFirst(4))
+        for suffix in browser.keys where rest.hasSuffix("_" + suffix) {
+            let server = String(rest.dropLast(suffix.count + 1))
+            if !server.isEmpty { return (server, suffix) }
+        }
+        for suffix in gatedEmailActions.union(gatedCalendarActions) where rest.hasSuffix("_" + suffix) {
+            let server = String(rest.dropLast(suffix.count + 1))
+            if !server.isEmpty { return (server, suffix) }
+        }
+        guard let sep = rest.firstIndex(of: "_") else { return (rest, "") }
+        return (String(rest[..<sep]), String(rest[rest.index(after: sep)...]))
+    }
+
+    /// Strips a service's MCP prefix (`mcp__<server>__` with `-`/`_` normalized, or `mcp_<server>_`).
+    static func stripMCPPrefix(_ toolName: String, server: String) -> String {
+        let normalizedServer = server.replacingOccurrences(of: "-", with: "_")
+        for candidate in ["mcp__\(normalizedServer)__", "mcp__\(server)__", "mcp_\(server)_", "mcp_\(normalizedServer)_"] {
+            if toolName.hasPrefix(candidate) { return String(toolName.dropFirst(candidate.count)) }
+        }
+        if let parsed = parseMCPTool(toolName),
+           parsed.server.replacingOccurrences(of: "-", with: "_") == normalizedServer,
+           !parsed.tool.isEmpty {
+            return parsed.tool
+        }
+        return toolName
+    }
+
     static func toolActivity(_ name: String) -> Activity {
         if let known = tools[name] { return known }
-        let expression = try? NSRegularExpression(pattern: #"^(?:mcp_.+?_)?(browser_[a-z_]+)$"#)
-        if let match = expression?.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)),
-           let range = Range(match.range(at: 1), in: name) {
-            return Activity(kind: "read", label: browser[String(name[range])] ?? "正在操作浏览器")
+        if name.hasPrefix("browser_") {
+            return Activity(kind: "read", label: browser[name] ?? "正在操作浏览器")
         }
-        let gated = ["send_email", "forward_email", "delete_emails", "email_command", "delete_event"]
-        if name.hasPrefix("mcp_"), let action = gated.first(where: { name.hasSuffix("_" + $0) }) {
-            return Activity(kind: "send", label: action == "delete_event" ? "正在准备删除日程" : "正在准备邮件")
-        }
-        if name.hasPrefix("mcp_email_") { return Activity(kind: "read", label: "正在查看邮箱") }
-        if name.hasPrefix("mcp_") {
-            let server = name.dropFirst(4).components(separatedBy: "_").first ?? ""
-            return Activity(kind: "app", label: server.isEmpty ? "正在使用应用" : "正在使用 " + server)
+        if let mcp = parseMCPTool(name) {
+            if mcp.tool.hasPrefix("browser_") {
+                return Activity(kind: "read", label: browser[mcp.tool] ?? "正在操作浏览器")
+            }
+            if gatedCalendarActions.contains(mcp.tool) {
+                return Activity(kind: "send", label: "正在准备删除日程")
+            }
+            if gatedEmailActions.contains(mcp.tool) {
+                return Activity(kind: "send", label: "正在准备邮件")
+            }
+            if mcp.server == "email" {
+                return Activity(kind: "read", label: "正在查看邮箱")
+            }
+            return Activity(kind: "app", label: mcp.server.isEmpty ? "正在使用应用" : "正在使用 " + mcp.server)
         }
         return Activity(kind: "working", label: "正在处理")
     }

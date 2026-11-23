@@ -81,6 +81,7 @@ struct FileCard: View {
     @State private var bytes: Int?
     @State private var loaded = false
     @State private var sharing: SharedFile?
+    @State private var shareCleanupFolder: URL?
     @State private var problem: String?
 
     private var name: String { item.name ?? "文件" }
@@ -128,7 +129,8 @@ struct FileCard: View {
         }
         .modifier(FileCardFill())
         .task(id: item.url) { await load() }
-        .sheet(item: $sharing, onDismiss: { sharing = nil }) { ShareSheet(items: [$0.url]) }
+        .onDisappear { if sharing == nil { cleanupSharedFile() } }
+        .sheet(item: $sharing, onDismiss: { sharing = nil; cleanupSharedFile() }) { ShareSheet(items: [$0.url]) }
         .alert("文件", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })) {
             Button("好", role: .cancel) { problem = nil }
         } message: { Text(problem ?? "") }
@@ -178,14 +180,25 @@ struct FileCard: View {
 
     private func share() async {
         guard let remote, let data = await LocalStore.download(remote, kind: "files") else { problem = "文件没能取到，请检查连接后再试。"; return }
+        cleanupSharedFile()
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("CompanionShare", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let file = folder.appendingPathComponent(FileKinds.safeName(name))
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            try data.write(to: file, options: [.atomic, .completeFileProtection])
+            try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            shareCleanupFolder = folder
             sharing = SharedFile(url: file)
-        } catch { problem = "暂时无法准备文件，请稍后重试。" }
+        } catch {
+            try? FileManager.default.removeItem(at: folder)
+            problem = "暂时无法准备文件，请稍后重试。"
+        }
+    }
+
+    private func cleanupSharedFile() {
+        guard let folder = shareCleanupFolder else { return }
+        shareCleanupFolder = nil
+        try? FileManager.default.removeItem(at: folder)
     }
 
     private func copyText() async {

@@ -1,6 +1,32 @@
 import SwiftUI
 import UIKit
 
+private final class PaletteCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var made: [String: Color] = [:]
+    private var madeFor: [Double] = []
+
+    func color(rgb: [Double], key: String, build: () -> Color) -> Color {
+        lock.lock()
+        if rgb != madeFor {
+            made = [:]
+            madeFor = rgb
+        }
+        if let kept = made[key] {
+            lock.unlock()
+            return kept
+        }
+        lock.unlock()
+        let built = build()
+        lock.lock()
+        if rgb == madeFor {
+            made[key] = built
+        }
+        lock.unlock()
+        return built
+    }
+}
+
 /// The same OKLCH lightness/chroma steps as companion/theme.ts.
 /// The last sampled avatar accent also colors the very first frame on launch.
 enum CompanionPalette {
@@ -16,16 +42,13 @@ enum CompanionPalette {
 
     private typealias Step = (Double, Double, Double, Double)
     // Every view reads these on every redraw: the colours are worked out once per accent and kept.
-    private static var made: [String: Color] = [:]
-    private static var madeFor: [Double] = []
+    private static let cache = PaletteCache()
     private static func token(light: Step, dark: Step) -> Color {
         let rgb = UserDefaults.standard.array(forKey: "companion.palette.accent") as? [Double] ?? [0.8784, 0.4784, 0.2078]
-        if rgb != madeFor { made = [:]; madeFor = rgb }
         let key = "\(light)|\(dark)"
-        if let kept = made[key] { return kept }
-        let color = makeToken(rgb: rgb, light: light, dark: dark)
-        made[key] = color
-        return color
+        return cache.color(rgb: rgb, key: key) {
+            makeToken(rgb: rgb, light: light, dark: dark)
+        }
     }
     private static func makeToken(rgb: [Double], light: Step, dark: Step) -> Color {
         let accent = components(rgb)
