@@ -7,7 +7,7 @@ import importlib.util
 import sys
 import unittest
 
-from _loader import ROOT, ensure_hermes_stubs
+from _loader import ROOT, chat_store, ensure_hermes_stubs, temp_dir
 
 
 def _adapter_module():
@@ -125,6 +125,172 @@ class StreamTest(unittest.TestCase):
         self.assertEqual(message["source"]["label"], "主动关心")
         self.assertIn("c", a._drafts)  # the user's reply goes on streaming
         self.assertEqual(len(self.pushed), 1)
+
+
+class TurnLifecycleAndSteeringTest(unittest.TestCase):
+    def setUp(self):
+        self.module = _adapter_module()
+        a = object.__new__(self.module.CompanionAdapter)
+        a.platform = "companion"
+        a.store = chat_store(temp_dir("companion-steer-"))
+        a._subs = {}
+        a._turns = {}
+        a._pending_turns = {}
+        a._turn_output = set()
+        a._drafts = {}
+        a._last_reply = {}
+        a._helper_waits = {}
+        a._internal_locks = {}
+        a._turn_idle = {}
+        a._cards = lambda text: text
+        a.companion_name = lambda: "伙伴"
+        a.push_goal_state = lambda chat_id, socket=None: asyncio.sleep(0)
+        self.handled = []
+
+        async def handle_message(event):
+            self.handled.append(event)
+
+        a.handle_message = handle_message
+        self.addCleanup(setattr, self.module, "_busy_heads", self.module._busy_heads)
+        self.module._busy_heads = lambda: ("好，按你刚说的调整", "收到，手上这件做完就回你")
+        self.addCleanup(setattr, self.module.router, "prefetch", self.module.router.prefetch)
+        self.module.router.prefetch = lambda *args, **kwargs: None
+        self.addCleanup(setattr, self.module.memory_tidy, "maybe_tidy_soon", self.module.memory_tidy.maybe_tidy_soon)
+        self.module.memory_tidy.maybe_tidy_soon = lambda: None
+        self.addCleanup(setattr, self.module.computer, "close_after_task", self.module.computer.close_after_task)
+        self.module.computer.close_after_task = lambda chat_id: None
+        self.adapter = a
+        self.chat = a.store.create()
+        self.addCleanup(
+            setattr,
+            self.module.companion_state,
+            "read_companion_state",
+            self.module.companion_state.read_companion_state,
+        )
+        self.module.companion_state.read_companion_state = lambda: {"chat_id": self.chat}
+
+    def test_mid_turn_steered_message_never_clobbers_active_turn_or_emits_premature_turn_end(self):
+        a, c = self.adapter, self.chat
+
+        async def scenario():
+            await a.submit(c, "帮我查周末天气", "t1")
+            ev_t1 = self.handled[-1]
+            await a.on_processing_start(ev_t1)
+            await a.send_draft(c, 1, "周六晴，")
+
+            # Mid-turn follow-up t2 arrives while t1 is streaming.
+            await a.submit(c, "顺便看下周日", "t2")
+            ev_t2 = self.handled[-1]
+            self.assertEqual(a._turns[c], "t1")
+            await a.send(c, "好，按你刚说的调整。")
+            await a.on_processing_complete(ev_t2, "success")
+
+            # Active turn t1 and its open draft must remain untouched; no premature turn_end!
+            self.assertEqual(a._turns.get(c), "t1")
+            self.assertIn(c, a._drafts)
+            self.assertEqual([e for e in a.store.events(c) if e.get("event") == "turn_end"], [])
+
+            # Now t1 finishes normally.
+            await a.send(c, "周六晴，周日多云。")
+            await a.on_processing_complete(ev_t1, "success")
+            self.assertNotIn(c, a._turns)
+            turn_ends = [e["turn_id"] for e in a.store.events(c) if e.get("event") == "turn_end"]
+            self.assertEqual(turn_ends, ["t1"])
+
+        asyncio.run(scenario())
+
+    def test_in_band_queued_followup_handles_streaming_and_nonstreaming_real_hook_order(self):
+        a, c = self.adapter, self.chat
+
+        async def scenario():
+            # 1) Streaming t2 with real run_turn.py order: inner complete(t2) BEFORE final send(t2), then outer complete(t1).
+            await a.submit(c, "第一问", "t1")
+            ev_t1 = self.handled[-1]
+            await a.on_processing_start(ev_t1)
+            await a.submit(c, "第二问", "t2")
+            ev_t2 = self.handled[-1]
+            await a.send(c, "收到，手上这件做完就回你。")
+            await a.on_processing_complete(ev_t2, "success")  # intake outer hook (ignored)
+            await a.send(c, "第一问的回答")
+
+            await a.on_processing_start(ev_t2)
+            self.assertEqual(a._turns.get(c), "t2")
+            await a.send_draft(c, 2, "第二问草稿")
+            # run_turn.py:1987 fires inner complete(t2) BEFORE base.py:4600 calls send()!
+            await a.on_processing_complete(ev_t2, "success")
+            self.assertEqual(a._turns.get(c), "t2")
+            self.assertIn(c, a._drafts)
+            await a.send(c, "第二问草稿完整版")
+            # base.py:4614 fires outer complete(t1) at chain end.
+            await a.on_processing_complete(ev_t1, "success")
+            self.assertNotIn(c, a._turns)
+
+            answers = [(e.get("turn_id"), e.get("text")) for e in a.store.events(c)
+                       if e.get("event") == "message" and e.get("turn_phase") == "answer"]
+            self.assertEqual(answers, [("t1", "第一问的回答"), ("t2", "第二问草稿完整版")])
+            ends = [e["turn_id"] for e in a.store.events(c) if e.get("event") == "turn_end"]
+            self.assertEqual(ends, ["t1", "t2"])
+
+            # 2) Non-streaming tool-less t4 with real run_turn.py order: inner complete(t4) BEFORE send(t4), then outer complete(t3).
+            await a.submit(c, "第三问", "t3")
+            ev_t3 = self.handled[-1]
+            await a.on_processing_start(ev_t3)
+            await a.submit(c, "第四问", "t4")
+            ev_t4 = self.handled[-1]
+            await a.send(c, "第三问的回答")
+
+            await a.on_processing_start(ev_t4)
+            await a.on_processing_complete(ev_t4, "success")  # inner hook before any output!
+            self.assertEqual(a._turns.get(c), "t4")
+            await a.send(c, "第四问直接回答")
+            await a.on_processing_complete(ev_t3, "success")  # outer chain root finishes t4 cleanly!
+            self.assertNotIn(c, a._turns)
+
+            ends_after = [e["turn_id"] for e in a.store.events(c) if e.get("event") == "turn_end"]
+            self.assertEqual(ends_after, ["t1", "t2", "t3", "t4"])
+
+        asyncio.run(scenario())
+
+    def test_start_turn_exception_cleans_up_and_unblocks_submit_internal(self):
+        a, c = self.adapter, self.chat
+
+        async def scenario():
+            async def failing_handle(_event):
+                raise RuntimeError("gateway dispatch failed")
+
+            a.handle_message = failing_handle
+            with self.assertRaises(RuntimeError):
+                await a.submit(c, "会报错的请求", "t-err")
+            self.assertNotIn(c, a._turns)
+
+            # Subsequent submit_internal does not deadlock!
+            a.handle_message = lambda ev: asyncio.sleep(0)
+            turn_id = await asyncio.wait_for(a.submit_internal(c, "【系统通知】恢复正常"), timeout=1.0)
+            self.assertTrue(turn_id)
+
+        asyncio.run(scenario())
+
+    def test_submit_internal_waits_for_active_turn_to_finish(self):
+        a, c = self.adapter, self.chat
+
+        async def scenario():
+            await a.submit(c, "正在忙的事", "t1")
+            ev_t1 = self.handled[-1]
+            await a.on_processing_start(ev_t1)
+            await a.send_draft(c, 1, "处理中")
+
+            internal_task = asyncio.create_task(a.submit_internal(c, "【系统通知】审批通过"))
+            await asyncio.sleep(0.05)
+            self.assertFalse(internal_task.done())
+            self.assertEqual(a._turns.get(c), "t1")
+
+            await a.send(c, "处理完毕")
+            await a.on_processing_complete(ev_t1, "success")
+            internal_turn_id = await asyncio.wait_for(internal_task, timeout=1.0)
+            self.assertTrue(internal_turn_id)
+            self.assertEqual(a._turns.get(c), internal_turn_id)
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

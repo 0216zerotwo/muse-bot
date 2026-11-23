@@ -26,10 +26,13 @@ for any other OpenAI-compatible service, by address.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
@@ -37,6 +40,7 @@ from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+from .fs_atomic import atomic_write_json
 from .paths import get_webui_dir
 
 logger = logging.getLogger(__name__)
@@ -72,10 +76,7 @@ def _read_json(path: Path, default: Any) -> Any:
 
 
 def _write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_json(path, data)
 
 
 def read_models() -> dict[str, Any]:
@@ -161,8 +162,16 @@ def _check_signed_in(name: str, preset: dict[str, Any]) -> None:
         record_health(name, False, short_error(str(exc), name))
 
 
+def _is_anthropic_service(service: dict[str, Any]) -> bool:
+    mode = str(service.get("api_mode") or "").strip().lower()
+    if mode in ("anthropic", "anthropic-messages", "messages"):
+        return True
+    base = str(service.get("base_url") or "").strip().lower()
+    return "anthropic.com" in base and "/openai" not in base
+
+
 async def check_models(names: Optional[list[str]] = None) -> dict[str, Any]:
-    """Send each model a one-token request and remember whether the service answers."""
+    """Send each model a minimal request and remember whether the service answers."""
     import httpx
 
     data = read_models()
@@ -176,13 +185,35 @@ async def check_models(names: Optional[list[str]] = None) -> dict[str, Any]:
         try:
             service = _service(preset["provider"])
             key = os.environ.get(str(service.get("key_env") or ""), "") or str(service.get("api_key") or "")
+            base = str(service["base_url"]).rstrip("/")
+            messages = [{"role": "user", "content": "ping"}]
             started = time.monotonic()
             async with httpx.AsyncClient(timeout=_CHECK_TIMEOUT_S) as client:
-                response = await client.post(
-                    str(service["base_url"]).rstrip("/") + "/chat/completions",
-                    headers={"Authorization": f"Bearer {key}"},
-                    json={"model": preset["model"], "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
-                )
+                if _is_anthropic_service(service):
+                    endpoint = f"{base}/messages" if (base.endswith("/v1") or "/v1/" in base) else f"{base}/v1/messages"
+                    response = await client.post(
+                        endpoint,
+                        headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+                        json={"model": preset["model"], "messages": messages, "max_tokens": 1},
+                    )
+                else:
+                    endpoint = f"{base}/chat/completions"
+                    headers = {"Authorization": f"Bearer {key}"}
+                    response = await client.post(
+                        endpoint,
+                        headers=headers,
+                        json={"model": preset["model"], "messages": messages, "max_tokens": 1},
+                    )
+                    if response.status_code == 400 and any(
+                        tok in response.text.lower() for tok in ("max_completion_tokens", "max_tokens")
+                    ):
+                        # OpenAI reasoning models (o1/o3/o4-mini/gpt-5) require max_completion_tokens.
+                        started = time.monotonic()
+                        response = await client.post(
+                            endpoint,
+                            headers=headers,
+                            json={"model": preset["model"], "messages": messages, "max_completion_tokens": 16},
+                        )
             if response.status_code >= 400:
                 record_health(name, False, short_error(f"{response.status_code} {response.text}", name))
             else:
@@ -561,7 +592,13 @@ def remove_preset(name: str) -> dict[str, Any]:
 
 
 def _provider_key(name: str) -> str:
-    return _PROVIDER_PREFIX + re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-").lower()
+    ascii_slug = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-").lower()
+    if ascii_slug and all(ord(ch) < 128 for ch in name):
+        return f"{_PROVIDER_PREFIX}{ascii_slug}"
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+    if ascii_slug:
+        return f"{_PROVIDER_PREFIX}{ascii_slug[:24]}-{digest}"
+    return f"{_PROVIDER_PREFIX}{digest}"
 
 
 def runtime_provider(name: str, preset: dict[str, Any]) -> str:
@@ -862,8 +899,6 @@ def _media_period(since: float, data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def usage_summary(timezone: Optional[str] = None) -> dict[str, Any]:
-    import sqlite3
-
     from hermes_constants import get_hermes_home
 
     data = read_models()
@@ -875,15 +910,23 @@ def usage_summary(timezone: Optional[str] = None) -> dict[str, Any]:
         "FROM session_model_usage u LEFT JOIN sessions s ON s.id = u.session_id "
         "WHERE u.last_seen >= ? GROUP BY u.model, u.billing_base_url, u.task, s.source"
     )
+    periods = {label: _since(days, timezone) for label, days in (("today", 1), ("week", 7))}
+    fetched: dict[str, list[tuple]] = {label: [] for label in periods}
+    if path.is_file():
+        try:
+            uri = path.resolve().as_uri() + "?mode=ro"
+            with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=5)) as db:
+                for label, since in periods.items():
+                    fetched[label] = db.execute(query, (since,)).fetchall()
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            logger.debug("companion: could not read usage from %s: %s", path, exc)
     result = {}
-    with sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=5) as db:
-        for label, days in (("today", 1), ("week", 7)):
-            since = _since(days, timezone)
-            period = _period(db.execute(query, (since,)).fetchall(), data)
-            period["media"] = _media_period(since, data)
-            costs = [c for c in [period["cost"], *(r["cost"] for r in period["media"])] if c is not None]
-            period["cost"] = round(sum(costs), 4) if costs else None
-            result[label] = period
+    for label, since in periods.items():
+        period = _period(fetched[label], data)
+        period["media"] = _media_period(since, data)
+        costs = [c for c in [period["cost"], *(r["cost"] for r in period["media"])] if c is not None]
+        period["cost"] = round(sum(costs), 4) if costs else None
+        result[label] = period
     return result
 
 

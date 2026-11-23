@@ -48,15 +48,17 @@ def _source(kind: str) -> Optional[str]:
 
 
 def _remember_source(kind: str, source: str) -> None:
-    path = _sources_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        data = {}
-    data = data if isinstance(data, dict) else {}
-    data[kind] = source
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data), encoding="utf-8")
+    from .fs_atomic import atomic_write_json
+
+    with _LOCK:
+        path = _sources_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        data = data if isinstance(data, dict) else {}
+        data[kind] = source
+        atomic_write_json(path, data, indent=None, mode=0o600)
 
 
 def signed_in(kind: str) -> bool:

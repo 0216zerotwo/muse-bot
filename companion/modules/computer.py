@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -28,7 +29,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .paths import get_webui_dir
 
@@ -46,9 +47,12 @@ _POLL_S = 1.5
 # The hold: who has the browser right now ("user" after 接手, "handoff" while the agent waits on
 # the user), and the agent's open request, if any.
 _hold: Optional[str] = None
+_hold_owners: set[int] = set()
 _handoff: Optional[dict[str, Any]] = None
 _last_action: Optional[dict[str, Any]] = None
 _started_at: Optional[float] = None
+_browser_proc: Optional[subprocess.Popen[bytes]] = None
+_pending_browser_check: Optional[Callable[[Optional[str]], bool]] = None
 # Last time anyone used the browser (the agent or the user), and whether the agent did since it
 # last closed: the browser closes when the task that used it is over (see ``close_after_task``).
 _last_used: float = 0.0
@@ -150,10 +154,33 @@ def _reopen() -> list[str]:
     return pages or [START_PAGE]
 
 
+def set_pending_browser_check(check: Optional[Callable[[Optional[str]], bool]]) -> None:
+    global _pending_browser_check
+    _pending_browser_check = check
+
+
+def _has_pending_browser(chat_id: Optional[str] = None) -> bool:
+    if _pending_browser_check is None:
+        return False
+    try:
+        return bool(_pending_browser_check(chat_id) or (chat_id is not None and _pending_browser_check(None)))
+    except Exception:
+        return False
+
+
+def _reap_proc(proc: Optional[subprocess.Popen[bytes]]) -> None:
+    if proc is None:
+        return
+    with contextlib.suppress(Exception):
+        if proc.poll() is not None:
+            proc.wait(timeout=0.5)
+
+
 def ensure_browser() -> bool:
     """Start the shared browser when it is not running. False when no Edge/Chrome is installed."""
-    global _started_at
+    global _started_at, _browser_proc
     with _LOCK:
+        _reap_proc(_browser_proc)
         if running():
             _started_at = _started_at or time.time()
             _start_idle_watch()
@@ -182,8 +209,10 @@ def ensure_browser() -> bool:
         flags = 0
         if sys.platform == "win32":
             flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
-        subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         creationflags=flags, close_fds=True)
+        proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                creationflags=flags, close_fds=True)
+        _browser_proc = proc
+        threading.Thread(target=lambda p=proc: p.wait(), name="companion-browser-reap", daemon=True).start()
         for _ in range(40):
             if running():
                 _started_at = time.time()
@@ -222,6 +251,7 @@ def close_browser() -> bool:
             return False
         _started_at = None
         _used_by.clear()
+        _reap_proc(_browser_proc)
         _remember_closed(pages)
         logger.info("companion: browser closed")
         return True
@@ -234,11 +264,14 @@ def _remember_closed(pages: list[str]) -> None:
 
 def close_after_task(chat_id: str) -> None:
     """A chat's turn ended: if it used the browser, that task is over and the browser closes —
-    unless something else (another chat, a scheduled job) is still using it."""
+    unless something else (another chat, a scheduled job, or a pending browser approval card) still needs it."""
+    if _has_pending_browser(chat_id):
+        _touch()
+        return
     if chat_id not in _used_by:
         return
     _used_by.discard(chat_id)
-    if not _used_by:
+    if not _used_by and not _has_pending_browser(None):
         close_browser()
 
 
@@ -257,7 +290,7 @@ def _start_idle_watch() -> None:
         global _watching
         while running():
             time.sleep(30)
-            if _hold is None and time.time() - _last_used > _IDLE_CLOSE_S:
+            if _hold is None and not _has_pending_browser(None) and time.time() - _last_used > _IDLE_CLOSE_S:
                 close_browser()
         _watching = False
 
@@ -326,26 +359,34 @@ def holding() -> bool:
         return True
     logger.info("companion: the browser is gone; its hold (%s) is let go", _hold)
     _hold, _handoff = None, None
+    _hold_owners.clear()
     return False
 
 
-def take() -> None:
+def take(owner: Optional[int] = None) -> None:
     global _hold
+    if owner is not None:
+        _hold_owners.add(owner)
     _hold = "user"
     _touch()
 
 
-def let_go() -> None:
-    """The viewer that took the browser went away without 完成: the agent may go on, unless it is
-    itself still waiting on the user (then the request stays open)."""
+def let_go(owner: Optional[int] = None) -> None:
+    """The viewer that took the browser went away without 完成: the agent may go on once no other
+    viewer holds it, unless the agent is itself still waiting on the user."""
     global _hold
-    if _hold == "user":
+    if owner is not None:
+        _hold_owners.discard(owner)
+    else:
+        _hold_owners.clear()
+    if _hold == "user" and not _hold_owners:
         _hold = "handoff" if _handoff else None
 
 
 def release() -> Optional[dict[str, Any]]:
     """Give the browser back; the agent's open request, if this answers one."""
     global _hold, _handoff
+    _hold_owners.clear()
     answered, _handoff, _hold = _handoff, None, None
     _touch()
     return answered
@@ -531,14 +572,26 @@ def teach_stop() -> list[dict[str, Any]]:
     return steps
 
 
+def _clamp_finite(raw: Any, lo: float, hi: float, default: float = 0.0) -> float:
+    if isinstance(raw, bool):
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(val):
+        return default
+    return max(lo, min(hi, val))
+
+
 async def _input(cdp: _Cdp, size: dict[str, float], msg: dict[str, Any], socket: Any) -> None:
     kind = msg.get("type")
     if _teach is not None and kind != "click":
         await _record(cdp, msg)
         await socket.send_json({"type": "teach", "on": True, "count": len(_teach or [])})
     if kind == "click":
-        x = float(msg.get("x", 0)) * size["w"]
-        y = float(msg.get("y", 0)) * size["h"]
+        x = _clamp_finite(msg.get("x", 0), 0.0, 1.0, 0.0) * size["w"]
+        y = _clamp_finite(msg.get("y", 0), 0.0, 1.0, 0.0) * size["h"]
         if _teach is not None:
             # Read what is under the finger before the click changes the page.
             await _record(cdp, msg, x, y)
@@ -554,8 +607,9 @@ async def _input(cdp: _Cdp, size: dict[str, float], msg: dict[str, Any], socket:
             editable = False
         await socket.send_json({"type": "focus", "editable": editable})
     elif kind == "scroll":
+        dy = _clamp_finite(msg.get("dy", 0), -2.0, 2.0, 0.0)
         await cdp.send("Input.dispatchMouseEvent", {"type": "mouseWheel", "x": size["w"] / 2, "y": size["h"] / 2,
-                                                    "deltaX": 0, "deltaY": float(msg.get("dy", 0)) * size["h"]})
+                                                    "deltaX": 0, "deltaY": dy * size["h"]})
     elif kind == "text" and isinstance(msg.get("text"), str):
         await cdp.send("Input.insertText", {"text": msg["text"][:2000]})
     elif kind == "key" and msg.get("key") in _KEYS:
@@ -589,15 +643,16 @@ async def _input(cdp: _Cdp, size: dict[str, float], msg: dict[str, Any], socket:
 
 async def stream(socket: Any, on_done: Any) -> None:
     """Serve one app viewer: frames out, input in. Follows the agent to whichever tab it uses."""
-    taken = {"by_me": False}
+    owner_id = id(socket)
+    taken = {"by_me": False, "owner_id": owner_id}
     try:
         await _stream(socket, on_done, taken)
     finally:
         if taken["by_me"]:
-            let_go()
+            let_go(owner_id)
 
 
-async def _stream(socket: Any, on_done: Any, taken: dict[str, bool]) -> None:
+async def _stream(socket: Any, on_done: Any, taken: dict[str, Any]) -> None:
     import websockets
 
     idle_sent = False
@@ -616,7 +671,7 @@ async def _stream(socket: Any, on_done: Any, taken: dict[str, bool]) -> None:
                     await socket.send_json({"type": "error", "message": "这台电脑上没有可用的 Edge 或 Chrome"})
                     return
                 if msg["type"] == "take":
-                    take()
+                    take(taken["owner_id"])
                     taken["by_me"] = True
                     await socket.send_json({"type": "hold", "hold": _hold})
             continue
@@ -645,7 +700,7 @@ async def _stream(socket: Any, on_done: Any, taken: dict[str, bool]) -> None:
 
 
 async def _pump(socket: Any, ws: Any, cdp: _Cdp, size: dict[str, float], target_id: str, on_done: Any,
-                taken: dict[str, bool]) -> bool:
+                taken: dict[str, Any]) -> bool:
     """Run until the viewer leaves (False) or the agent moves to another tab (True)."""
     from starlette.websockets import WebSocketDisconnect
 
@@ -668,7 +723,7 @@ async def _pump(socket: Any, ws: Any, cdp: _Cdp, size: dict[str, float], target_
             if not isinstance(msg, dict):
                 continue
             if msg.get("type") == "take":
-                take()
+                take(taken["owner_id"])
                 taken["by_me"] = True
                 await socket.send_json({"type": "hold", "hold": _hold})
             elif msg.get("type") == "teach_start":
@@ -687,7 +742,7 @@ async def _pump(socket: Any, ws: Any, cdp: _Cdp, size: dict[str, float], target_
                 if msg["type"] == "close":
                     await asyncio.to_thread(close_browser)
                 await on_done(answered)
-            elif _hold is not None:  # input only while the user has the page
+            elif taken.get("by_me") or _hold == "handoff":  # input only from a viewer that took control (or during handoff)
                 # Off the receive loop: a tap waits for the page's focus, frames must keep flowing.
                 asyncio.ensure_future(_input(cdp, size, msg, socket))
 

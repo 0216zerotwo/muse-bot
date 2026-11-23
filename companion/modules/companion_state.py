@@ -23,6 +23,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from .fs_atomic import atomic_write_json, atomic_write_text
 from .paths import get_webui_dir
 
 COMPANION_STATE_SCHEMA_VERSION = 1
@@ -211,14 +212,7 @@ def update_companion_state(changes: dict[str, Any]) -> dict[str, Any]:
         state = read_companion_state()
         state.update(cleaned)
         state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        path = companion_state_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(tmp, path)
+        atomic_write_json(companion_state_path(), state, sort_keys=True, trailing_newline=True)
     return state
 
 
@@ -331,9 +325,6 @@ def write_user_soul(text: str) -> str:
     text = text.replace("\r\n", "\n").strip()
     if len(text) > MAX_SOUL_CHARS:
         raise ValueError(f"SOUL.md 最多 {MAX_SOUL_CHARS} 字")
-    path = user_soul_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".md.tmp")
-    tmp.write_text(text + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    with _WRITE_LOCK:
+        atomic_write_text(user_soul_path(), text + "\n")
     return text

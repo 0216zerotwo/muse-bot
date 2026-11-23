@@ -10,6 +10,7 @@ the 任务 page's activity log. Hooks only observe: they never block a call.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,9 +25,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _RESULT_LIMIT = 2000
+_MAX_SESSION_CACHE = 1024
 _adapter: Optional["CompanionAdapter"] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
-# Hermes session id -> companion chat id
+# Hermes session id -> companion chat id (bounded LRU-style dict)
 _chat_by_session: dict[str, str] = {}
 
 
@@ -37,13 +39,18 @@ def bind(adapter: "CompanionAdapter", loop: asyncio.AbstractEventLoop) -> None:
 
 def _chat_for_session(session_id: str) -> Optional[str]:
     """The companion chat a Hermes session (or its subagent's parent chain) belongs to."""
-    if _chat_by_session.get(session_id):
-        return _chat_by_session[session_id]
+    cached = _chat_by_session.get(session_id)
+    if cached:
+        return cached
     chat_id = None
+    db = None
     try:
         from hermes_state import SessionDB
 
-        db = SessionDB()
+        try:
+            db = SessionDB(read_only=True)
+        except TypeError:
+            db = SessionDB()
         current, seen = session_id, set()
         while current and current not in seen:
             seen.add(current)
@@ -55,8 +62,15 @@ def _chat_for_session(session_id: str) -> Optional[str]:
     except Exception as exc:  # the activity line is a nicety; never break a tool call over it
         logger.debug("companion: could not resolve session %s: %s", session_id, exc)
         return None
+    finally:
+        close = getattr(db, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
     if chat_id:
         # Only hits are cached: a session's row may not exist yet on its first tool call.
+        if len(_chat_by_session) >= _MAX_SESSION_CACHE:
+            _chat_by_session.pop(next(iter(_chat_by_session)), None)
         _chat_by_session[session_id] = chat_id
     return chat_id
 

@@ -56,6 +56,23 @@ class ThreadSyncTest(unittest.TestCase):
                                       "created_at_ms": 2000})
         self.assertNotEqual(self.store.thread_payload(self.chat)["revision"], before)
 
+    def test_removing_messages_refreshes_preview_bumps_revision_and_forces_full_sync(self):
+        self.assertEqual(self.store.list()[0]["preview"], "下午有雨")
+        rev_before = self.store.thread_payload(self.chat)["revision"]
+
+        # Remove the tail reply: preview refreshes to the previous message, revision changes,
+        # and an older phone snapshot (known=2, last=1001) gets a full refresh instead of incremental.
+        removed = self.store.remove_events(self.chat, lambda e: e.get("text") == "下午有雨")
+        self.assertEqual(removed, 1)
+        self.assertEqual(self.store.list()[0]["preview"], "今天下雨吗")
+        synced = self.store.thread_payload(self.chat, known=2, last=1001)
+        self.assertNotIn("incremental", synced)
+        self.assertNotEqual(synced["revision"], rev_before)
+
+        # Removing all remaining messages clears preview to "".
+        self.store.remove_events(self.chat, lambda _e: True)
+        self.assertEqual(self.store.list()[0]["preview"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

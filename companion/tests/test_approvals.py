@@ -83,6 +83,7 @@ class ActivityEgressPrecedenceAndApprovalContractTest(unittest.TestCase):
     def setUp(self):
         ensure_hermes_stubs()
         pkg = _companion_pkg()
+        self.pkg = pkg
         self.activity = importlib.import_module(f"{pkg}.activity")
         self.approvals_mod = importlib.import_module(f"{pkg}.approvals")
         self.adapter_mod = importlib.import_module(f"{pkg}.adapter")
@@ -219,6 +220,37 @@ class ActivityEgressPrecedenceAndApprovalContractTest(unittest.TestCase):
             self.assertEqual(events[-1]["chat_id"], "main")
 
         asyncio.run(scenario())
+
+    def test_pending_browser_approval_keeps_browser_open_and_ensures_browser_on_decide(self):
+        comp = importlib.import_module(f"{self.pkg}.modules.computer")
+        closed = []
+        ensured = []
+        self.addCleanup(setattr, comp, "close_browser", comp.close_browser)
+        self.addCleanup(setattr, comp, "ensure_browser", comp.ensure_browser)
+        comp.close_browser = lambda: closed.append(True) or True
+        comp.ensure_browser = lambda: ensured.append(True) or True
+
+        comp.note_action("mcp__browser__browser_navigate", {"url": "https://shop.example"}, "main")
+        self.adapter.approvals.defer(
+            "main", "call_buy", "mcp__browser__browser_click", {"element": "提交订单"}, "browser_submit"
+        )
+        pending_id = self.adapter.approvals.store.list_for_session("websocket:main")[0].id
+
+        # Turn ends while approval card is still pending -> shared browser must stay open!
+        comp.close_after_task("main")
+        self.assertEqual(closed, [])
+
+        # Approving the card ensures browser is running before executing the click.
+        mod_tools = types.ModuleType("model_tools")
+        mod_tools.handle_function_call = lambda name, args, **kw: {"clicked": True}
+        with mock.patch.dict(sys.modules, {"model_tools": mod_tools}):
+            decided = asyncio.run(self.adapter.approvals.decide(pending_id, True, "once"))
+        self.assertEqual(decided.status, "executed")
+        self.assertEqual(len(ensured), 1)
+
+        # Once no pending browser approvals remain, close_after_task closes cleanly.
+        comp.close_after_task("main")
+        self.assertEqual(len(closed), 1)
 
 
 if __name__ == "__main__":
