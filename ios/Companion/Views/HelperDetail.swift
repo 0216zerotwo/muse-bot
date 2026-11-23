@@ -19,18 +19,31 @@ struct HelperChatScreen: View {
     private var helper: JSONValue? { helpers.first { $0["chat_id"].stringValue == chatID } }
     private var group: JSONValue? { resource.payload["groups"].array.first { $0["chat_id"].stringValue == chatID } }
     private var members: [JSONValue] { group?["members"].array.compactMap { id in helpers.first { $0["id"] == id } } ?? [] }
+    private var chatRunning: Bool { store.helperChatID == chatID && store.helperRunning }
+    private var chatActivity: String {
+        Presentation.currentActivity(messages: store.helperMessages, streaming: chatRunning)?.label ?? "正在做事"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             bar
-            ChatView(topInset: 8, messenger: messenger)
+            ChatView(topInset: 8, chatID: chatID, messenger: messenger)
         }
         .background(CompanionPalette.background.ignoresSafeArea())
         .sheet(isPresented: $profile) {
             Group {
-                if let group { GroupSheet(group: TabRecord(id: group["id"].stringValue, value: group), resource: resource) { _ in profile = false } }
-                else { HelperProfileView(chatID: chatID, resource: resource, onClose: { profile = false }) }
+                if let group {
+                    GroupSheet(group: TabRecord(id: group["id"].stringValue, value: group), resource: resource,
+                               onSaved: { _ in profile = false }, onDeleted: leaveDeletedConversation)
+                } else {
+                    HelperProfileView(chatID: chatID, resource: resource, onClose: { profile = false }, onDeleted: leaveDeletedConversation)
+                }
             }.tint(CompanionPalette.primary)
+        }
+        .onChange(of: resource.payload) { _, _ in
+            if resource.hasLoaded && helper == nil && group == nil {
+                leaveDeletedConversation()
+            }
         }
         // A swipe in from the left edge leaves the conversation, as ‹ does.
         .simultaneousGesture(DragGesture(minimumDistance: 24).onEnded { value in
@@ -38,12 +51,21 @@ struct HelperChatScreen: View {
         })
     }
 
+    private func leaveDeletedConversation() {
+        profile = false
+        store.purgeLocalChat(chatID)
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(150))
+            dismiss()
+        }
+    }
+
     private var title: String {
         if let group { return "\(group["name"].stringValue)（\(members.count + 1)）" }
         return helper?["name"].nonemptyString ?? "帮手"
     }
     private var subtitle: String {
-        if store.running { return store.activityLabel + "…" }
+        if chatRunning { return chatActivity + "…" }
         if group != nil { return members.map { $0["name"].stringValue }.joined(separator: "、") }
         if helper?["setup"].boolValue == true { return "正在设定" }
         return helper?["title"].nonemptyString ?? "帮手"
@@ -57,7 +79,7 @@ struct HelperChatScreen: View {
                 VStack(spacing: 1) {
                     Text(title).font(.system(size: 16.5, weight: .semibold)).lineLimit(1)
                     Text(subtitle).font(.system(size: 12)).lineLimit(1)
-                        .foregroundStyle(store.running ? CompanionPalette.primary : Color.secondary)
+                        .foregroundStyle(chatRunning ? CompanionPalette.primary : Color.secondary)
                 }.frame(maxWidth: .infinity)
             }.buttonStyle(.plain).accessibilityLabel("\(title)的资料")
             Button { profile = true } label: { Image(systemName: "ellipsis").font(.system(size: 20)).frame(width: 44, height: 44) }
@@ -71,12 +93,14 @@ struct HelperChatScreen: View {
 
     private var messenger: MessengerStyle {
         let host = Speaker(companionPicture: companionPicture, companion: true, name: store.companionName)
-        if let group {
+        if group != nil {
             let members = self.members
             return MessengerStyle(
                 title: title,
                 hint: "说一件事，大家一起做。@ 谁就交给谁，不 @ 就由主助理来分派。",
                 starters: [],
+                isGroup: true,
+                groupMembers: members,
                 bigFace: .group(members),
                 speaker: { message in
                     // A helper speaking for itself; otherwise the companion, hosting the group.
@@ -97,7 +121,7 @@ struct HelperChatScreen: View {
             : []
         return MessengerStyle(title: helper?["name"].nonemptyString ?? "帮手",
                               hint: job.isEmpty ? "跟它说说你想让它负责什么。" : "\(job)。有事直接说。",
-                              starters: starters, bigFace: .speaker(face), speaker: { _ in face })
+                              starters: starters, isGroup: false, groupMembers: [], bigFace: .speaker(face), speaker: { _ in face })
     }
 
     /// The companion's still picture, for its face as a group's host.
@@ -115,6 +139,8 @@ struct MessengerStyle {
     var title: String
     var hint: String
     var starters: [String]
+    var isGroup = false
+    var groupMembers: [JSONValue] = []
     var bigFace: BigFace
     var speaker: (ChatMessage) -> Speaker
 }
@@ -129,6 +155,7 @@ struct HelperProfileView: View {
     let chatID: String
     @ObservedObject var resource: TabResource
     var onClose: () -> Void
+    var onDeleted: (() -> Void)? = nil
     @State private var confirmDelete = false
     @State private var copied = false
 
@@ -198,7 +225,10 @@ struct HelperProfileView: View {
                                 SecondaryButton(title: "取消") { confirmDelete = false }
                                 PrimaryButton(title: "删除", danger: true) {
                                     Task {
-                                        if await resource.change("companion.helpers.change", payload: ["action": .string("delete"), "id": helper["id"]], store: store) { onClose() }
+                                        if await resource.change("companion.helpers.change", payload: ["action": .string("delete"), "id": helper["id"]], store: store) {
+                                            store.purgeLocalChat(chatID)
+                                            if let onDeleted { onDeleted() } else { onClose() }
+                                        }
                                     }
                                 }
                             }.padding(.top, 20)
@@ -557,6 +587,7 @@ struct GroupSheet: View {
     let group: TabRecord?
     @ObservedObject var resource: TabResource
     var onSaved: (String?) -> Void
+    var onDeleted: (() -> Void)? = nil
     @State private var name = ""
     @State private var members: [String] = []
     @State private var confirmDelete = false
@@ -604,8 +635,11 @@ struct GroupSheet: View {
                             SecondaryButton(title: "取消") { confirmDelete = false }
                             PrimaryButton(title: "删除", danger: true) {
                                 Task {
+                                    let groupChatID = group["chat_id"].stringValue
                                     if await resource.change("companion.groups.change", payload: ["action": .string("delete"), "id": .string(group.id)], store: store) {
-                                        onSaved(nil); dismiss()
+                                        if !groupChatID.isEmpty { store.purgeLocalChat(groupChatID) }
+                                        if let onDeleted { onDeleted() }
+                                        else { onSaved(nil); dismiss() }
                                     }
                                 }
                             }

@@ -93,7 +93,12 @@ struct CompanionRootView: View {
         .onChange(of: store.currentChatID) { _, _ in deliverAsked() }
         // A reply may have set a reminder (or changed one): the phone's notifications follow.
         .onChange(of: store.running) { was, now in if was && !now { Task { await store.planReminders() } } }
-        .onChange(of: store.connected) { _, on in if on { Task { await store.planReminders() } } }
+        .onChange(of: store.needsPairing) { _, needed in
+            if needed { settings = false; identity = false; appearance = false; menu = false }
+        }
+        .onChange(of: store.needsServer) { _, needed in
+            if needed { settings = false; identity = false; appearance = false; menu = false }
+        }
         .onAppear { deliverAsked() }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in keyboardUp = true }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardUp = false }

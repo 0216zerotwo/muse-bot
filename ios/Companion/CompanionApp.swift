@@ -7,6 +7,10 @@ struct CompanionApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var wasBackgrounded = false
 
+    init() {
+        ReminderNotifications.registerBackgroundRefresh()
+    }
+
     var body: some Scene {
         WindowGroup {
             CompanionRootView()
@@ -18,19 +22,21 @@ struct CompanionApp: App {
                         DraftUpload.trimOrphanedBlobs()
                     }
                     await store.foreground()
-                    await store.planReminders()
+                }
+                .onOpenURL { url in
+                    Task { await store.handleIncomingURL(url) }
                 }
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .background:
                         wasBackgrounded = true
+                        ReminderNotifications.scheduleBackgroundRefresh()
                     case .active:
                         KeyboardDismisser.shared.installEverywhere()
                         guard wasBackgrounded else { return }
                         wasBackgrounded = false
                         Task {
                             await store.foreground()
-                            await store.planReminders()  // the reminders coming up go off on the phone itself
                         }
                     case .inactive:
                         break

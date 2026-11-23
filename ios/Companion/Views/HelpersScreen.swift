@@ -13,7 +13,6 @@ struct HelpersScreen: View {
     @State private var chatting: HelperChatTarget?
     @State private var deleting: TabRecord?
     @State private var seen: [String: Double] = [:]
-    @State private var previousChat = ""
     @State private var openChat = ""
     var onChat: () -> Void = {}
 
@@ -184,14 +183,14 @@ struct HelpersScreen: View {
         UserDefaults.standard.set(seen, forKey: seenKey)
     }
 
-    /// The conversation opens at once, full screen like a chat app's; its history loads as it slides in.
+    /// The conversation opens at once, full screen like a chat app's; its history loads in isolation
+    /// without mutating the main chat's `store.currentChatID`.
     private func open(_ chat: String) {
         guard !chat.isEmpty else { resource.error = "这个帮手还没有聊天，刷新后重试。"; return }
-        if previousChat.isEmpty { previousChat = store.currentChatID }
         markSeen(chat)
         openChat = chat
         chatting = HelperChatTarget(id: chat)
-        Task { await store.changeChat(chat) }
+        Task { await store.openHelperChat(chat) }
     }
 
     /// After a sheet closes (a new helper or group): its chat.
@@ -202,18 +201,18 @@ struct HelpersScreen: View {
     private func chatClosed() {
         // What came in while it was open counts as read (the item is already cleared here).
         if !openChat.isEmpty { markSeen(openChat); openChat = "" }
-        let old = previousChat
-        previousChat = ""
-        Task {
-            if !old.isEmpty { await store.changeChat(old) }
-            await load()
-        }
+        store.closeHelperChat()
+        Task { await load() }
     }
 
     private func remove(_ row: TabRecord) async {
         let isGroup = !row["members"].array.isEmpty
-        await resource.change(isGroup ? "companion.groups.change" : "companion.helpers.change",
-                              payload: ["action": .string("delete"), "id": .string(row.id)], store: store)
+        let targetChat = row["chat_id"].stringValue
+        if await resource.change(isGroup ? "companion.groups.change" : "companion.helpers.change",
+                                 payload: ["action": .string("delete"), "id": .string(row.id)], store: store),
+           !targetChat.isEmpty {
+            store.purgeLocalChat(targetChat)
+        }
     }
 }
 

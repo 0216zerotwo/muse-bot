@@ -39,6 +39,16 @@ final class CompanionStore: ObservableObject {
     @Published private(set) var currentDeviceID = ""
     @Published private(set) var currentGoal: GoalState?
     @Published var suggestedDraft: String?
+    @Published private(set) var helperChatID = ""
+    @Published private(set) var helperMessages: [ChatMessage] = []
+    @Published private(set) var helperApprovals: [JSONValue] = []
+    @Published private(set) var helperRunning = false
+    @Published private(set) var helperHasOlder = false
+    @Published private(set) var helperLoadingHistory = false
+    @Published private(set) var helperGoal: GoalState?
+    @Published private(set) var sttAvailable = true
+    @Published private(set) var modelsChecked = false
+    @Published private(set) var hasConfiguredChatModel = true
 
     var baseURL: URL? { api?.baseURL ?? (try? APIClient.normalizedServer(serverAddress)) }
     var companionName: String { companionState["name"].nonemptyString ?? "伙伴" }
@@ -89,6 +99,7 @@ final class CompanionStore: ObservableObject {
     var knownChats: Set<String> = []
     var runningChats: Set<String> = []
     var goalStates: [String: GoalState] = [:]
+    var approvalsByChat: [String: [JSONValue]] = [:]
     var cancelGoalAfterStop: Set<String> = []
     var projections: [String: StreamProjection] = [:]
     var historyEvents: [String: [JSONValue]] = [:]
@@ -132,7 +143,10 @@ final class CompanionStore: ObservableObject {
         needsServer = serverAddress.isEmpty
         if !serverAddress.isEmpty {
             if let cached = UserDefaults.standard.data(forKey: cacheKey),
-               let value = try? JSONValue.parse(cached) { companionState = value }
+               let value = try? JSONValue.parse(cached) {
+                companionState = value
+                updateCapabilities(from: value)
+            }
             loadOutbox()
             currentChatID = mainChatID
             restoreQueuedPreviews()
@@ -173,6 +187,13 @@ final class CompanionStore: ObservableObject {
                     if !currentChatID.isEmpty, !runningChats.contains(currentChatID) {
                         await hydrate(currentChatID)
                     }
+                    if !helperChatID.isEmpty, helperChatID != currentChatID {
+                        await refreshApprovals(for: helperChatID)
+                        if !runningChats.contains(helperChatID) {
+                            await hydrate(helperChatID)
+                        }
+                    }
+                    await planReminders()
                     beginFlush()
                     return
                 }
@@ -188,12 +209,16 @@ final class CompanionStore: ObservableObject {
             if normalized == serverAddress && connecting { return }
             if normalized != serverAddress {
                 closeConnection(rejectRequests: true)
+                await ReminderNotifications.clearAll()
                 serverAddress = normalized
                 UserDefaults.standard.set(normalized, forKey: "companion.server")
                 resetServerState()
                 loadOutbox()
                 if let cached = UserDefaults.standard.data(forKey: cacheKey),
-                   let value = try? JSONValue.parse(cached) { companionState = value }
+                   let value = try? JSONValue.parse(cached) {
+                    companionState = value
+                    updateCapabilities(from: value)
+                }
                 currentChatID = mainChatID
                 restoreQueuedPreviews()
             }
@@ -207,6 +232,43 @@ final class CompanionStore: ObservableObject {
             }
             await openConnection()
         } catch { show(error) }
+    }
+
+    func handleIncomingURL(_ url: URL) async {
+        let parsed = APIClient.parseConnectInput(url.absoluteString)
+        if let server = parsed.server, !server.isEmpty {
+            if let code = parsed.pairingCode, !code.isEmpty, Self.pairingCode(in: server) == nil {
+                let cleanBase = (try? APIClient.normalizedServer(server).absoluteString) ?? server
+                await connect(server: cleanBase + "#pair=" + code)
+            } else {
+                await connect(server: server)
+            }
+        } else if let code = parsed.pairingCode, !code.isEmpty, !serverAddress.isEmpty {
+            needsPairing = true
+            await pair(code: code)
+        }
+    }
+
+    func disconnectCurrentDevice() async {
+        let address = serverAddress
+        let deviceID = currentDeviceID
+        if connected, !deviceID.isEmpty {
+            _ = try? await requestMutation("companion.devices.remove", payload: ["id": .string(deviceID)], timeout: 4)
+        }
+        closeConnection(rejectRequests: true)
+        if !address.isEmpty {
+            DeviceKeychain.remove(server: address)
+            LocalStore.removeServer(address)
+            UserDefaults.standard.removeObject(forKey: "companion.state." + address)
+            UserDefaults.standard.removeObject(forKey: "companion.helpers.seen." + address)
+        }
+        clearServerOutbox()
+        await ReminderNotifications.clearAll()
+        resetServerState()
+        connecting = false
+        errorMessage = nil
+        needsServer = address.isEmpty
+        needsPairing = !address.isEmpty
     }
 
     func pair(code: String) async {
@@ -232,6 +294,7 @@ final class CompanionStore: ObservableObject {
 
     func changeServer() {
         closeConnection(rejectRequests: true)
+        Task { await ReminderNotifications.clearAll() }
         needsServer = true
         needsPairing = false
         connecting = false
@@ -257,6 +320,7 @@ final class CompanionStore: ObservableObject {
             client.apiToken = boot["api_token"].stringValue
             currentDeviceID = boot["device_id"].stringValue
             frameLimit = boot["limits"]["transport"]["max_frame_bytes"].intValue ?? 2 * 1024 * 1024
+            updateCapabilities(from: boot)
             let url = try client.socketURL(bootstrap: boot)
             let task = client.makeWebSocketTask(url: url, maximumMessageSize: frameLimit)
             socket = task
@@ -292,7 +356,9 @@ final class CompanionStore: ObservableObject {
                 DeviceKeychain.remove(server: serverAddress)
                 // Removed from the server (or its pairing reset): what this iPhone kept of it goes too.
                 LocalStore.removeServer(serverAddress)
+                UserDefaults.standard.removeObject(forKey: cacheKey)
                 clearServerOutbox()
+                await ReminderNotifications.clearAll()
                 savedEvents = [:]
                 needsPairing = true
                 errorMessage = "输入服务器生成的一次性配对码，即可连接这台 iPhone"
@@ -359,6 +425,7 @@ final class CompanionStore: ObservableObject {
         loadingChats.removeAll()
         duringHistory.removeAll()
         loadingHistory = false
+        helperLoadingHistory = false
         let transcriptions = Array(pendingTranscriptions.values)
         pendingTranscriptions.removeAll()
         for item in transcriptions {
@@ -415,7 +482,9 @@ final class CompanionStore: ObservableObject {
             pending.timeout.cancel()
             if kind == "transcription_result" { pending.continuation.resume(returning: event["text"].stringValue) }
             else {
-                let detail = event["detail"].stringValue == "not_configured"
+                let notConfigured = event["detail"].stringValue == "not_configured"
+                if notConfigured { sttAvailable = false }
+                let detail = notConfigured
                     ? "服务器还没有配置语音识别" : "没有识别出这段语音，请重试"
                 pending.continuation.resume(throwing: ServiceError.message(detail))
             }
@@ -426,7 +495,12 @@ final class CompanionStore: ObservableObject {
             return
         }
         if kind == "approval_updated" {
-            Task { [weak self] in await self?.refreshApprovals() }
+            Task { [weak self] in
+                await self?.refreshApprovals()
+                if let helper = self?.helperChatID, !helper.isEmpty, helper != self?.currentChatID {
+                    await self?.refreshApprovals(for: helper)
+                }
+            }
             return
         }
         let id = event["chat_id"].stringValue
@@ -439,13 +513,13 @@ final class CompanionStore: ObservableObject {
         }
         if kind == "session_updated" {
             await refreshSessions()
-            if id == currentChatID && !running { await hydrate(id) }
+            if (id == currentChatID || id == helperChatID) && !runningChats.contains(id) { await hydrate(id) }
             return
         }
         guard !id.isEmpty else { return }
         if kind == "goal_state" {
             applyGoalState(event["goal_state"], chatID: id)
-            if id == currentChatID { publishCurrent() }
+            publishChat(id)
             return
         }
         if kind == "message_accepted" || kind == "user_message" {
@@ -480,7 +554,7 @@ final class CompanionStore: ObservableObject {
             outbox.removeAll { $0.id == turnID && $0.chatID == id }
             persistOutbox()
             runningChats.remove(id)
-            if id == currentChatID { errorMessage = "消息未被服务器接受，请检查内容后重试" }
+            if id == currentChatID || id == helperChatID { errorMessage = "消息未被服务器接受，请检查内容后重试" }
         }
         var projection = projections[id] ?? StreamProjection()
         var removedOptimisticUser = false
@@ -504,7 +578,7 @@ final class CompanionStore: ObservableObject {
             if event["goal_state"] != .null {
                 applyGoalState(event["goal_state"], chatID: id)
             }
-            if id == currentChatID { publishCurrent() }
+            publishChat(id)
             let reconcile = reconcileAtTurnEnd.remove(id) != nil
             Task { [weak self] in
                 if shouldCancelGoal { await self?.sendControl("/goal stop", chatID: id) }
@@ -512,12 +586,12 @@ final class CompanionStore: ObservableObject {
                 await self?.refreshSessions()
                 await self?.refreshCompanion()
                 await self?.refreshLibrary()
-                await self?.refreshApprovals()
+                await self?.refreshApprovals(for: id)
             }
         } else {
-            if id == currentChatID { publishCurrent() }
-            if kind == "message" && id == currentChatID && Date().timeIntervalSince(lastApprovalRefresh) > 2 {
-                Task { [weak self] in await self?.refreshApprovals() }
+            publishChat(id)
+            if kind == "message" && (id == currentChatID || id == helperChatID) && Date().timeIntervalSince(lastApprovalRefresh) > 2 {
+                Task { [weak self] in await self?.refreshApprovals(for: id) }
             }
         }
     }
@@ -544,6 +618,7 @@ final class CompanionStore: ObservableObject {
             do {
                 let id = try await newChatID()
                 companionState = try await requestMutation("companion.update", payload: ["changes": .object(["chat_id": .string(id)])])
+                updateCapabilities(from: companionState)
                 cacheState()
             } catch { show(error); return }
         }
@@ -552,9 +627,14 @@ final class CompanionStore: ObservableObject {
         Task { [weak self] in
             await self?.refreshSessions()
             await self?.refreshLibrary()
+            await self?.refreshModelStatus()
+            await self?.planReminders()
         }
         await changeChat(currentChatID, forceHistory: true)
-        for id in Set(outbox.map(\.chatID)) where id != currentChatID {
+        if !helperChatID.isEmpty, helperChatID != currentChatID {
+            await openHelperChat(helperChatID)
+        }
+        for id in Set(outbox.map(\.chatID)) where id != currentChatID && id != helperChatID {
             knownChats.insert(id)
             try? await write(.object(["type": .string("attach"), "chat_id": .string(id)]))
             await hydrate(id)
@@ -564,11 +644,16 @@ final class CompanionStore: ObservableObject {
         beginFlush()
     }
 
-    func approve(id: String, decision: String, scope: String = "once") async {
+    func approve(id: String, decision: String, scope: String = "once", chatID: String? = nil) async {
+        let targetChat = chatID ?? currentChatID
         do {
             let result = try await requestMutation("approval.decide", payload: ["id": .string(id), "decision": .string(decision), "scope": .string(scope)], timeout: 60)
-            if let index = approvals.firstIndex(where: { $0["id"].stringValue == id }) { approvals[index] = result }
-            await refreshApprovals()
+            if var list = approvalsByChat[targetChat], let index = list.firstIndex(where: { $0["id"].stringValue == id }) {
+                list[index] = result
+                approvalsByChat[targetChat] = list
+                publishChat(targetChat)
+            }
+            await refreshApprovals(for: targetChat)
         } catch { show(error) }
     }
 
@@ -608,7 +693,13 @@ final class CompanionStore: ObservableObject {
         let drawingAvatar = action.contains("avatar") || (action == "companion.helpers.change" && payload["action"]?.stringValue == "avatar")
         let timeout: Double = drawingAvatar ? 240 : slow.contains(action) ? 180 : 60
         let result = try await requestMutation(action, payload: payload, timeout: timeout)
-        if action == "companion.update" { companionState = result; cacheState() }
+        if action == "companion.update" {
+            companionState = result
+            updateCapabilities(from: result)
+            cacheState()
+            Task { await planReminders() }
+        }
+        if action.hasPrefix("companion.models.") { Task { await refreshModelStatus() } }
         if action == "companion.helpers.change" || action == "companion.groups.change" { await refreshLibrary() }
         return result
     }
@@ -669,6 +760,12 @@ final class CompanionStore: ObservableObject {
         try await socket.send(.string(text))
     }
 
+    func updateCapabilities(from payload: JSONValue) {
+        if case .bool(let flag) = payload["capabilities"]["stt"] {
+            if sttAvailable != flag { sttAvailable = flag }
+        }
+    }
+
     @discardableResult
     func refreshCompanion() async -> Bool {
         guard let api else { return false }
@@ -677,10 +774,20 @@ final class CompanionStore: ObservableObject {
             let value = try await api.get("/api/webui/companion")
             guard attempt == generation else { return false }
             lastStateRefresh = Date()
+            updateCapabilities(from: value)
             if companionState != value { companionState = value; cacheState() }
             return true
         } catch { if companionState.object.isEmpty { show(error) } }
         return false
+    }
+
+    func refreshModelStatus() async {
+        guard let api else { return }
+        let attempt = generation
+        guard let value = try? await api.get("/api/webui/companion/models"), attempt == generation else { return }
+        let configured = !value["presets"].array.isEmpty || value["default"].nonemptyString != nil
+        if !modelsChecked { modelsChecked = true }
+        if hasConfiguredChatModel != configured { hasConfiguredChatModel = configured }
     }
 
     func refreshSessions() async {
@@ -713,16 +820,18 @@ final class CompanionStore: ObservableObject {
         }
     }
 
-    func refreshApprovals() async {
-        guard let api, !currentChatID.isEmpty else { return }
-        let id = currentChatID
+    func refreshApprovals(for targetID: String? = nil) async {
+        let id = targetID ?? currentChatID
+        guard let api, !id.isEmpty else { return }
         let attempt = generation
         lastApprovalRefresh = Date()
         do {
             let value = try await api.get("/api/webui/approvals", query: [URLQueryItem(name: "session_key", value: "websocket:" + id)])
-            guard currentChatID == id, generation == attempt else { return }
+            guard generation == attempt else { return }
             let items = value["approvals"].records
-            if approvals != items { approvals = items }
+            approvalsByChat[id] = items
+            if currentChatID == id && approvals != items { approvals = items }
+            if helperChatID == id && helperApprovals != items { helperApprovals = items }
         } catch { /* Keep the last cards during a transient refresh failure. */ }
     }
 
@@ -736,6 +845,9 @@ final class CompanionStore: ObservableObject {
                     try await Self.sendPingOnce(socket, timeoutSeconds: 10)
                     guard self.generation == attempt else { return }
                     await self.refreshApprovals()
+                    if !self.helperChatID.isEmpty && self.helperChatID != self.currentChatID {
+                        await self.refreshApprovals(for: self.helperChatID)
+                    }
                     await self.refreshLibrary()
                     if Date().timeIntervalSince(self.lastStateRefresh) > 20 { await self.refreshCompanion() }
                 } catch {
@@ -775,6 +887,11 @@ final class CompanionStore: ObservableObject {
         }
     }
 
+    func publishChat(_ id: String) {
+        if id == currentChatID { publishCurrent() }
+        if !helperChatID.isEmpty && id == helperChatID { publishHelper() }
+    }
+
     func publishCurrent() {
         // Every assignment to a published value redraws every screen, equal or not: only real changes.
         let all = projections[currentChatID]?.messages ?? []
@@ -787,8 +904,75 @@ final class CompanionStore: ObservableObject {
         if running != busy { running = busy }
         let activeGoal = goalStates[currentChatID].flatMap { $0.active ? $0 : nil }
         if currentGoal != activeGoal { currentGoal = activeGoal }
+        let currentApprovals = approvalsByChat[currentChatID] ?? []
+        if approvals != currentApprovals { approvals = currentApprovals }
         let queued = outbox.filter { $0.state == "queued" }.count
         if queuedCount != queued { queuedCount = queued }
+    }
+
+    func publishHelper() {
+        guard !helperChatID.isEmpty else { return }
+        let all = projections[helperChatID]?.messages ?? []
+        let count = visibleCounts[helperChatID] ?? 60
+        let visible = Array(all.suffix(count))
+        if helperMessages != visible { helperMessages = visible }
+        let older = all.count > count || serverHasOlder.contains(helperChatID)
+        if helperHasOlder != older { helperHasOlder = older }
+        let busy = runningChats.contains(helperChatID)
+        if helperRunning != busy { helperRunning = busy }
+        let activeGoal = goalStates[helperChatID].flatMap { $0.active ? $0 : nil }
+        if helperGoal != activeGoal { helperGoal = activeGoal }
+        let items = approvalsByChat[helperChatID] ?? []
+        if helperApprovals != items { helperApprovals = items }
+        let loading = loadingChats.contains(helperChatID)
+        if helperLoadingHistory != loading { helperLoadingHistory = loading }
+    }
+
+    func openHelperChat(_ id: String) async {
+        guard !id.isEmpty else { return }
+        helperChatID = id
+        knownChats.insert(id)
+        publishHelper()
+        guard connected else { return }
+        try? await write(.object(["type": .string("attach"), "chat_id": .string(id)]))
+        if needsHistoryRefresh.contains(id) || projections[id] == nil || !runningChats.contains(id) {
+            await hydrate(id)
+        }
+        if helperChatID == id {
+            await refreshApprovals(for: id)
+        }
+    }
+
+    func closeHelperChat() {
+        guard !helperChatID.isEmpty else { return }
+        helperChatID = ""
+        helperMessages = []
+        helperApprovals = []
+        helperRunning = false
+        helperHasOlder = false
+        helperLoadingHistory = false
+        helperGoal = nil
+    }
+
+    func purgeLocalChat(_ id: String) {
+        guard !id.isEmpty else { return }
+        outbox.removeAll { $0.chatID == id }
+        persistOutbox()
+        knownChats.remove(id)
+        runningChats.remove(id)
+        approvalsByChat.removeValue(forKey: id)
+        goalStates.removeValue(forKey: id)
+        cancelGoalAfterStop.remove(id)
+        projections.removeValue(forKey: id)
+        historyEvents.removeValue(forKey: id)
+        savedEvents.removeValue(forKey: id)
+        visibleCounts.removeValue(forKey: id)
+        beforeCursors.removeValue(forKey: id)
+        serverHasOlder.remove(id)
+        reconcileAtTurnEnd.remove(id)
+        needsHistoryRefresh.remove(id)
+        LocalStore.remove(LocalStore.url("chats", server: serverAddress, name: id))
+        if helperChatID == id { closeHelperChat() }
     }
 
     var cacheKey: String { "companion.state." + serverAddress }
@@ -805,11 +989,16 @@ final class CompanionStore: ObservableObject {
         messages = []
         sideChats = []
         approvals = []
+        approvalsByChat = [:]
         avatars = []
         helpers = []
         currentDeviceID = ""
         currentGoal = nil
         suggestedDraft = nil
+        closeHelperChat()
+        sttAvailable = true
+        modelsChecked = false
+        hasConfiguredChatModel = true
         knownChats = []
         runningChats = []
         goalStates = [:]
@@ -837,9 +1026,7 @@ final class CompanionStore: ObservableObject {
         else { errorMessage = "连不上服务器，请检查网络和服务器地址" }
     }
 
-    static func pairingCode(in input: String) -> String? {
-        guard let fragment = URLComponents(string: input.trimmingCharacters(in: .whitespacesAndNewlines))?.fragment else { return nil }
-        let query = URLComponents(string: "https://pair.invalid/?" + fragment)
-        return query?.queryItems?.first(where: { $0.name == "pair" })?.value?.trimmingCharacters(in: .whitespacesAndNewlines)
+    nonisolated static func pairingCode(in input: String) -> String? {
+        APIClient.parseConnectInput(input).pairingCode
     }
 }

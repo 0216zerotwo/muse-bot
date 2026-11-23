@@ -7,7 +7,7 @@ import QuickLook
 import UniformTypeIdentifiers
 
 func resolvedURL(_ path: String, baseURL: URL?) -> URL? {
-    guard !path.isEmpty, let url = URL(string: path, relativeTo: baseURL)?.absoluteURL,
+    guard let url = APIClient.resolvePath(path, against: baseURL),
           let scheme = url.scheme?.lowercased(), ["https", "http", "file"].contains(scheme) else { return nil }
     return url
 }

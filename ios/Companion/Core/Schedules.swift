@@ -58,4 +58,11 @@ enum Schedules {
     }
 
     static let triggerEmoji = ["email": "📧", "calendar": "📅", "page": "🌐", "webhook": "🔗"]
+
+    static func automationRunPath(jobID: String, runID: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let encodedJob = jobID.addingPercentEncoding(withAllowedCharacters: allowed) ?? jobID
+        let encodedRun = runID.addingPercentEncoding(withAllowedCharacters: allowed) ?? runID
+        return "/api/webui/automations/\(encodedJob)/runs/\(encodedRun)"
+    }
 }
