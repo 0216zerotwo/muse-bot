@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Menu, Settings2, SlidersHorizontal, X } from "lucide-react";
 
 import { useNanobotStream, type SendAttachment } from "@/hooks/useNanobotStream";
@@ -37,11 +37,7 @@ import { readsAfterVoice, speakAloud, type MessageAction } from "./MessageAction
 import { fileDraft } from "./fileKinds";
 import { textWithoutCards } from "./replyCards";
 import { GOAL_COMMAND, GoalBanner } from "./GoalBanner";
-import { FeedScreen, FeedSettingsSheet } from "./muse/Feed";
-import { GoalsScreen } from "./muse/GoalsScreen";
-import { HelpersScreen } from "./muse/Helpers";
 import { BrowserFullscreen } from "./muse/BrowserPane";
-import { TeachSheet } from "./muse/TeachSheet";
 import { NameLookRow } from "./muse/Identity";
 import { MessengerBar, MessengerEmpty, type ChatApp } from "./muse/Messenger";
 import { MuseHeader, MuseRoundButton } from "./muse/MuseHeader";
@@ -49,11 +45,17 @@ import { MuseSheet } from "./muse/Sheet";
 import { MuseTabBar, StatusSheet, type MuseTab } from "./muse/Shell";
 import { PetView } from "./Pet";
 import { approvalCallIds, awaitingReply, chatItems, currentActivity } from "./presentation";
-import { CreationsView } from "./Creations";
 import { IdeasView } from "./TabViews";
 import { usePetMood } from "./usePetMood";
 import { usePetScale } from "./appearance";
 import { ViewerProvider } from "./Viewer";
+
+const FeedScreen = lazy(() => import("./muse/Feed").then((m) => ({ default: m.FeedScreen })));
+const FeedSettingsSheet = lazy(() => import("./muse/Feed").then((m) => ({ default: m.FeedSettingsSheet })));
+const GoalsScreen = lazy(() => import("./muse/GoalsScreen").then((m) => ({ default: m.GoalsScreen })));
+const HelpersScreen = lazy(() => import("./muse/Helpers").then((m) => ({ default: m.HelpersScreen })));
+const TeachSheet = lazy(() => import("./muse/TeachSheet").then((m) => ({ default: m.TeachSheet })));
+const CreationsView = lazy(() => import("./Creations").then((m) => ({ default: m.CreationsView })));
 
 export type CompanionTab = MuseTab;
 
@@ -353,6 +355,10 @@ export function LiveScreen({
   const writing = useMemo(() => (typing ? fileDraft(messages) : null), [typing, messages]);
   const [composerFocused, setComposerFocused] = useState(false);
   const [statusOpen, setStatusOpen] = useState(false);
+  const [visitedTabs, setVisitedTabs] = useState<ReadonlySet<MuseTab>>(() => new Set([tab]));
+  useEffect(() => {
+    setVisitedTabs((prev) => (prev.has(tab) ? prev : new Set(prev).add(tab)));
+  }, [tab]);
   // A new request rises as a sheet; 稍后再说 puts it away (it stays in the chat and in 等你确认).
   const [laterIds, setLaterIds] = useState<ReadonlySet<string>>(new Set());
   /* The browser it works in: whether it is waiting on the user (a login, a captcha). */
@@ -606,52 +612,54 @@ export function LiveScreen({
           )}
         </div>
       </div>
-      {(["feed", "ideas", "goals", "helpers", "creations"] as const).map((key) => (
-        <div
-          key={key}
-          hidden={tab !== key}
-          className="absolute inset-0 overflow-y-auto overscroll-contain"
-          style={{ paddingTop: insets.top, paddingBottom: insets.bottom + 16 }}
-        >
-          <div className="mx-auto max-w-2xl">
-            {key === "feed" && (
-              <FeedScreen
-                data={feedData}
-                writing={writingSince !== null}
-                onEditInstructions={() => setFeedSettings(true)}
-                onWriteNow={writeNow}
-                onDiscuss={discuss}
-                onChange={setFeedData}
-              />
-            )}
-            {key === "ideas" && (
-              <IdeasView
-                active={tab === "ideas"}
-                onDo={(prompt) => {
-                  onTab("chat");
-                  submit(prompt);
-                }}
-              />
-            )}
-            {key === "goals" && (
-              <GoalsScreen
-                active={tab === "goals"}
-                name={companion.name}
-                approvals={mergedApprovals}
-                onDecide={decide}
-                onSend={sendFromTab}
-                working={isStreaming ? { label: activity?.label ?? null, asked: lastAsked } : null}
-                computer={computer}
-                onOpenCreations={() => onTab("creations")}
-              />
-            )}
-            {key === "helpers" && (
-              <HelpersScreen active={tab === "helpers"} onOpenChat={onOpenChat} />
-            )}
-            {key === "creations" && <CreationsView active={tab === "creations"} />}
+      {(["feed", "ideas", "goals", "helpers", "creations"] as const).map((key) =>
+        visitedTabs.has(key) || tab === key ? (
+          <div
+            key={key}
+            hidden={tab !== key}
+            className="absolute inset-0 overflow-y-auto overscroll-contain"
+            style={{ paddingTop: insets.top, paddingBottom: insets.bottom + 16 }}
+          >
+            <div className="mx-auto max-w-2xl">
+              <Suspense fallback={null}>
+                {key === "feed" && (
+                  <FeedScreen
+                    data={feedData}
+                    writing={writingSince !== null}
+                    onEditInstructions={() => setFeedSettings(true)}
+                    onWriteNow={writeNow}
+                    onDiscuss={discuss}
+                    onChange={setFeedData}
+                  />
+                )}
+                {key === "ideas" && (
+                  <IdeasView
+                    active={tab === "ideas"}
+                    onDo={(prompt) => {
+                      onTab("chat");
+                      submit(prompt);
+                    }}
+                  />
+                )}
+                {key === "goals" && (
+                  <GoalsScreen
+                    active={tab === "goals"}
+                    name={companion.name}
+                    approvals={mergedApprovals}
+                    onDecide={decide}
+                    onSend={sendFromTab}
+                    working={isStreaming ? { label: activity?.label ?? null, asked: lastAsked } : null}
+                    computer={computer}
+                    onOpenCreations={() => onTab("creations")}
+                  />
+                )}
+                {key === "helpers" && <HelpersScreen active={tab === "helpers"} onOpenChat={onOpenChat} />}
+                {key === "creations" && <CreationsView active={tab === "creations"} />}
+              </Suspense>
+            </div>
           </div>
-        </div>
-      ))}
+        ) : null,
+      )}
 
       {chatApp ? (
         <MessengerBar
@@ -759,55 +767,69 @@ export function LiveScreen({
         )}
       </MuseSheet>
 
-      <FeedSettingsSheet
-        open={feedSettings}
-        data={feedData}
-        onClose={() => setFeedSettings(false)}
-        onSaved={(data, wroteNow) => {
-          setFeedData(data);
-          setFeedSettings(false);
-          if (wroteNow) setWritingSince(Date.now());
-        }}
-      />
-
-      <StatusSheet
-        open={statusOpen}
-        onClose={() => setStatusOpen(false)}
-        face={<PetView value={companion.avatar} animation={pet.animation} loop={pet.loop} onDone={pet.onDone} size={72} />}
-        name={companion.name}
-        statusLine={status}
-        working={isStreaming}
-        onStop={() => {
-          stop();
-          setStatusOpen(false);
-        }}
-        approvals={mergedApprovals}
-        sessionKey={sessionKey}
-        history={messages}
-        computer={computer}
-        onDecide={decide}
-        onTaught={setTaught}
-        identity={
-          <NameLookRow
-            companion={companion}
-            onUpdate={onUpdateCompanion}
-            onChangeLook={() => {
-              setStatusOpen(false);
-              onChangeLook();
+      {feedSettings && (
+        <Suspense fallback={null}>
+          <FeedSettingsSheet
+            open={feedSettings}
+            data={feedData}
+            onClose={() => setFeedSettings(false)}
+            onSaved={(data, wroteNow) => {
+              setFeedData(data);
+              setFeedSettings(false);
+              if (wroteNow) setWritingSince(Date.now());
             }}
           />
-        }
-      />
+        </Suspense>
+      )}
+
+      {statusOpen && (
+        <Suspense fallback={null}>
+          <StatusSheet
+            open={statusOpen}
+            onClose={() => setStatusOpen(false)}
+            face={<PetView value={companion.avatar} animation={pet.animation} loop={pet.loop} onDone={pet.onDone} size={72} />}
+            name={companion.name}
+            statusLine={status}
+            working={isStreaming}
+            onStop={() => {
+              stop();
+              setStatusOpen(false);
+            }}
+            approvals={mergedApprovals}
+            sessionKey={sessionKey}
+            history={messages}
+            computer={computer}
+            onDecide={decide}
+            onTaught={setTaught}
+            identity={
+              <NameLookRow
+                companion={companion}
+                onUpdate={onUpdateCompanion}
+                onChangeLook={() => {
+                  setStatusOpen(false);
+                  onChangeLook();
+                }}
+              />
+            }
+          />
+        </Suspense>
+      )}
 
       {teaching && (
-        <BrowserFullscreen
-          name={companion.name}
-          teach
-          onTaught={setTaught}
-          onClose={() => setTeaching(false)}
-        />
+        <Suspense fallback={null}>
+          <BrowserFullscreen
+            name={companion.name}
+            teach
+            onTaught={setTaught}
+            onClose={() => setTeaching(false)}
+          />
+        </Suspense>
       )}
-      <TeachSheet steps={taught} name={companion.name} onClose={() => setTaught(null)} />
+      {taught && (
+        <Suspense fallback={null}>
+          <TeachSheet steps={taught} name={companion.name} onClose={() => setTaught(null)} />
+        </Suspense>
+      )}
     </div>
     </ViewerProvider>
   );

@@ -31,8 +31,100 @@ const COLORS: Record<FileKind, string> = {
 };
 
 /** Enough of a text file for its first page (a page file is read whole: it is drawn). */
-const TEXT_PREVIEW = 64 * 1024;
+export const TEXT_PREVIEW = 64 * 1024;
 const PAGE_LIMIT = 2 * 1024 * 1024;
+
+function parseTotalBytes(res: Response, fallbackBytes: number, truncated: boolean): number | null {
+  const range = res.headers.get("Content-Range");
+  if (range) {
+    const match = /\/(\d+)\s*$/.exec(range);
+    if (match) {
+      const total = Number(match[1]);
+      if (Number.isFinite(total) && total >= 0) return total;
+    }
+  }
+  if (res.status === 200) {
+    const length = res.headers.get("Content-Length");
+    if (length !== null && length.trim() !== "") {
+      const total = Number(length);
+      if (Number.isFinite(total) && total >= 0) return total;
+    }
+    if (!truncated) return fallbackBytes;
+  }
+  return truncated ? null : fallbackBytes;
+}
+
+/**
+ * Fetches at most ``maxBytes`` from ``url`` using HTTP Range + ReadableStream reader cancellation
+ * so multi-megabyte CSV/Markdown/log attachments never buffer their full body in memory.
+ */
+export async function fetchBoundedTextPreview(
+  url: string,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<{ text: string; bytes: number | null }> {
+  const res = await fetch(url, {
+    credentials: "same-origin",
+    headers: { Range: `bytes=0-${maxBytes - 1}` },
+    signal,
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const chunks: Uint8Array[] = [];
+  let collected = 0;
+  let truncated = false;
+
+  if (res.body?.getReader) {
+    const reader = res.body.getReader();
+    try {
+      while (collected < maxBytes) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value || value.byteLength === 0) continue;
+        const room = maxBytes - collected;
+        if (value.byteLength > room) {
+          chunks.push(value.subarray(0, room));
+          collected += room;
+          truncated = true;
+          await reader.cancel().catch(() => undefined);
+          break;
+        }
+        chunks.push(value);
+        collected += value.byteLength;
+      }
+      if (!truncated && collected >= maxBytes) {
+        const probe = await reader.read();
+        if (!probe.done) {
+          truncated = true;
+          await reader.cancel().catch(() => undefined);
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  } else {
+    const buf = new Uint8Array(await res.arrayBuffer());
+    truncated = buf.byteLength > maxBytes;
+    const slice = truncated ? buf.subarray(0, maxBytes) : buf;
+    chunks.push(slice);
+    collected = slice.byteLength;
+  }
+
+  const merged = new Uint8Array(collected);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let decoded = new TextDecoder("utf-8").decode(merged).replace(/^\uFEFF/, "");
+  if (truncated && decoded.endsWith("\uFFFD")) {
+    decoded = decoded.slice(0, -1);
+  }
+  return {
+    text: decoded,
+    bytes: parseTotalBytes(res, collected, truncated),
+  };
+}
 
 export function FileBadge({ name, kind }: { name: string; kind: FileKind }) {
   return (
@@ -158,18 +250,20 @@ export function FileCard({ item, onOpen }: { item: UIMediaAttachment; onOpen: (e
   useEffect(() => {
     if (!read || !item.url) return;
     let alive = true;
-    fetch(item.url, { credentials: "same-origin" })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const blob = await res.blob();
-        const words = await blob.slice(0, kind === "web" ? PAGE_LIMIT : TEXT_PREVIEW).text();
+    const controller = new AbortController();
+    const limit = kind === "web" ? PAGE_LIMIT : TEXT_PREVIEW;
+    fetchBoundedTextPreview(item.url, limit, controller.signal)
+      .then(({ text: preview, bytes: total }) => {
         if (!alive) return;
-        setBytes(blob.size);
-        setText(words.replace(/^\uFEFF/, ""));
+        setBytes(total);
+        setText(preview);
       })
-      .catch(() => alive && setText(""));
+      .catch(() => {
+        if (alive && !controller.signal.aborted) setText("");
+      });
     return () => {
       alive = false;
+      controller.abort();
     };
   }, [read, item.url, kind]);
 

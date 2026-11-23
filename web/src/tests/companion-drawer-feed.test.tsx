@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { FeedPayload } from "@/companion/companion-api";
@@ -149,9 +149,10 @@ describe("FeedScreen", () => {
     requestMutation.mockResolvedValueOnce({ ...data, liked: ["p1"] });
     const onChange = vi.fn();
     render(<FeedScreen data={data} writing={false} onEditInstructions={vi.fn()} onWriteNow={vi.fn()} onDiscuss={vi.fn()} onChange={onChange} />);
+    await screen.findByRole("link", { name: "官网" }, { timeout: 15_000 });
     fireEvent.click(screen.getByRole("button", { name: "喜欢" }));
     expect(requestMutation).toHaveBeenCalledWith("companion.feed.change", { action: "like", id: "p1", on: true });
-    await vi.waitFor(() => expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ liked: ["p1"] })));
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ liked: ["p1"] })));
   });
 
   it("offers to write one now when empty", () => {

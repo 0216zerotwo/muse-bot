@@ -58,4 +58,63 @@ describe("companion push", () => {
     });
     expect(sw.openWindow).toHaveBeenCalledWith(`${ORIGIN}/companion.html`);
   });
+
+  it("prunes stale hashed assets on activate when only /companion.html is cached while preserving /companion-manifest.json", async () => {
+    const store = new Map<string, { text: () => Promise<string>; json: () => Promise<unknown> }>();
+    store.set(`${ORIGIN}/companion.html`, {
+      text: async () => '<!doctype html><script type="module" src="/assets/companion-NEW.js"></script>',
+      json: async () => ({}),
+    });
+    store.set(`${ORIGIN}/companion-manifest.json`, {
+      text: async () => "{}",
+      json: async () => ({}),
+    });
+    store.set(`${ORIGIN}/asset-manifest.json`, {
+      text: async () => "{}",
+      json: async () => ({
+        "companion.html": { file: "assets/companion-NEW.js", css: ["assets/companion-NEW.css"] },
+      }),
+    });
+    store.set(`${ORIGIN}/assets/companion-NEW.js`, { text: async () => "", json: async () => ({}) });
+    store.set(`${ORIGIN}/assets/companion-NEW.css`, { text: async () => "", json: async () => ({}) });
+    store.set(`${ORIGIN}/assets/companion-OLD.js`, { text: async () => "", json: async () => ({}) });
+    store.set(`${ORIGIN}/brand/companion_icon_192.png`, { text: async () => "", json: async () => ({}) });
+
+    const cache = {
+      match: vi.fn(async (key: string | { url: string }) => {
+        const raw = typeof key === "string" ? key : key.url;
+        const url = new URL(raw, ORIGIN).href;
+        return store.get(url);
+      }),
+      keys: vi.fn(async () => Array.from(store.keys()).map((url) => ({ url }))),
+      delete: vi.fn(async (req: { url: string }) => store.delete(req.url)),
+    };
+    const caches = {
+      keys: vi.fn(async () => ["nanobot-static-v3", "nanobot-static-v2"]),
+      delete: vi.fn(async () => true),
+      open: vi.fn(async () => cache),
+    };
+
+    const listeners = new Map<string, (event: Record<string, unknown>) => void>();
+    const self = {
+      location: { origin: ORIGIN },
+      skipWaiting: vi.fn(),
+      registration: { showNotification: vi.fn() },
+      clients: { claim: vi.fn(), matchAll: vi.fn(async () => []), openWindow: vi.fn() },
+      addEventListener: (type: string, cb: (event: Record<string, unknown>) => void) => listeners.set(type, cb),
+    };
+    new Function("self", "caches", "fetch", SW_SCRIPT)(self, caches, vi.fn());
+
+    let wait: Promise<unknown> = Promise.resolve();
+    listeners.get("activate")?.({ waitUntil: (p: Promise<unknown>) => (wait = p) });
+    await wait;
+
+    expect(caches.delete).toHaveBeenCalledWith("nanobot-static-v2");
+    expect(store.has(`${ORIGIN}/assets/companion-OLD.js`)).toBe(false);
+    expect(store.has(`${ORIGIN}/assets/companion-NEW.js`)).toBe(true);
+    expect(store.has(`${ORIGIN}/assets/companion-NEW.css`)).toBe(true);
+    expect(store.has(`${ORIGIN}/companion.html`)).toBe(true);
+    expect(store.has(`${ORIGIN}/companion-manifest.json`)).toBe(true);
+    expect(store.has(`${ORIGIN}/brand/companion_icon_192.png`)).toBe(true);
+  });
 });

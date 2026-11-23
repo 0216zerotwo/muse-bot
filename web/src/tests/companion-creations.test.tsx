@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Creation, CreationsPayload } from "@/companion/companion-api";
-import { creationDay, CreationsView } from "@/companion/Creations";
+import { appendUrlParam, creationDay, CreationsView } from "@/companion/Creations";
 import { FullScreen } from "@/companion/Screen";
 import { Viewer } from "@/companion/Viewer";
 
@@ -40,6 +40,12 @@ describe("creationDay", () => {
     expect(creationDay(new Date(2026, 9, 17, 23).toISOString(), at)).toBe("昨天");
     expect(creationDay(new Date(2026, 2, 5).toISOString(), at)).toBe("3月5日");
     expect(creationDay(new Date(2025, 2, 5).toISOString(), at)).toBe("2025年3月5日");
+  });
+
+  it("appends query parameters safely when URLs already carry query strings or hashes", () => {
+    expect(appendUrlParam("/f/pic.png", "thumb", "1")).toBe("/f/pic.png?thumb=1");
+    expect(appendUrlParam("/f/pic.png?sig=abc", "thumb", "1")).toBe("/f/pic.png?sig=abc&thumb=1");
+    expect(appendUrlParam("/f/doc.pdf?sig=abc#page=2", "download", "1")).toBe("/f/doc.pdf?sig=abc&download=1#page=2");
   });
 });
 

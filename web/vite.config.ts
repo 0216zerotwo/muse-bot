@@ -6,7 +6,7 @@ import { gzipSync } from "node:zlib";
 
 const GZIP_MIN_BYTES = 4 * 1024;
 const GZIP_ASSET_PATTERN = /\.(?:css|html|js|json|mjs|svg)$/i;
-const LAZY_FEATURE_CHUNK_PREFIXES = ["markdown-vendor-", "syntax-highlight-", "katex-"];
+const LAZY_FEATURE_CHUNK_PREFIXES = ["markdown-vendor-", "streamdown-vendor-", "syntax-highlight-", "katex-"];
 
 export function entryLazyFeatureImports(imports: string[]): string[] {
   return imports.filter((fileName) =>
@@ -58,7 +58,8 @@ export function gzipWebuiAssets(): Plugin {
   };
 }
 
-export function webuiManualChunk(id: string): string | undefined {
+export function webuiManualChunk(rawId: string): string | undefined {
+  const id = rawId.replaceAll("\\", "/");
   const locale = /\/webui\/locales\/([^/]+)\.json$/.exec(id)?.[1]
     ?? /\/src\/i18n\/locales\/([^/]+)\/common\.json$/.exec(id)?.[1];
   if (locale) return `locale-${locale}`;
@@ -79,6 +80,22 @@ export function webuiManualChunk(id: string): string | undefined {
   ) {
     return "react-vendor";
   }
+  if (id.includes("node_modules/lucide-react/")) {
+    return "icons-vendor";
+  }
+  if (
+    id.includes("node_modules/@radix-ui/")
+    || id.includes("node_modules/tailwind-merge/")
+    || id.includes("node_modules/class-variance-authority/")
+  ) {
+    return "ui-vendor";
+  }
+  if (
+    id.includes("node_modules/i18next/")
+    || id.includes("node_modules/react-i18next/")
+  ) {
+    return "i18n-vendor";
+  }
   if (id.includes("node_modules/refractor/lang/")) {
     return;
   }
@@ -98,7 +115,11 @@ export function webuiManualChunk(id: string): string | undefined {
   if (
     id.includes("node_modules/streamdown")
     || id.includes("node_modules/remend")
-    || id.includes("node_modules/remark-")
+  ) {
+    return "streamdown-vendor";
+  }
+  if (
+    id.includes("node_modules/remark-")
     || id.includes("node_modules/rehype-")
     || id.includes("node_modules/unified")
     || id.includes("node_modules/mdast-")

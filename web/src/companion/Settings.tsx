@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { BarChart3, Cpu, GraduationCap, KeyRound, Palette, PlugZap, Server, ShieldCheck, Smartphone, Volume2 } from "lucide-react";
 
 import { fetchMcpPresets } from "@/lib/api";
@@ -14,19 +14,21 @@ import {
   type UsagePayload,
 } from "./companion-api";
 import { isConnected } from "./ConnectSheet";
-import { DevicesPanel } from "./DevicesPanel";
-import { PermissionLevels } from "./PermissionLevels";
-import { VaultPanel } from "./VaultPanel";
 import { MenuGroup, MenuRow, Switch } from "./Menu";
 import { readsAfterVoice, setReadsAfterVoice } from "./MessageActions";
 import { usePetSize, useThemeMode } from "./appearance";
 import { MODE_LABEL, SIZE_LABEL } from "./AppearanceDock";
-import { ModelDetail, ModelPanel } from "./ModelPanel";
 import { NotificationsRow, notificationsNote, useNotifications } from "./NotificationsAction";
-import { SkillsPanel } from "./SkillsPanel";
 import { PageSheet } from "./Screen";
 import { ConnectionsView } from "./TabViews";
 import { formatCost, formatTokens, UsagePanel } from "./UsagePanel";
+
+const ModelPanel = lazy(() => import("./ModelPanel").then((m) => ({ default: m.ModelPanel })));
+const ModelDetail = lazy(() => import("./ModelPanel").then((m) => ({ default: m.ModelDetail })));
+const SkillsPanel = lazy(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })));
+const PermissionLevels = lazy(() => import("./PermissionLevels").then((m) => ({ default: m.PermissionLevels })));
+const VaultPanel = lazy(() => import("./VaultPanel").then((m) => ({ default: m.VaultPanel })));
+const DevicesPanel = lazy(() => import("./DevicesPanel").then((m) => ({ default: m.DevicesPanel })));
 
 export type SettingsPage = "root" | "models" | "model" | "usage" | "skills" | "connections" | "permissions" | "vault" | "devices";
 
@@ -221,22 +223,26 @@ export function SettingsScreen({
       flush={page === "connections"}
     >
       {page === "root" && <SettingsRoot onOpen={push} onAppearance={onAppearance} />}
-      {page === "models" && (
-        <ModelPanel
-          active
-          onOpenModel={(name) => {
-            setModelName(name);
-            push("model");
-          }}
-        />
+      {page !== "root" && (
+        <Suspense fallback={null}>
+          {page === "models" && (
+            <ModelPanel
+              active
+              onOpenModel={(name) => {
+                setModelName(name);
+                push("model");
+              }}
+            />
+          )}
+          {page === "model" && modelName && <ModelDetail name={modelName} />}
+          {page === "usage" && <UsagePanel active />}
+          {page === "skills" && <SkillsPanel onDraft={onDraft} onTeach={onTeach} />}
+          {page === "connections" && <ConnectionsView active />}
+          {page === "permissions" && <PermissionLevels />}
+          {page === "vault" && <VaultPanel />}
+          {page === "devices" && <DevicesPanel onDisconnect={onLogout} />}
+        </Suspense>
       )}
-      {page === "model" && modelName && <ModelDetail name={modelName} />}
-      {page === "usage" && <UsagePanel active />}
-      {page === "skills" && <SkillsPanel onDraft={onDraft} onTeach={onTeach} />}
-      {page === "connections" && <ConnectionsView active />}
-      {page === "permissions" && <PermissionLevels />}
-      {page === "vault" && <VaultPanel />}
-      {page === "devices" && <DevicesPanel onDisconnect={onLogout} />}
     </PageSheet>
   );
 }

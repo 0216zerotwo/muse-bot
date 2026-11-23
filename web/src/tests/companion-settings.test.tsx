@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ModelsPayload } from "@/companion/companion-api";
@@ -10,12 +10,18 @@ vi.mock("@/companion/companion-api", async (original) => ({
   ...(await original<typeof import("@/companion/companion-api")>()),
   fetchRoutines: vi.fn(async () => ({ brief_time: "08:00", checkins: true })),
   fetchMemory: vi.fn(async () => ({ sections: [] })),
+  fetchSkills: vi.fn(async () => ({ learned: [], bundled: [] })),
   fetchModels: vi.fn(async () => {
     throw new Error("offline");
   }),
   fetchUsage: vi.fn(async () => {
     throw new Error("offline");
   }),
+}));
+
+vi.mock("@/companion/device", async (original) => ({
+  ...(await original<typeof import("@/companion/device")>()),
+  fetchDevices: vi.fn(async () => []),
 }));
 
 vi.mock("@/lib/api", async (original) => ({
@@ -37,21 +43,26 @@ describe("SettingsScreen", () => {
   it("opens pages with a back button that returns to 设置, then to the chat", async () => {
     const onClose = open();
     expect(title()).toBe("设置");
+    await act(async () => {});
 
     fireEvent.click(await screen.findByRole("button", { name: /设备/ }));
     expect(title()).toBe("设备");
+    await act(async () => {});
     fireEvent.click(screen.getByRole("button", { name: "返回设置" }));
     expect(title()).toBe("设置");
+    await act(async () => {});
 
     fireEvent.click(screen.getByRole("button", { name: "关闭" }));
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("opened on a page directly, back leads to 设置; Escape steps back too", () => {
+  it("opened on a page directly, back leads to 设置; Escape steps back too", async () => {
     const onClose = open("devices");
     expect(title()).toBe("设备");
+    await act(async () => {});
     fireEvent.keyDown(document, { key: "Escape" });
     expect(title()).toBe("设置");
+    await act(async () => {});
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).toHaveBeenCalled();
   });

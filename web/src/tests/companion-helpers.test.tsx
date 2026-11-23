@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Helper, HelpersPayload } from "@/companion/companion-api";
@@ -15,6 +15,7 @@ vi.mock("@/companion/companion-api", async (original) => ({
   ...(await original<typeof import("@/companion/companion-api")>()),
   fetchHelpers: (...args: unknown[]) => fetchHelpers(...args),
   fetchModels: () => Promise.resolve({ presets: [{ name: "glm" }, { name: "deepseek-flash" }] }),
+  fetchTriggers: () => Promise.resolve([]),
 }));
 
 const fetchAutomations = vi.fn();
@@ -61,7 +62,7 @@ describe("HelpersScreen", () => {
     fireEvent.click(await screen.findByRole("button", { name: "新建" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "新建帮手" }));
     fireEvent.click(screen.getByRole("button", { name: /聊着设定一个新帮手/ }));
-    await vi.waitFor(() => expect(onOpenChat).toHaveBeenCalledWith("c9"));
+    await waitFor(() => expect(onOpenChat).toHaveBeenCalledWith("c9"));
     expect(requestMutation).toHaveBeenCalledWith("companion.helpers.change", { action: "blank", idea: "" });
   });
 
@@ -74,7 +75,7 @@ describe("HelpersScreen", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "新建帮手" }));
     fireEvent.change(screen.getByRole("textbox", { name: "新帮手负责什么" }), { target: { value: " 邮件分拣 " } });
     fireEvent.click(screen.getByRole("button", { name: /建好，让它出个方案/ }));
-    await vi.waitFor(() => expect(onOpenChat).toHaveBeenCalledWith("c8"));
+    await waitFor(() => expect(onOpenChat).toHaveBeenCalledWith("c8"));
     expect(requestMutation).toHaveBeenCalledWith("companion.helpers.change", { action: "blank", idea: "邮件分拣" });
   });
 
@@ -86,7 +87,7 @@ describe("HelpersScreen", () => {
     fireEvent.click(await screen.findByRole("button", { name: "新建" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "新建帮手" }));
     fireEvent.click(screen.getByRole("button", { name: /比价/ }));
-    await vi.waitFor(() => expect(onOpenChat).toHaveBeenCalledWith("c7"));
+    await waitFor(() => expect(onOpenChat).toHaveBeenCalledWith("c7"));
     expect(requestMutation).toHaveBeenCalledWith("companion.helpers.change", expect.objectContaining({ action: "create", name: "比价" }));
   });
 });
@@ -130,10 +131,10 @@ describe("habits", () => {
     expect(await screen.findByText("行程别排太紧")).toBeInTheDocument();
     expect(screen.getByText(/慢慢摸清的/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "忘掉：行程别排太紧" }));
-    await vi.waitFor(() => expect(requestMutation).toHaveBeenCalledWith("companion.helpers.change", { action: "habit_remove", id: "h1", habit: "x1" }));
+    await waitFor(() => expect(requestMutation).toHaveBeenCalledWith("companion.helpers.change", { action: "habit_remove", id: "h1", habit: "x1" }));
     fireEvent.change(screen.getByRole("textbox", { name: "告诉它一个习惯" }), { target: { value: "金额保留两位小数" } });
     fireEvent.click(screen.getByRole("button", { name: "记住" }));
-    await vi.waitFor(() =>
+    await waitFor(() =>
       expect(requestMutation).toHaveBeenCalledWith("companion.helpers.change", { action: "habit_add", id: "h1", text: "金额保留两位小数" }),
     );
   });
@@ -154,7 +155,7 @@ describe("deleting a helper", () => {
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
     expect(screen.getByText("删除「记账」？")).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: "删除" }).at(-1)!);
-    await vi.waitFor(() => expect(requestMutation).toHaveBeenCalledWith("companion.helpers.change", { action: "delete", id: "h1" }));
+    await waitFor(() => expect(requestMutation).toHaveBeenCalledWith("companion.helpers.change", { action: "delete", id: "h1" }));
   });
 });
 
@@ -170,7 +171,7 @@ describe("group chats", () => {
     expect(screen.getByRole("button", { name: "建好，开始聊" })).toBeDisabled();
     fireEvent.click(screen.getByRole("checkbox", { name: /比价/ }));
     fireEvent.click(screen.getByRole("button", { name: "建好，开始聊" }));
-    await vi.waitFor(() => expect(onSaved).toHaveBeenCalledWith("g-chat"));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith("g-chat"));
     expect(requestMutation).toHaveBeenCalledWith("companion.groups.change", { action: "create", name: "买电脑", members: ["h1", "h2"] });
   });
 });
@@ -184,15 +185,15 @@ describe("HelperProfileSheet", () => {
     fireEvent.click(await screen.findByRole("button", { name: "编辑资料" }));
     expect(screen.getByText("它负责什么")).toBeInTheDocument();
     expect(screen.getByText(/它每次做事都会照着这里来/)).toBeInTheDocument();
-    await vi.waitFor(() => expect(screen.getByRole("option", { name: "glm" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("option", { name: "glm" })).toBeInTheDocument());
     fireEvent.change(screen.getByRole("combobox", { name: "用哪个模型" }), { target: { value: "glm" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await vi.waitFor(() =>
+    await waitFor(() =>
       expect(requestMutation).toHaveBeenCalledWith("companion.helpers.change", expect.objectContaining({ action: "update", id: "h1", model: "glm" })),
     );
     fireEvent.click(await screen.findByRole("button", { name: "编辑资料" }));
     fireEvent.click(await screen.findByRole("button", { name: "恢复默认设置" }));
-    await vi.waitFor(() => expect(requestMutation).toHaveBeenCalledWith("companion.helpers.change", { action: "reset", id: "h1" }));
+    await waitFor(() => expect(requestMutation).toHaveBeenCalledWith("companion.helpers.change", { action: "reset", id: "h1" }));
   });
 });
 
@@ -210,7 +211,7 @@ describe("helper routines and sharing", () => {
     expect(await screen.findByText("记账提醒")).toBeInTheDocument();
     expect(screen.queryByText("动态更新")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("switch", { name: "记账提醒" }));
-    await vi.waitFor(() => expect(requestMutation.mock.calls.some(([action, body]) => action === "automation.disable" && body.id === "j1")).toBe(true));
+    await waitFor(() => expect(requestMutation.mock.calls.some(([action, body]) => action === "automation.disable" && body.id === "j1")).toBe(true));
   });
 
   it("imports shared settings: reviewed in the editor, then created", async () => {
@@ -226,7 +227,7 @@ describe("helper routines and sharing", () => {
     fireEvent.click(screen.getByRole("button", { name: /下一步/ }));
     expect(screen.getByRole("textbox", { name: "名字" })).toHaveValue("读书");
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await vi.waitFor(() =>
+    await waitFor(() =>
       expect(requestMutation).toHaveBeenCalledWith("companion.helpers.change", expect.objectContaining({ action: "create", name: "读书", title: "每周读书笔记" })),
     );
   });

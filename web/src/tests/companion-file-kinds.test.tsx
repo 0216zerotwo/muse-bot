@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ChatThread } from "@/companion/ChatThread";
-import { FileCard } from "@/companion/FileCard";
+import { fetchBoundedTextPreview, FileCard, TEXT_PREVIEW } from "@/companion/FileCard";
 import { speakAloud } from "@/companion/MessageActions";
 import {
   csvRows,
@@ -89,6 +89,52 @@ describe("files in the chat", () => {
     expect(screen.getByText("照片")).toBeInTheDocument();
     expect(screen.getByText("压缩包")).toBeInTheDocument();
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("streams only 64 KB with HTTP Range, cancels excess chunks, and aborts on unmount", async () => {
+    let cancelled = false;
+    let pulledChunks = 0;
+    const chunk32k = new TextEncoder().encode("A".repeat(32 * 1024));
+    const fetcher = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.headers).toEqual({ Range: `bytes=0-${TEXT_PREVIEW - 1}` });
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulledChunks += 1;
+          // Simulate a server ignoring Range and streaming 10 MB of 32 KB chunks.
+          controller.enqueue(chunk32k);
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      return new Response(stream, {
+        status: 206,
+        headers: { "Content-Range": `bytes 0-${TEXT_PREVIEW - 1}/10485760` },
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    const result = await fetchBoundedTextPreview("/api/media/a/big.csv", TEXT_PREVIEW);
+    expect(result.text).toHaveLength(TEXT_PREVIEW);
+    expect(result.bytes).toBe(10_485_760);
+    expect(cancelled).toBe(true);
+    expect(pulledChunks).toBeLessThanOrEqual(4);
+
+    // Unmounting FileCard aborts an in-flight preview request via AbortController.
+    let capturedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        capturedSignal = init?.signal ?? undefined;
+        return new Promise<Response>(() => {});
+      }),
+    );
+    const { unmount } = render(
+      <FileCard item={{ kind: "file", url: "/api/media/a/slow.md", name: "慢文件.md" }} onOpen={vi.fn()} />,
+    );
+    expect(capturedSignal?.aborted).toBe(false);
+    unmount();
+    expect(capturedSignal?.aborted).toBe(true);
   });
 });
 

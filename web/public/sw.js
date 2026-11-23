@@ -142,9 +142,18 @@ async function refreshAssetManifest(cache) {
 // the offline shell consistent with the last loaded build.
 async function pruneStaleEntries() {
   const cache = await caches.open(CACHE_NAME);
-  const cachedIndex = await cache.match("/");
-  if (!cachedIndex) return;
-  const refs = referencedAssetPaths(await cachedIndex.text());
+  const [cachedIndex, cachedCompanion] = await Promise.all([
+    cache.match("/"),
+    cache.match(COMPANION_SHELL),
+  ]);
+  if (!cachedIndex && !cachedCompanion) return;
+  const refs = new Set();
+  if (cachedIndex) {
+    for (const path of referencedAssetPaths(await cachedIndex.text())) refs.add(path);
+  }
+  if (cachedCompanion) {
+    for (const path of referencedAssetPaths(await cachedCompanion.text())) refs.add(path);
+  }
   for (const path of await manifestedAssetPaths(cache)) refs.add(path);
   const keys = await cache.keys();
   await Promise.all(
@@ -154,7 +163,9 @@ async function pruneStaleEntries() {
         url.pathname === "/"
         || url.pathname === COMPANION_SHELL
         || url.pathname === "/manifest.json"
+        || url.pathname === "/companion-manifest.json"
         || url.pathname === ASSET_MANIFEST_PATH
+        || NETWORK_FIRST_STATIC_PATHS.has(url.pathname)
       ) return;
       if (refs.has(url.pathname + url.search)) return;
       await cache.delete(request);
@@ -240,7 +251,7 @@ self.addEventListener("fetch", (event) => {
         // Refresh the complete build graph before pruning. A deployment can
         // change index.html without changing sw.js, so this cannot rely only
         // on the manifest cached when the worker was installed.
-        if (isNavigation || path === "/") {
+        if (isNavigation || path === "/" || path === COMPANION_SHELL) {
           if (await refreshAssetManifest(cache)) await pruneStaleEntries();
         }
       })

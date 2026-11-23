@@ -55,6 +55,14 @@ function extensionLabel(name: string): string {
   return dot > 0 ? name.slice(dot + 1).toUpperCase() : "文件";
 }
 
+export function appendUrlParam(rawUrl: string, key: string, value: string): string {
+  const hashAt = rawUrl.indexOf("#");
+  const base = hashAt >= 0 ? rawUrl.slice(0, hashAt) : rawUrl;
+  const hash = hashAt >= 0 ? rawUrl.slice(hashAt) : "";
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}${encodeURIComponent(key)}=${encodeURIComponent(value)}${hash}`;
+}
+
 function toViewerItem(item: Creation): ViewerItem | null {
   if (!item.url) return null;
   return {
@@ -64,7 +72,7 @@ function toViewerItem(item: Creation): ViewerItem | null {
     name: item.name,
     title: item.title,
     caption: item.prompt && item.prompt !== item.title ? item.prompt : creationDay(item.created_at),
-    downloadUrl: `${item.url}?download=1`,
+    downloadUrl: appendUrlParam(item.url, "download", "1"),
   };
 }
 
@@ -210,7 +218,7 @@ function MediaTile({ item, onOpen }: { item: Creation; onOpen: () => void }) {
     >
       {/* Pictures: a small copy from the server (the originals are 1–2 MB each). */}
       {item.kind === "image" ? (
-        <img src={item.url ? `${item.url}?thumb=1` : undefined} alt="" loading="lazy" className="h-full w-full object-cover" />
+        <img src={item.url ? appendUrlParam(item.url, "thumb", "1") : undefined} alt="" loading="lazy" className="h-full w-full object-cover" />
       ) : (
         <>
           {/* The first frame stands in for a thumbnail. */}

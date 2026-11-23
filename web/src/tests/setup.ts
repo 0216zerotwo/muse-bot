@@ -1,7 +1,59 @@
 import "@testing-library/jest-dom/vitest";
 import { beforeAll, beforeEach } from "vitest";
 
-import i18n, { initializeI18n, loadAllLocaleResources } from "@/i18n";
+import i18n, { initializeI18n } from "@/i18n";
+
+// Ensure standards mode (<!doctype html> + CSS1Compat) so KaTeX never logs quirks-mode warnings.
+if (typeof document !== "undefined") {
+  if (!document.doctype) {
+    document.insertBefore(
+      document.implementation.createDocumentType("html", "", ""),
+      document.documentElement,
+    );
+  }
+  if (document.compatMode !== "CSS1Compat") {
+    Object.defineProperty(document, "compatMode", {
+      value: "CSS1Compat",
+      configurable: true,
+    });
+  }
+}
+
+// Prevent happy-dom from opening real TCP sockets (127.0.0.1:3000 ECONNREFUSED)
+// for unmocked fetches or background <img>/<iframe> resource loads.
+const happyDOM = (
+  typeof window !== "undefined"
+    ? (window as unknown as {
+        happyDOM?: {
+          settings: {
+            disableJavaScriptFileLoading: boolean;
+            disableCSSFileLoading: boolean;
+            navigation: { disableChildFrameNavigation: boolean };
+            fetch: {
+              interceptor: {
+                beforeAsyncRequest?: () => Promise<Response>;
+              } | null;
+            };
+          };
+        };
+      }).happyDOM
+    : undefined
+);
+
+if (happyDOM) {
+  happyDOM.settings.disableJavaScriptFileLoading = true;
+  happyDOM.settings.disableCSSFileLoading = true;
+  happyDOM.settings.navigation.disableChildFrameNavigation = true;
+  happyDOM.settings.fetch.interceptor = {
+    async beforeAsyncRequest() {
+      const ResponseCtor = (window as unknown as { Response: typeof Response }).Response ?? Response;
+      return new ResponseCtor(JSON.stringify({ detail: "unmocked_test_fetch" }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  };
+}
 
 // The DOM test environment does not implement pointer capture used by Radix Select.
 if (!HTMLElement.prototype.hasPointerCapture) {
@@ -70,12 +122,14 @@ if (!("randomUUID" in globalThis.crypto)) {
 }
 
 beforeAll(async () => {
+  localStorage.setItem("nanobot.locale", "en");
   await initializeI18n();
-  await loadAllLocaleResources();
 });
 
 beforeEach(async () => {
-  await i18n.changeLanguage("en");
+  if (i18n.language !== "en") {
+    await i18n.changeLanguage("en");
+  }
   document.documentElement.lang = "en";
   document.title = "nanobot";
   localStorage.setItem("nanobot.locale", "en");
