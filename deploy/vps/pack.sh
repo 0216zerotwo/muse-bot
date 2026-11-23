@@ -74,7 +74,7 @@ mkdir -p "$B/tools" "$B/hermes"
 
 TAR_OWNER=()
 if tar --version 2>/dev/null | grep -qi "gnu"; then
-  TAR_OWNER=(--owner=0 --group=0)
+  TAR_OWNER=(--owner=0 --group=0 --force-local)
 fi
 
 echo "==> Hermes 源码"
@@ -182,6 +182,10 @@ for name, srv in list(servers.items()):
     if isinstance(cwd, str) and (re.match(r"^[A-Za-z]:[/\\]", cwd) or "companion/mcp/" in cwd.replace("\\", "/") or name == "browser"):
         srv["cwd"] = f"/opt/data/companion/mcp/{name}"
     if name == "browser":
+        cmd = srv.get("command")
+        rewrite_to_builtin = cmd in ("npx", "npx.cmd", "playwright-mcp", None)
+        if rewrite_to_builtin:
+            srv["command"] = "playwright-mcp"
         raw_args = list(srv.get("args") or [])
         cleaned, skip = [], False
         for item in raw_args:
@@ -193,6 +197,8 @@ for name, srv in list(servers.items()):
                 skip = True
                 continue
             if s.startswith("--browser="):
+                continue
+            if rewrite_to_builtin and (s in ("-y", "--yes") or s == "@playwright/mcp" or s.startswith("@playwright/mcp@")):
                 continue
             cleaned.append(s)
         if "--cdp-endpoint" not in cleaned and not any(a.startswith("--cdp-endpoint=") for a in cleaned):

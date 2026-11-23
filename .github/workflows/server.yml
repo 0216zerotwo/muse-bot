@@ -50,9 +50,13 @@ jobs:
           python3 -m venv .ci-validate-env
           .ci-validate-env/bin/pip install --quiet pyyaml pillow
           .ci-validate-env/bin/python ios/scripts/validate.py
-          rm -rf .ci-validate-env
       - name: Run deploy & installer tests
+        env:
+          MUSEBOT_PYTHON: ${{ github.workspace }}/.ci-validate-env/bin/python
         run: node --test deploy/tests/*.test.js
+      - name: Clean up validation venv
+        if: always()
+        run: rm -rf .ci-validate-env
 
   companion-and-bundle:
     name: Companion tests & release bundle

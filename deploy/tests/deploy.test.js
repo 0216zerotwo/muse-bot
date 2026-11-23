@@ -30,6 +30,10 @@ function findGitBash() {
 }
 
 function findPython() {
+  if (process.env.MUSEBOT_PYTHON) {
+    assert.equal(fs.existsSync(process.env.MUSEBOT_PYTHON), true, `MUSEBOT_PYTHON does not exist: ${process.env.MUSEBOT_PYTHON}`);
+    return process.env.MUSEBOT_PYTHON;
+  }
   const candidates = [
     path.join(REPO_ROOT, "hermes-env", "bin", "python"),
     path.join(REPO_ROOT, "hermes-env", "Scripts", "python.exe"),
@@ -261,7 +265,9 @@ test("Dockerfile and VPS shell scripts enforce runtime, security, and upgrade in
   assert.match(dockerfile, /PYTHONUNBUFFERED=1/);
   assert.match(dockerfile, /@playwright\/mcp@0\.0\.83/);
   assert.match(dockerfile, /uv sync --frozen --no-dev --inexact/);
-  assert.match(dockerfile, /import py_vapid, http_ece, anthropic/);
+  assert.match(dockerfile, /import py_vapid, http_ece, anthropic, sqlite3/);
+  assert.match(dockerfile, /sqlite_version_info >= \(3, 51, 3\)/);
+  assert.match(dockerfile, /tokenize=['"]?trigram/);
   assert.match(dockerfile, /install-stamp\.json/);
   assert.match(dockerfile, /\/usr\/local\/bin\/gateway/);
   assert.match(dockerfile, /CMD \["hermes", "gateway", "run"\]/);
@@ -270,6 +276,7 @@ test("Dockerfile and VPS shell scripts enforce runtime, security, and upgrade in
   assert.match(installSh, /command: \["hermes", "gateway", "run"\]/);
   assert.match(installSh, /docker build -t companion-hermes:next/);
   assert.match(installSh, /rollback_upgrade/);
+  assert.match(installSh, /boot_code=.*"200".*"401"/s);
   assert.match(installSh, /chmod 700 "\$DATA"/);
   assert.match(installSh, /chmod 600 "\$secret_file"/);
   assert.match(installSh, /Strict-Transport-Security/);
@@ -315,7 +322,7 @@ test("Shell syntax, --help flags, and end-to-end pack.sh (clean & --with-data) w
     "companion.html": "<!doctype html><html><body>Muse Bot</body></html>\n",
   });
 
-  // 1. Clean release pack + check-bundle
+  // 1. Clean release pack + check-bundle (pass drive-letter slash path on Windows to exercise GNU tar --force-local)
   const cleanPack = childProcess.spawnSync(bash, ["deploy/vps/pack.sh"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
@@ -324,7 +331,7 @@ test("Shell syntax, --help flags, and end-to-end pack.sh (clean & --with-data) w
       MUSEBOT_VERSION: "v9.9.9-test",
       MUSEBOT_HERMES_SRC: toPosixPath(fakeHermes),
       MUSEBOT_WEB_DIST: toPosixPath(fakeWeb),
-      MUSEBOT_OUT_DIR: toPosixPath(outDir),
+      MUSEBOT_OUT_DIR: outDir.replace(/\\/g, "/"),
     },
   });
   assert.equal(cleanPack.status, 0, `clean pack.sh failed: ${cleanPack.stderr}\n${cleanPack.stdout}`);
@@ -336,13 +343,23 @@ test("Shell syntax, --help flags, and end-to-end pack.sh (clean & --with-data) w
 
   // 2. --with-data pack: verifies ruamel.yaml/yaml config rewrite, SQLite backup, and stt/pylib exclusion
   const py = findPython();
-  if (!py) return;
+  if (!py) {
+    assert.equal(Boolean(process.env.MUSEBOT_PYTHON), false, "MUSEBOT_PYTHON was requested, so Python cannot be skipped");
+    return;
+  }
   const yamlProbe = childProcess.spawnSync(
     py,
     ["-I", "-c", "import importlib.util, sys; sys.exit(0 if (importlib.util.find_spec('ruamel.yaml') or importlib.util.find_spec('yaml')) else 1)"],
     { encoding: "utf8" }
   );
-  if (yamlProbe.status !== 0) return;
+  if (yamlProbe.status !== 0) {
+    assert.equal(
+      Boolean(process.env.MUSEBOT_PYTHON),
+      false,
+      `MUSEBOT_PYTHON (${py}) is missing ruamel.yaml / pyyaml: ${yamlProbe.stderr}`
+    );
+    return;
+  }
 
   const fakeHome = path.join(tmp, "custom-hermes-home");
   writeFiles(fakeHome, {
@@ -425,7 +442,9 @@ test("Shell syntax, --help flags, and end-to-end pack.sh (clean & --with-data) w
   const migratedCfg = fs.readFileSync(path.join(dataOut, "config.yaml"), "utf8");
   assert.doesNotMatch(migratedCfg, /fake_ip_ranges/);
   assert.doesNotMatch(migratedCfg, /msedge/);
+  assert.doesNotMatch(migratedCfg, /@playwright\/mcp/);
   assert.doesNotMatch(migratedCfg, /E:\\/);
+  assert.match(migratedCfg, /command:\s*playwright-mcp/);
   assert.match(migratedCfg, /\/opt\/data\/companion\/mcp\/github/);
   assert.match(migratedCfg, /\/opt\/data\/companion\/mcp\/browser/);
   assert.match(migratedCfg, /http:\/\/127\.0\.0\.1:9333/);

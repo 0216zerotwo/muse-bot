@@ -30,10 +30,18 @@ RUN touch README.md && \
       --extra mcp --extra web --extra ddgs --extra doc-extract --extra computer-use --extra anthropic && \
     uv pip install --python /opt/venv/bin/python http-ece==1.2.1 py-vapid==1.9.6
 COPY hermes/ ./
-# --inexact 保留上面额外装的 Web Push 依赖（http-ece / py-vapid），并写入密封镜像标记避免运行时触发源码自更新检查
+# --inexact 保留上面额外装的 Web Push 依赖（http-ece / py-vapid），并写入密封镜像标记避免运行时触发源码自更新检查。
+# 注：debian:13-slim 系统自带 libsqlite3 3.46.1 含 WAL-reset 损坏 bug，而 uv 安装的独立 Python 3.14
+# 内置了新版 SQLite（>= 3.54）；下面构建期自检显式校验 SQLite >= 3.51.3 及 FTS5 trigram 分词器，确保绝不回退。
 RUN uv sync --frozen --no-dev --inexact --python 3.14 \
       --extra mcp --extra web --extra ddgs --extra doc-extract --extra computer-use --extra anthropic && \
-    /opt/venv/bin/python -c "import py_vapid, http_ece, anthropic" && \
+    /opt/venv/bin/python -c 'import py_vapid, http_ece, anthropic, sqlite3; \
+assert sqlite3.sqlite_version_info >= (3, 51, 3), f"SQLite {sqlite3.sqlite_version} has WAL-reset bug"; \
+db = sqlite3.connect(":memory:"); \
+db.execute("CREATE VIRTUAL TABLE docs USING fts5(content, tokenize=trigram)"); \
+db.execute("INSERT INTO docs VALUES (?)", ("hermes",)); \
+assert db.execute("SELECT count(*) FROM docs WHERE docs MATCH ?", ("erm",)).fetchone()[0] == 1, "FTS5 trigram self-test failed"; \
+db.close()' && \
     printf '{"schemaVersion":2,"commit":"8f5693af418256b89da17ddda18a9242f113dcf6","distribution":"docker","source":"musebot","updateMechanism":"external"}\n' \
       > /opt/hermes/install-stamp.json && \
     printf '#!/bin/sh\nexec /opt/venv/bin/hermes gateway "$@"\n' > /usr/local/bin/gateway && \

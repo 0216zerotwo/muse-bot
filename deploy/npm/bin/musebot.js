@@ -391,7 +391,9 @@ function status(args) {
   needInstalled();
   var address = domain();
   console.log("版本      " + (installedVersion() || "（未知）"));
-  var up = quiet("curl", ["-fsS", "-o", "/dev/null", "--max-time", "5", "http://127.0.0.1:" + PORT + "/webui/bootstrap"]).ok;
+  var probe = quiet("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "5", "http://127.0.0.1:" + PORT + "/webui/bootstrap"]);
+  var probeCode = probe.out.slice(-3);
+  var up = probe.ok && (probeCode === "200" || probeCode === "401");
   var boot = quiet("systemctl", ["is-enabled", "docker"]).out === "enabled";
   console.log("伙伴      " + (up ? "运行中" : "没在运行（看日志：sudo npx musebot-server logs）"));
   console.log("地址      " + (address ? "https://" + address : "（未知）"));

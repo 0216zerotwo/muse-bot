@@ -60,7 +60,7 @@ jobs:
             --extra mcp --extra web --extra ddgs --extra doc-extract --extra computer-use --extra anthropic)
           uv pip install --python "$GITHUB_WORKSPACE/hermes-env/bin/python" py-vapid==1.9.6 http-ece==1.2.1
           (cd companion/tests && "$GITHUB_WORKSPACE/hermes-env/bin/python" -B -m unittest discover -s . -p "test_*.py")
-          node --test deploy/tests/*.test.js
+          MUSEBOT_PYTHON="$GITHUB_WORKSPACE/hermes-env/bin/python" node --test deploy/tests/*.test.js
       - name: Lint, test, and build the web app
         working-directory: web
         run: npm ci && npm run lint && npm test && npm run build

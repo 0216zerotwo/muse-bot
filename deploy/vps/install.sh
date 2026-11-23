@@ -330,7 +330,8 @@ touch "$APP/.installed"
 say "等伙伴启动"
 STARTED=0
 for _ in $(seq 1 90); do
-  if curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$PORT/webui/bootstrap"; then
+  boot_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/webui/bootstrap" || true)
+  if [ "$boot_code" = "200" ] || [ "$boot_code" = "401" ]; then
     STARTED=1
     break
   fi
