@@ -119,13 +119,18 @@ public class MainActivity extends Activity {
     private static final String PAGE_HOOK_JS =
             "(function(){var b=window.PersonalBotAndroid;"
                     + "if(!window.__pbAttachHooked){window.__pbAttachHooked=true;"
-                    + "var orig=EventTarget.prototype.addEventListener;"
+                    + "var set=window.__pbAttachListeners||(window.__pbAttachListeners=new Set());"
+                    + "var origAdd=EventTarget.prototype.addEventListener;"
+                    + "var origRem=EventTarget.prototype.removeEventListener;"
                     + "EventTarget.prototype.addEventListener=function(t,fn,o){"
-                    + "var r=orig.call(this,t,fn,o);"
-                    + "if(this===window&&t==='companion:attach'){window.__pbAttachReady=true;"
+                    + "var r=origAdd.call(this,t,fn,o);"
+                    + "if(this===window&&t==='companion:attach'&&typeof fn==='function'){set.add(fn);"
                     + "setTimeout(function(){if(window.PersonalBotAndroid&&window.PersonalBotAndroid.flushAttach)"
                     + "window.PersonalBotAndroid.flushAttach();},0);}"
-                    + "return r;};}"
+                    + "return r;};"
+                    + "EventTarget.prototype.removeEventListener=function(t,fn,o){"
+                    + "if(this===window&&t==='companion:attach'&&fn)set.delete(fn);"
+                    + "return origRem.call(this,t,fn,o);};}"
                     + "if(!(window.isSecureContext&&navigator.clipboard)&&b&&b.copy){"
                     + "try{Object.defineProperty(navigator,'clipboard',{configurable:true,value:{"
                     + "writeText:function(t){b.copy(String(t));return Promise.resolve();},"
@@ -214,7 +219,6 @@ public class MainActivity extends Activity {
             open();
         } else if (web.getUrl() != null) {
             currentUrl = web.getUrl();
-            companionPageLoaded = isCompanion(currentUrl);
         }
         takeShare(getIntent());
         Reminders.scheduleRefresh(this);
@@ -354,6 +358,23 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static String stripTrailingSentencePunctuation(String value) {
+        if (value == null) return null;
+        String out = value.trim();
+        while (!out.isEmpty()) {
+            char tail = out.charAt(out.length() - 1);
+            if (tail == '.' || tail == ',' || tail == ';' || tail == '!' || tail == '?'
+                    || tail == ')' || tail == ']' || tail == '>' || tail == '\'' || tail == '"'
+                    || tail == '。' || tail == '，' || tail == '；' || tail == '！' || tail == '？'
+                    || tail == '）' || tail == '】' || tail == '》' || tail == '」' || tail == '』') {
+                out = out.substring(0, out.length() - 1).trim();
+            } else {
+                break;
+            }
+        }
+        return out;
+    }
+
     /** Parses a server address, connection URL, or pasted pairing snippet into base URL + optional pair code. */
     static ParsedConnect parseConnectInput(String raw) {
         if (raw == null) return null;
@@ -363,27 +384,19 @@ public class MainActivity extends Activity {
         String pairCode = null;
         Matcher pairMatcher = PAIR_PARAM.matcher(trimmed);
         if (pairMatcher.find()) {
-            String encoded = pairMatcher.group(1);
+            String encoded = stripTrailingSentencePunctuation(pairMatcher.group(1));
             try {
-                pairCode = URLDecoder.decode(encoded.replace("+", "%2B"), "UTF-8").trim();
+                pairCode = stripTrailingSentencePunctuation(URLDecoder.decode(encoded.replace("+", "%2B"), "UTF-8"));
             } catch (Exception ignored) {
-                pairCode = encoded.trim();
+                pairCode = encoded;
             }
-            if (pairCode.isEmpty()) pairCode = null;
+            if (pairCode == null || pairCode.isEmpty()) pairCode = null;
         }
 
-        String candidate = trimmed;
+        String candidate = stripTrailingSentencePunctuation(trimmed);
         Matcher urlMatcher = HTTP_URL_IN_TEXT.matcher(trimmed);
         if (urlMatcher.find()) {
-            candidate = urlMatcher.group(0);
-            while (!candidate.isEmpty()) {
-                char tail = candidate.charAt(candidate.length() - 1);
-                if (tail == '。' || tail == '，' || tail == '）' || tail == ')' || tail == ']' || tail == '>' || tail == ',' || tail == ';') {
-                    candidate = candidate.substring(0, candidate.length() - 1);
-                } else {
-                    break;
-                }
-            }
+            candidate = stripTrailingSentencePunctuation(urlMatcher.group(0));
         }
         String server = normalize(candidate);
         if (server == null) return null;
@@ -415,6 +428,9 @@ public class MainActivity extends Activity {
         if (!"http".equals(scheme) && !"https".equals(scheme)) return null;
         if (uri.getUserInfo() != null) return null;
         String host = uri.getHost();
+        if (host != null) {
+            while (host.endsWith(".")) host = host.substring(0, host.length() - 1);
+        }
         if (host == null || host.isEmpty()) return null;
         for (int i = 0; i < host.length(); i++) {
             if (Character.isWhitespace(host.charAt(i))) return null;
@@ -484,11 +500,9 @@ public class MainActivity extends Activity {
     /** The bundled setup page, or the same origin as the configured bot. */
     private boolean isOwn(Uri url) {
         if (url == null) return false;
-        String scheme = url.getScheme();
-        if ("about".equalsIgnoreCase(scheme) || "data".equalsIgnoreCase(scheme) || "blob".equalsIgnoreCase(scheme)) {
-            return true;
-        }
         if (url.toString().startsWith("file:///android_asset/")) return true;
+        String scheme = url.getScheme();
+        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) return false;
         String server = server();
         if (server == null) return false;
         Uri own = Uri.parse(server);
@@ -799,8 +813,11 @@ public class MainActivity extends Activity {
             }
         }
         attachFlushInFlight = true;
-        String script = "(function(){if(!(window.__pbAttachReady||document.querySelector('button[aria-label=\"添加文件\"]')))"
-                + "return 'wait';"
+        String script = "(function(){var ready=window.__pbAttachHooked"
+                + "?!!(window.__pbAttachListeners&&window.__pbAttachListeners.size>0)"
+                + ":!!document.querySelector('button[aria-label=\"添加文件\"]');"
+                + "if(!ready){var tab=document.querySelector('nav[aria-label=\"主导航\"] button[aria-label^=\"主要聊天\"]:not([aria-current=\"page\"])');"
+                + "if(tab)tab.click();return 'wait';}"
                 + "window.dispatchEvent(new CustomEvent('companion:attach',{detail:" + files + "}));"
                 + "return 'ok';})()";
         web.evaluateJavascript(script, result -> {
@@ -1126,7 +1143,10 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void flushAttach() {
             if (!isCompanionOrigin()) return;
-            runOnUiThread(MainActivity.this::flushPendingAttach);
+            runOnUiThread(() -> {
+                attachRetryCount = 0;
+                flushPendingAttach();
+            });
         }
 
         @JavascriptInterface
@@ -1202,14 +1222,25 @@ public class MainActivity extends Activity {
     private final class Client extends WebViewClient {
         @Override
         public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+            if (request == null) return true;
             Uri url = request.getUrl();
+            if (url == null) return true;
             if (request.isForMainFrame() && isFileLink(url)) {
                 // 用其他应用打开, a document's link: the phone's own app, not a page in here.
                 openFile(url, null);
                 return true;
             }
             if (isOwn(url)) return false;
-            openExternal(url);
+            String scheme = url.getScheme();
+            if (!request.isForMainFrame()
+                    && ("about".equalsIgnoreCase(scheme)
+                            || "blob".equalsIgnoreCase(scheme)
+                            || "data".equalsIgnoreCase(scheme))) {
+                return false;
+            }
+            if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) {
+                openExternal(url);
+            }
             return true;
         }
 
@@ -1325,7 +1356,8 @@ public class MainActivity extends Activity {
         for (String resource : request.getResources()) {
             if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) audio = true;
         }
-        if (!audio || !isOwn(request.getOrigin())) {
+        Uri origin = request.getOrigin();
+        if (!audio || origin == null || origin.toString().startsWith("file:///android_asset/") || !isOwn(origin)) {
             request.deny();
             return;
         }

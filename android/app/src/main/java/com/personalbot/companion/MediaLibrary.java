@@ -323,9 +323,11 @@ final class MediaLibrary {
             ContentValues values = new ContentValues();
             values.put(MediaStore.MediaColumns.DISPLAY_NAME, FilesProvider.safeName(finalName));
             values.put(MediaStore.MediaColumns.MIME_TYPE, finalMime);
-            values.put(MediaStore.MediaColumns.RELATIVE_PATH,
-                    (video ? Environment.DIRECTORY_MOVIES : Environment.DIRECTORY_PICTURES) + "/Muse Bot");
-            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            if (Build.VERSION.SDK_INT >= 29) {
+                values.put(MediaStore.MediaColumns.RELATIVE_PATH,
+                        (video ? Environment.DIRECTORY_MOVIES : Environment.DIRECTORY_PICTURES) + "/Muse Bot");
+                values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            }
             Uri collection = video ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
             item = resolver.insert(collection, values);
             if (item == null) throw new IllegalStateException("gallery refused");
@@ -333,9 +335,11 @@ final class MediaLibrary {
                 if (out == null) throw new IllegalStateException("no output");
                 copy(in, out);
             }
-            values.clear();
-            values.put(MediaStore.MediaColumns.IS_PENDING, 0);
-            resolver.update(item, values, null, null);
+            if (Build.VERSION.SDK_INT >= 29) {
+                values.clear();
+                values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                resolver.update(item, values, null, null);
+            }
         } catch (Exception e) {
             if (item != null) {
                 try {

@@ -301,6 +301,15 @@ def check_setup_html_and_java() -> None:
     assert "StaticServiceWorkerClient" in main_src and "WeakReference<MainActivity>" in main_src, (
         "ServiceWorkerController client must use a static WeakReference wrapper"
     )
+    assert "removeEventListener" in main_src and "__pbAttachListeners" in main_src, (
+        "MainActivity.PAGE_HOOK_JS must track active companion:attach listeners across mount/unmount"
+    )
+    is_own_match = re.search(r"private\s+boolean\s+isOwn\s*\(\s*Uri\s+\w+\s*\)\s*\{(.*?)\n    \}", main_src, re.S)
+    assert is_own_match, "Could not locate MainActivity.isOwn(Uri)"
+    for unsafe_scheme in ('"about"', '"data"', '"blob"'):
+        assert unsafe_scheme not in is_own_match.group(1), (
+            f"MainActivity.isOwn(Uri) must not trust {unsafe_scheme} scheme"
+        )
     for file_prefix in (
         '"/api/media/"',
         '"/api/webui/companion/creations/file/"',
