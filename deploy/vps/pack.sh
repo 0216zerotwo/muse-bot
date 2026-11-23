@@ -47,7 +47,12 @@ if [ -z "$PY" ]; then
     [ -n "$cand" ] || continue
     if "$cand" -I -c "import sqlite3" >/dev/null 2>&1; then
       PY="$cand"
-      if "$cand" -I -c "import importlib.util, sys; sys.exit(0 if (importlib.util.find_spec('ruamel.yaml') or importlib.util.find_spec('yaml')) else 1)" >/dev/null 2>&1; then
+      if "$cand" -I -c "
+try:
+    import ruamel.yaml
+except ImportError:
+    import yaml
+" >/dev/null 2>&1; then
         break
       fi
     fi

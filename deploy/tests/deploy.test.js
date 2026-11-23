@@ -349,7 +349,7 @@ test("Shell syntax, --help flags, and end-to-end pack.sh (clean & --with-data) w
   }
   const yamlProbe = childProcess.spawnSync(
     py,
-    ["-I", "-c", "import importlib.util, sys; sys.exit(0 if (importlib.util.find_spec('ruamel.yaml') or importlib.util.find_spec('yaml')) else 1)"],
+    ["-I", "-c", "try:\n import ruamel.yaml\nexcept ImportError:\n import yaml"],
     { encoding: "utf8" }
   );
   if (yamlProbe.status !== 0) {
