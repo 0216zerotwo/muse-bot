@@ -112,7 +112,9 @@ struct CompanionRootView: View {
             if needed { settings = false; identity = false; appearance = false; menu = false }
         }
         .onAppear { deliverAsked() }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in keyboardUp = true }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            if !menu { keyboardUp = true }
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardUp = false }
         .onChange(of: store.suggestedDraft) { _, value in
             if value != nil { selectedTab = .chat; settings = false; identity = false }
@@ -134,7 +136,8 @@ struct CompanionRootView: View {
                     // (A new accent redraws this root view; screens pick the colours up as they redraw.)
                     screen
                         // While typing, the keyboard takes the tab bar's place (it would only crowd the chat).
-                        .safeAreaInset(edge: .bottom, spacing: 0) { if !keyboardUp { tabBar } }
+                        // Keep the obscured main screen's inset stable while the side drawer is open.
+                        .safeAreaInset(edge: .bottom, spacing: 0) { if !keyboardUp || menu { tabBar } }
                         .accessibilityHidden(menu)
                     floatingHeader
                     statusBanner

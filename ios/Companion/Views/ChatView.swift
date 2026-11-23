@@ -42,6 +42,9 @@ struct ChatView: View {
     @State private var media: MediaDestination?
     @State private var followingBottom = true
     @State private var positioned = false
+    /// Prevents async media/file card expansion during initial open from clearing `followingBottom`.
+    @State private var settlingBottom = false
+    @State private var settleGeneration = UUID()
     /// Shown once it sits at the newest message (opening a chat never shows it scrolling down).
     @State private var revealed = false
     @State private var paging = false
@@ -191,9 +194,9 @@ struct ChatView: View {
                     }
                     Color.clear.frame(height: 1).id("bottom")
                         .onAppear { followingBottom = true }
-                        .onDisappear { if positioned { followingBottom = false } }
+                        .onDisappear { if positioned && !settlingBottom { followingBottom = false } }
                 }
-                .frame(maxWidth: 700, alignment: .leading).padding(.horizontal, 16).padding(.bottom, 16).padding(.top, topInset)
+                .frame(maxWidth: 700, alignment: .leading).padding(.horizontal, 16).padding(.bottom, 24).padding(.top, topInset)
                 .opacity(revealed || chatMessages.isEmpty ? 1 : 0)
                 .frame(maxWidth: .infinity)
             }
@@ -228,7 +231,8 @@ struct ChatView: View {
             .onChange(of: activeChatID) { _, _ in
                 voice.cancel()
                 drafts.forEach { $0.removeStagedBlob() }
-                positioned = false; revealed = false; followingBottom = true; quote = nil; drafts = []; restoreDraft()
+                positioned = false; settlingBottom = false; settleGeneration = UUID()
+                revealed = false; followingBottom = true; quote = nil; drafts = []; restoreDraft()
                 followIfNeeded(proxy); revealSoon()
             }
             .onChange(of: focused) { _, value in if value && followingBottom { scrollBottom(proxy) } }
@@ -623,17 +627,41 @@ struct ChatView: View {
         let first = !positioned
         positioned = !chatLoadingHistory && !entries.isEmpty
         guard first else { scrollBottom(proxy, animated: animated); return }
-        // Opening: straight to the newest while unseen, then shown — no run down from the top. Lazy
-        // rows and pictures take their real height a moment later, so it settles once more.
+        // Opening: straight to the newest while unseen, then shown — no run down from the top.
+        // Async file/picture/chart cards grow over the first second; keep `settlingBottom` active
+        // so card expansion never flips `followingBottom` to false before the final settle scroll.
+        guard positioned else {
+            Task { @MainActor in
+                await Task.yield()
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
+            return
+        }
+        let token = UUID()
+        settleGeneration = token
+        settlingBottom = true
         Task { @MainActor in
             await Task.yield()
+            guard settleGeneration == token else { return }
             proxy.scrollTo("bottom", anchor: .bottom)
-            guard positioned else { return }
             try? await Task.sleep(for: .milliseconds(120))
+            guard settleGeneration == token else { return }
             proxy.scrollTo("bottom", anchor: .bottom)
             revealed = true
-            try? await Task.sleep(for: .milliseconds(600))
-            if followingBottom { proxy.scrollTo("bottom", anchor: .bottom) }
+            try? await Task.sleep(for: .milliseconds(450))
+            guard settleGeneration == token else { return }
+            followingBottom = true
+            proxy.scrollTo("bottom", anchor: .bottom)
+            try? await Task.sleep(for: .milliseconds(550))
+            guard settleGeneration == token else { return }
+            followingBottom = true
+            proxy.scrollTo("bottom", anchor: .bottom)
+            try? await Task.sleep(for: .milliseconds(550))
+            guard settleGeneration == token else { return }
+            followingBottom = true
+            proxy.scrollTo("bottom", anchor: .bottom)
+            try? await Task.sleep(for: .milliseconds(150))
+            if settleGeneration == token { settlingBottom = false }
         }
     }
     /// 查找聊天记录 → a message: once the chat has opened, it scrolls to that turn (when it is among
@@ -642,6 +670,8 @@ struct ChatView: View {
         guard !isIsolatedHelperChat, let turn = store.revealTurn, revealed, !chatLoadingHistory else { return }
         store.revealTurn = nil
         guard let message = chatMessages.first(where: { $0.turnId == turn && Presentation.isVisible($0) }) else { return }
+        settlingBottom = false
+        settleGeneration = UUID()
         followingBottom = false
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(700))  // after the opening settles at the bottom
