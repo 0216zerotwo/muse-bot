@@ -80,14 +80,14 @@ export function MoreServicesSheet({
                 <button
                   type="button"
                   onClick={() => onConnect(preset)}
-                  className="c-primary min-h-8 shrink-0 rounded-full px-3.5 text-[13px] font-semibold"
+                  className="c-primary min-h-11 shrink-0 rounded-full px-4 text-[13.5px] font-semibold"
                   aria-label={connectTitle(preset)}
                 >
                   连接
                 </button>
               </li>
             ))}
-            {catalog.length === 0 && <li className="c-muted py-3 text-[14px]">没有找到，可以自己添加一个。</li>}
+            {catalog.length === 0 && <li className="c-muted py-6 text-center text-[14px]">没有找到，可以自己添加一个。</li>}
           </ul>
           <button
             type="button"

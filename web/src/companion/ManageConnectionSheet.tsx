@@ -8,6 +8,7 @@ import { connectFailure, ServiceLogo } from "./ConnectSheet";
 import { isReadOnlyTool, rawToolName, toolLabel } from "./presentation";
 import { Switch } from "./Menu";
 import { Sheet } from "./Sheet";
+import { SkeletonLines } from "./Skeleton";
 
 /** Only looking tools are switched on (a list that merely leaves out unsafe tools is not view-only). */
 export function isViewOnly(preset: McpPresetInfo): boolean {
@@ -129,7 +130,7 @@ export function ManageConnectionSheet({
         <section className="c-card rounded-[22px] p-4">
           <p className="text-[15px] font-semibold">它能做的事</p>
           {tools === null ? (
-            <p className="c-muted mt-2 text-[14px]">正在读取…</p>
+            <SkeletonLines lines={2} label="正在读取连接能力" className="mt-2.5" />
           ) : (
             <div className="mt-2 flex flex-col gap-2 text-[14px] leading-relaxed">
               {reading.length > 0 && (

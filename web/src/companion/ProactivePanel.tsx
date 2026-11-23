@@ -10,6 +10,7 @@ import {
   type Routines,
 } from "./companion-api";
 import { Switch } from "./Menu";
+import { SkeletonCard } from "./Skeleton";
 
 export const DEFAULT_BRIEF_TIME = "08:00";
 
@@ -48,7 +49,7 @@ export function RoutineFields({
               value={value.brief_time ?? DEFAULT_BRIEF_TIME}
               disabled={disabled}
               onChange={(event) => event.target.value && onChange({ brief_time: event.target.value })}
-              className="c-bubble-agent min-h-10 rounded-xl px-3 text-[16px]"
+              className="c-bubble-agent c-focus-ring min-h-11 rounded-xl px-3 text-[16px]"
             />
           </label>
         )}
@@ -126,7 +127,16 @@ export function ProactivePanel() {
       <p className="c-muted mb-3 px-1 text-[13px] leading-snug">
         它会自己留意，在合适的时候找你。消息出现在「动态」里，开了通知还会推送到手机。
       </p>
-      {routines ? <RoutineFields value={routines} onChange={change} disabled={busy} /> : !error && <p className="c-muted text-sm">正在读取…</p>}
+      {routines ? (
+        <RoutineFields value={routines} onChange={change} disabled={busy} />
+      ) : (
+        !error && (
+          <div role="status" aria-busy="true" aria-label="正在读取主动提醒" className="flex flex-col gap-3">
+            <SkeletonCard lines={2} status={false} />
+            <SkeletonCard lines={2} status={false} />
+          </div>
+        )
+      )}
       {error && (
         <p className="c-danger mt-3 text-sm" role="alert">
           {error}

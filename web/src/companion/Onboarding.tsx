@@ -13,6 +13,7 @@ import { NameAndLookFields, PersonalityFields, personaChanges, personaDraft } fr
 import { useNotifications } from "./NotificationsAction";
 import { PetView } from "./Pet";
 import { DEFAULT_BRIEF_TIME, RoutineFields, useSaveRoutines } from "./ProactivePanel";
+import { SkeletonRows } from "./Skeleton";
 
 const BASE_STEPS = ["welcome", "look", "personality", "proactive", "connect"] as const;
 const MODEL_STEPS = ["welcome", "look", "personality", "model", "proactive", "connect"] as const;
@@ -236,7 +237,7 @@ export function Onboarding({
               subtitle={`连上之后${name}就能直接替你看邮件、排日程、做视频。凭据只保存在你自己的 bot 上，现在不连也可以。`}
             />
             {presets === null ? (
-              <p className="c-muted text-sm">正在读取…</p>
+              <SkeletonRows rows={3} label="正在读取推荐服务" />
             ) : (
               <RecommendedServices presets={recommendedPresets(presets)} onConnect={setConnecting} />
             )}

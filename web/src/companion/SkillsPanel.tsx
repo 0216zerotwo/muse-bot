@@ -15,6 +15,7 @@ import { deleteSkill, fetchSkills, readSkill, saveSkill, type SkillInfo, type Sk
 import { MenuGroup } from "./Menu";
 import { MuseSheet } from "./muse/Sheet";
 import { dayLabel } from "./presentation";
+import { SkeletonCard, SkeletonRows } from "./Skeleton";
 
 /** "market-data-comparison" → "market data comparison". */
 export function skillTitle(name: string): string {
@@ -88,7 +89,7 @@ function SkillSheet({
             </button>
           </div>
 
-          {content === null && !error && <div className="c-card h-32 animate-pulse rounded-2xl" aria-hidden="true" />}
+          {content === null && !error && <SkeletonCard lines={4} label="正在读取技能内容" />}
           {content !== null && !editing && (
             <div className="c-card max-h-[45vh] overflow-y-auto rounded-2xl px-4 py-3 text-[14.5px] leading-relaxed">
               <MarkdownText>{body(content)}</MarkdownText>
@@ -101,7 +102,7 @@ function SkillSheet({
               rows={14}
               spellCheck={false}
               aria-label="技能内容"
-              className="c-card w-full resize-y rounded-2xl px-3.5 py-3 font-mono text-[13.5px] leading-relaxed outline-none"
+              className="c-card c-focus-ring w-full resize-y rounded-2xl px-3.5 py-3 font-mono text-[13.5px] leading-relaxed outline-none"
             />
           )}
           {error && <p className="c-danger text-[14px]">{error}</p>}
@@ -163,7 +164,7 @@ function SkillSheet({
                 </button>
               </div>
             ) : (
-              <button type="button" onClick={() => setConfirmDelete(true)} className="c-danger min-h-10 text-[14px]">
+              <button type="button" onClick={() => setConfirmDelete(true)} className="c-danger c-pressable min-h-11 rounded-full px-4 text-[14px]">
                 删除这个技能
               </button>
             )
@@ -220,8 +221,12 @@ export function SkillsPanel({ onDraft, onTeach }: { onDraft: (text: string) => v
 
       <section className="flex flex-col gap-1.5">
         <h2 className="c-muted px-3.5 text-[13px]">它学会的</h2>
-        {data && data.learned.length === 0 ? (
-          <p className="c-muted px-3.5 text-[14px] leading-relaxed">还没有。它把一件事做成后会自己记成技能，你也可以亲手教它。</p>
+        {!data && !error ? (
+          <SkeletonRows rows={2} withIcon={false} label="正在读取技能" />
+        ) : data && data.learned.length === 0 ? (
+          <div className="c-card rounded-2xl px-4 py-5">
+            <p className="c-muted text-[14px] leading-relaxed">还没有。它把一件事做成后会自己记成技能，你也可以亲手教它。</p>
+          </div>
         ) : (
           <MenuGroup>
             <ul className="c-divider divide-y">
@@ -239,7 +244,7 @@ export function SkillsPanel({ onDraft, onTeach }: { onDraft: (text: string) => v
             type="button"
             aria-expanded={showBundled}
             onClick={() => setShowBundled((v) => !v)}
-            className="c-muted flex items-center gap-1 px-3.5 text-left text-[13px]"
+            className="c-muted c-pressable flex min-h-11 items-center gap-1 rounded-xl px-3.5 text-left text-[13px]"
           >
             自带的 {data.bundled.length} 个
             <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", showBundled && "rotate-180")} aria-hidden="true" />

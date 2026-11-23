@@ -18,8 +18,9 @@ import {
   type VaultPayload,
 } from "./companion-api";
 import { MuseSheet } from "./muse/Sheet";
+import { SkeletonRows } from "./Skeleton";
 
-const field = "c-card min-h-11 w-full rounded-2xl px-3.5 text-[16px] outline-none";
+const field = "c-card c-focus-ring min-h-11 w-full rounded-2xl px-3.5 text-[16px] outline-none";
 
 /** A login or an API key, typed in by the user; shared by the settings page and the chat card. */
 export function CredentialForm({
@@ -126,16 +127,25 @@ export function VaultPanel() {
       <section className="flex flex-col gap-1.5">
         <div className="flex items-center px-3.5">
           <h2 className="c-muted flex-1 text-[13px]">网站登录</h2>
-          <button type="button" onClick={() => setAdding("login")} className="text-[13.5px] font-medium" style={{ color: "var(--c-primary)" }}>
+          <button
+            type="button"
+            onClick={() => setAdding("login")}
+            className="c-pressable -mr-2.5 min-h-11 rounded-xl px-2.5 text-[13.5px] font-medium"
+            style={{ color: "var(--c-primary)" }}
+          >
             添加
           </button>
         </div>
-        {data && data.logins.length === 0 ? (
-          <p className="c-muted px-3.5 text-[13.5px]">还没有。</p>
+        {!data && !error ? (
+          <SkeletonRows rows={2} label="正在读取网站登录" />
+        ) : data && data.logins.length === 0 ? (
+          <div className="c-card rounded-2xl px-4 py-4">
+            <p className="c-muted text-[13.5px]">还没有。</p>
+          </div>
         ) : (
           <ul className="c-card divide-y overflow-hidden rounded-2xl" style={{ borderColor: "var(--c-border)" }}>
             {(data?.logins ?? []).map((login) => (
-              <li key={login.id} className="flex items-center gap-3 py-2.5 pl-4 pr-1.5">
+              <li key={login.id} className="flex items-center gap-3 py-2 pl-4 pr-1.5">
                 <Globe className="c-muted h-4 w-4 shrink-0" />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[15px] font-medium">{login.label}</span>
@@ -144,7 +154,12 @@ export function VaultPanel() {
                   </span>
                 </span>
                 <span className="c-muted shrink-0 text-[13px] tracking-widest">••••••</span>
-                <button type="button" aria-label={`删除 ${login.label} 的登录`} onClick={() => void remove("login", login.id)} className="c-muted grid h-10 w-10 shrink-0 place-items-center">
+                <button
+                  type="button"
+                  aria-label={`删除 ${login.label} 的登录`}
+                  onClick={() => void remove("login", login.id)}
+                  className="c-muted c-pressable grid min-h-11 min-w-11 shrink-0 place-items-center rounded-xl"
+                >
                   <Trash2 className="h-4 w-4" />
                 </button>
               </li>
@@ -156,23 +171,37 @@ export function VaultPanel() {
       <section className="flex flex-col gap-1.5">
         <div className="flex items-center px-3.5">
           <h2 className="c-muted flex-1 text-[13px]">API 密钥</h2>
-          <button type="button" onClick={() => setAdding("api_key")} className="text-[13.5px] font-medium" style={{ color: "var(--c-primary)" }}>
+          <button
+            type="button"
+            onClick={() => setAdding("api_key")}
+            className="c-pressable -mr-2.5 min-h-11 rounded-xl px-2.5 text-[13.5px] font-medium"
+            style={{ color: "var(--c-primary)" }}
+          >
             添加
           </button>
         </div>
-        {data && data.keys.length === 0 ? (
-          <p className="c-muted px-3.5 text-[13.5px] leading-snug">还没有。模型的密钥在「模型」里管理。</p>
+        {!data && !error ? (
+          <SkeletonRows rows={2} label="正在读取密钥" />
+        ) : data && data.keys.length === 0 ? (
+          <div className="c-card rounded-2xl px-4 py-4">
+            <p className="c-muted text-[13.5px] leading-snug">还没有。模型的密钥在「模型」里管理。</p>
+          </div>
         ) : (
           <ul className="c-card divide-y overflow-hidden rounded-2xl" style={{ borderColor: "var(--c-border)" }}>
             {(data?.keys ?? []).map((key) => (
-              <li key={key.env} className="flex items-center gap-3 py-2.5 pl-4 pr-1.5">
+              <li key={key.env} className="flex items-center gap-3 py-2 pl-4 pr-1.5">
                 <KeyRound className="c-muted h-4 w-4 shrink-0" />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[15px] font-medium">{key.label}</span>
                   <span className="c-muted block truncate font-mono text-[12px]">{key.env}</span>
                 </span>
                 <span className="c-muted shrink-0 text-[12.5px]">{key.set ? "已设好" : "没有值"}</span>
-                <button type="button" aria-label={`删除 ${key.label} 的密钥`} onClick={() => void remove("key", key.env)} className="c-muted grid h-10 w-10 shrink-0 place-items-center">
+                <button
+                  type="button"
+                  aria-label={`删除 ${key.label} 的密钥`}
+                  onClick={() => void remove("key", key.env)}
+                  className="c-muted c-pressable grid min-h-11 min-w-11 shrink-0 place-items-center rounded-xl"
+                >
                   <Trash2 className="h-4 w-4" />
                 </button>
               </li>
