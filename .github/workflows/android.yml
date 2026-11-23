@@ -1,11 +1,19 @@
 name: Build Android
 
-# The Android app (android/): an installable APK on every push, under Artifacts → muse-bot-android.
+# The Android app (android/): an installable APK when Android files change (or manually), under Artifacts → muse-bot-android.
 on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - "android/**"
+      - "tools/make_app_icons.py"
+      - ".github/workflows/android.yml"
   pull_request:
+    paths:
+      - "android/**"
+      - "tools/make_app_icons.py"
+      - ".github/workflows/android.yml"
 
 permissions:
   contents: read
@@ -24,6 +32,14 @@ jobs:
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0, node24
         with:
           persist-credentials: false
+      - name: Ensure Android SDK platform 34 & build-tools
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          if [ ! -f "$SDK/platforms/android-34/android.jar" ] || [ ! -d "$SDK/build-tools/34.0.0" ]; then
+            yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+            "$SDK/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
+          fi
       # Android installs an update only when it is signed with the same key as the app on the phone.
       # Put yours in the repository's secrets (ANDROID_KEYSTORE_BASE64: `base64 -w0 companion.jks`,
       # ANDROID_KEYSTORE_PASSWORD); without them each run signs with a new key, fine for a first install.
@@ -32,16 +48,26 @@ jobs:
           KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
+          set -euo pipefail
           if [ -n "$KEYSTORE" ]; then
+            if [ -z "$PASSWORD" ]; then
+              echo "ANDROID_KEYSTORE_BASE64 is set, but ANDROID_KEYSTORE_PASSWORD is empty" >&2
+              exit 1
+            fi
             mkdir -p android/signing
+            chmod 700 android/signing
             printf '%s' "$KEYSTORE" | base64 -d > android/signing/companion.jks
             printf '%s' "$PASSWORD" > android/signing/keystore-password.txt
+            chmod 600 android/signing/companion.jks android/signing/keystore-password.txt
           else
             echo "No ANDROID_KEYSTORE_BASE64 secret: signing with a new key for this run"
           fi
       - name: Build
         # The runner's JDK 17 and preinstalled Android SDK (ANDROID_HOME).
         run: JAVA_HOME="${JAVA_HOME_17_X64:-$JAVA_HOME}" bash android/build.sh
+      - name: Clean up signing material
+        if: always()
+        run: rm -rf android/signing
       - name: Upload APK
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, node24
         with:

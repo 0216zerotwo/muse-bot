@@ -1,11 +1,19 @@
 name: Build iOS
 
-# Every push (and Run workflow) runs it all: unit tests, the installable .ipa and the screenshots.
+# Runs unit tests, the unsigned .ipa, and screen-walk screenshots when iOS files change (or manually).
 on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - "ios/**"
+      - "tools/make_app_icons.py"
+      - ".github/workflows/ios.yml"
   pull_request:
+    paths:
+      - "ios/**"
+      - "tools/make_app_icons.py"
+      - ".github/workflows/ios.yml"
 
 permissions:
   contents: read
@@ -16,6 +24,8 @@ concurrency:
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
 
 # The iPhone app lives in ios/ of the Muse Bot repository.
 defaults:
@@ -32,18 +42,23 @@ jobs:
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0, node24
         with:
           persist-credentials: false
-      - name: Select pinned Xcode and generate project
+      - name: Select Xcode and generate project
         run: |
           set -euo pipefail
+          if [ ! -d "$DEVELOPER_DIR" ]; then
+            FALLBACK=$(ls -d /Applications/Xcode_*.app/Contents/Developer 2>/dev/null | sort -V | tail -n 1 || xcode-select -p)
+            echo "DEVELOPER_DIR=$FALLBACK" >> "$GITHUB_ENV"
+            export DEVELOPER_DIR="$FALLBACK"
+          fi
           xcodebuild -version
-          brew install xcodegen
+          command -v xcodegen >/dev/null || brew install xcodegen
           xcodegen generate --spec project.yml
       - name: Resolve packages
         run: xcodebuild -resolvePackageDependencies -project Companion.xcodeproj -scheme Companion -clonedSourcePackagesDirPath build/SourcePackages
       - name: Select an installed iPhone simulator
         run: |
           set -euo pipefail
-          SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); devices=[d for runtime,rows in data["devices"].items() if runtime.endswith("iOS-26-2") for d in rows if d.get("isAvailable") and d["name"].startswith("iPhone")]; assert devices, "Pinned Xcode 26.3 requires an installed iOS 26.2 iPhone simulator"; print(devices[0]["udid"])')
+          SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,re,sys; data=json.load(sys.stdin)["devices"]; preferred=[d for rt,rows in data.items() if rt.endswith("iOS-26-2") for d in rows if d.get("isAvailable") and d["name"].startswith("iPhone")]; fallback=[d for rt,rows in sorted(data.items(), key=lambda kv: [int(x) for x in re.findall(r"\d+", kv[0])], reverse=True) if "iOS-" in rt for d in rows if d.get("isAvailable") and d["name"].startswith("iPhone")]; devices=preferred or fallback; assert devices, "No available iPhone simulator runtime found"; print(devices[0]["udid"])')
           echo "SIMULATOR_ID=$SIMULATOR_ID" >> "$GITHUB_ENV"
       - name: Run XCTest
         run: |
@@ -71,11 +86,16 @@ jobs:
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0, node24
         with:
           persist-credentials: false
-      - name: Select pinned Xcode and generate project
+      - name: Select Xcode and generate project
         run: |
           set -euo pipefail
+          if [ ! -d "$DEVELOPER_DIR" ]; then
+            FALLBACK=$(ls -d /Applications/Xcode_*.app/Contents/Developer 2>/dev/null | sort -V | tail -n 1 || xcode-select -p)
+            echo "DEVELOPER_DIR=$FALLBACK" >> "$GITHUB_ENV"
+            export DEVELOPER_DIR="$FALLBACK"
+          fi
           xcodebuild -version
-          brew install xcodegen
+          command -v xcodegen >/dev/null || brew install xcodegen
           xcodegen generate --spec project.yml
       - name: Resolve packages
         run: xcodebuild -resolvePackageDependencies -project Companion.xcodeproj -scheme Companion -clonedSourcePackagesDirPath build/SourcePackages
@@ -109,17 +129,22 @@ jobs:
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0, node24
         with:
           persist-credentials: false
-      - name: Select pinned Xcode and generate project
+      - name: Select Xcode and generate project
         run: |
           set -euo pipefail
-          brew install xcodegen
+          if [ ! -d "$DEVELOPER_DIR" ]; then
+            FALLBACK=$(ls -d /Applications/Xcode_*.app/Contents/Developer 2>/dev/null | sort -V | tail -n 1 || xcode-select -p)
+            echo "DEVELOPER_DIR=$FALLBACK" >> "$GITHUB_ENV"
+            export DEVELOPER_DIR="$FALLBACK"
+          fi
+          command -v xcodegen >/dev/null || brew install xcodegen
           xcodegen generate --spec project.yml
       - name: Resolve packages
         run: xcodebuild -resolvePackageDependencies -project Companion.xcodeproj -scheme Screenshots -clonedSourcePackagesDirPath build/SourcePackages
       - name: Select an installed iPhone simulator
         run: |
           set -euo pipefail
-          SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); devices=[d for runtime,rows in data["devices"].items() if runtime.endswith("iOS-26-2") for d in rows if d.get("isAvailable") and d["name"].startswith("iPhone")]; devices.sort(key=lambda d: (not d["name"].endswith("Pro"), d["name"])); assert devices, "Pinned Xcode 26.3 requires an installed iOS 26.2 iPhone simulator"; print(devices[0]["udid"])')
+          SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,re,sys; data=json.load(sys.stdin)["devices"]; preferred=[d for rt,rows in data.items() if rt.endswith("iOS-26-2") for d in rows if d.get("isAvailable") and d["name"].startswith("iPhone")]; fallback=[d for rt,rows in sorted(data.items(), key=lambda kv: [int(x) for x in re.findall(r"\d+", kv[0])], reverse=True) if "iOS-" in rt for d in rows if d.get("isAvailable") and d["name"].startswith("iPhone")]; devices=preferred or fallback; devices.sort(key=lambda d: (not d["name"].endswith("Pro"), d["name"])); assert devices, "No available iPhone simulator runtime found"; print(devices[0]["udid"])')
           echo "SIMULATOR_ID=$SIMULATOR_ID" >> "$GITHUB_ENV"
       - name: Start the stand-in server
         run: |
@@ -127,10 +152,10 @@ jobs:
           python3 -m venv build/mock-env
           build/mock-env/bin/pip install --quiet websockets==15.0.1 pillow
           nohup build/mock-env/bin/python preview/mock_server.py 8799 > build/mock.log 2>&1 &
+          echo $! > build/mock.pid
           for i in $(seq 1 30); do curl -fs http://127.0.0.1:8799/webui/bootstrap > /dev/null && exit 0; sleep 1; done
           cat build/mock.log; exit 1
       - name: Walk every screen
-        continue-on-error: true
         run: |
           set -euo pipefail
           mkdir -p build/shots
@@ -139,11 +164,17 @@ jobs:
           # Photos for the ＋ panel's strip, with access already allowed (no permission alert mid-walk).
           for n in 1 2 3 4; do curl -fs "http://127.0.0.1:8799/api/media/sample/$n.png" -o "build/sample-$n.png" && xcrun simctl addmedia "$SIMULATOR_ID" "build/sample-$n.png" || true; done
           xcrun simctl privacy "$SIMULATOR_ID" grant photos com.personalbot.companion || true
-          TEST_RUNNER_SCREENSHOT_DIR="$PWD/build/shots" xcodebuild test -project Companion.xcodeproj -scheme Screenshots             -configuration Debug -destination "platform=iOS Simulator,id=$SIMULATOR_ID"             -clonedSourcePackagesDirPath build/SourcePackages -derivedDataPath build/DerivedData             -resultBundlePath build/Shots.xcresult CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=""  # signed to run locally, so the app may use the keychain
+          TEST_RUNNER_SCREENSHOT_DIR="$PWD/build/shots" xcodebuild test -project Companion.xcodeproj -scheme Screenshots \
+            -configuration Debug -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -clonedSourcePackagesDirPath build/SourcePackages -derivedDataPath build/DerivedData \
+            -resultBundlePath build/Shots.xcresult CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=""  # signed to run locally, so the app may use the keychain
       - name: Collect screenshots
         if: always()
         run: |
           set -uo pipefail
+          if [ -f build/mock.pid ]; then
+            kill "$(cat build/mock.pid)" 2>/dev/null || true
+          fi
           mkdir -p build/shots build/attachments
           if [ -d build/Shots.xcresult ]; then
             xcrun xcresulttool export attachments --path build/Shots.xcresult --output-path build/attachments || true
