@@ -14,16 +14,19 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from . import net_safety
 from .paths import get_webui_dir
 
 logger = logging.getLogger(__name__)
@@ -89,17 +92,31 @@ def list_subscriptions() -> list[dict[str, Any]]:
 def _save(subscriptions: list[dict[str, Any]]) -> None:
     path = _subscriptions_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(subscriptions, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        tmp.write_text(json.dumps(subscriptions, ensure_ascii=False, indent=2), encoding="utf-8")
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o600)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
 
 
 def _valid(subscription: Any) -> bool:
     if not isinstance(subscription, dict):
         return False
     endpoint, keys = subscription.get("endpoint"), subscription.get("keys")
-    return (isinstance(endpoint, str) and endpoint.startswith("https://") and isinstance(keys, dict)
-            and isinstance(keys.get("p256dh"), str) and isinstance(keys.get("auth"), str))
+    return (
+        isinstance(endpoint, str)
+        and endpoint.startswith("https://")
+        and net_safety.is_safe_url_target(endpoint)
+        and isinstance(keys, dict)
+        and isinstance(keys.get("p256dh"), str)
+        and isinstance(keys.get("auth"), str)
+    )
 
 
 def add_subscription(subscription: Any) -> int:
@@ -149,11 +166,15 @@ async def send_push(title: str, body: str, *, tag: Optional[str] = None, url: st
     vapid = await asyncio.to_thread(_vapid)
     sent = 0
     # trust_env: honour HTTPS_PROXY where push services are only reachable via a proxy.
-    async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
+    async with httpx.AsyncClient(timeout=15, trust_env=True, follow_redirects=False) as client:
         for subscription in subscriptions:
+            endpoint = str(subscription.get("endpoint") or "")
+            if not endpoint.startswith("https://") or not net_safety.is_safe_url(endpoint):
+                logger.warning("companion: skipped unsafe push subscription endpoint")
+                continue
             try:
                 headers, data = _request(subscription, payload, vapid)
-                response = await client.post(subscription["endpoint"], headers=headers, content=data)
+                response = await client.post(endpoint, headers=headers, content=data)
             except (httpx.HTTPError, ValueError) as exc:
                 logger.warning("companion: push service unreachable: %s", exc)
                 continue

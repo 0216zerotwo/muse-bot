@@ -10,13 +10,37 @@ config.yaml, which the model page writes (``models.media_settings``).
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Optional
 
 import httpx
 
-from agent.secret_scope import get_secret_str
-from agent.video_gen_provider import VideoGenProvider, error_response, save_url_video, success_response
+from . import net_safety
+
+try:
+    from agent.secret_scope import get_secret_str
+except ImportError:
+    def get_secret_str(name: str) -> str:
+        return os.environ.get(name, "")
+
+try:
+    from agent.video_gen_provider import VideoGenProvider, error_response, save_url_video, success_response
+    _HAS_VIDEO_PROVIDER = True
+except ImportError:
+    _HAS_VIDEO_PROVIDER = False
+
+    class VideoGenProvider:  # type: ignore[no-redef]
+        pass
+
+    def error_response(**kwargs: Any) -> dict[str, Any]:
+        return {"success": False, **kwargs}
+
+    def success_response(**kwargs: Any) -> dict[str, Any]:
+        return {"success": True, **kwargs}
+
+    def save_url_video(url: str, *, prefix: str = "video") -> str:
+        raise RuntimeError("video_gen_provider unavailable")
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +131,8 @@ class _TaskVideo(VideoGenProvider):
             return failed(f"{self.label} 返回 {exc.response.status_code}：{exc.response.text[:300]}")
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             return failed(f"{self.label} 调用失败：{exc}")
+        if not net_safety.is_safe_url(url):
+            return failed("返回的视频地址不安全，已拦截")
         try:
             video = str(save_url_video(url, prefix=self.name))
         except Exception as exc:  # the company's link still works for a while
@@ -270,6 +296,8 @@ BACKENDS = (MiniMaxVideo, ArkVideo, WanVideo)
 
 
 def register(ctx: Any) -> None:
+    if not _HAS_VIDEO_PROVIDER:
+        return
     for backend in BACKENDS:
         try:
             ctx.register_video_gen_provider(backend())

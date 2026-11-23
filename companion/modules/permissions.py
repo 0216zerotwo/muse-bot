@@ -45,9 +45,9 @@ _PAY = re.compile(r"付款|支付|购买|下单|订单|结算|转账|买单|pay|
 _STRING = re.compile(r"""(["'])((?:(?!\1).){1,200})\1""")
 # A page's address names where a script goes, not what it clicks (…/shop/buy-mac/… is no purchase).
 _ADDRESS = re.compile(r"^\s*(?:[a-z][\w+.-]*://|//|/|www\.)", re.IGNORECASE)
-_READ_ONLY = re.compile(r"_(list|get|search|read|query|find|check|fetch|view|describe|count|lookup)(_|$)")
-_COMMAND_TOOLS = {"terminal", "execute_code", "exec", "exec_session", "process", "run_cli_app"}
-_SCHEDULE_TOOLS = {"cronjob", "trigger_add"}
+_READ_ONLY = re.compile(r"(?:^|__|_)(list|get|search|read|query|find|check|fetch|view|describe|count|lookup)(_|$)")
+_COMMAND_TOOLS = {"terminal", "execute_code", "exec", "exec_session", "process", "process_manage", "run_cli_app"}
+_SCHEDULE_TOOLS = {"cronjob", "cronjob_manage", "trigger_add", "trigger_remove"}
 # The approval actions (``approvals.approval_action``) and the kind each belongs to.
 _ACTION_KIND = {
     "send_email": "send_message", "forward_email": "send_message", "delete_emails": "delete",
@@ -111,9 +111,11 @@ def kind_of(tool_name: str, args: Any, action: Optional[str], is_browser: bool) 
         return "browse"
     if name in _COMMAND_TOOLS:
         return "run_command"
+    if name == "cronjob_manage" and isinstance(args, dict) and str(args.get("action") or "").strip().lower() == "list":
+        return None
     if name in _SCHEDULE_TOOLS:
         return "schedule"
-    if name.startswith("mcp_"):
+    if name.startswith(("mcp__", "mcp_")):
         return "connector_read" if _READ_ONLY.search(name) else "connector_write"
     return None
 

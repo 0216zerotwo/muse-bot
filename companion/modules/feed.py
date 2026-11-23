@@ -214,13 +214,19 @@ _COVER = re.compile(
 def _cover_image(page: str) -> Optional[str]:
     """The picture the article shows when shared (its og:image), for a post written without one."""
     import html
-    import urllib.request
     from urllib.parse import urljoin
 
+    from . import net_safety
+
     try:
-        request = urllib.request.Request(page, headers={"User-Agent": "Mozilla/5.0 (compatible; companion-feed)"})
-        with urllib.request.urlopen(request, timeout=6) as response:
-            head = response.read(300_000).decode("utf-8", "ignore")
+        raw, _ = net_safety.fetch_bytes(
+            page,
+            max_bytes=300_000,
+            timeout=6,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; companion-feed)"},
+            truncate=True,
+        )
+        head = raw.decode("utf-8", "ignore")
     except Exception:
         return None
     match = _COVER.search(head)

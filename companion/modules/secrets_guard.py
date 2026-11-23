@@ -1,31 +1,39 @@
-"""Keep the model's shell and file tools away from the files that hold secrets, and from changing
-the companion's own setup (Hermes's config, gateway restarts, webhooks, plugins).
+"""Keep the model's shell, file, browser, and media paths away from files that hold secrets, and
+from changing the companion's own setup (Hermes's config, gateway restarts, webhooks, plugins).
 
 API keys live in ``<HERMES_HOME>/.env`` (and ``auth.json``), the password vault in ``vault/``, the
-media signing key in ``companion/media.key``, and the shared browser's sign-ins (cookies) in its
-profile. Hermes already masks secret-looking text in tool output; this is the layer in front of
-it: a terminal command, a code run or a file tool that names one of these files is blocked before
-it runs, so the key never reaches the model, however it would be printed.
-
-A command can still reach a file without naming it (globs, a script written earlier); the output
-masking stays the fallback for those.
+media signing key in ``companion/media.key``, paired devices/webhooks/push keys in ``companion/``,
+and the shared browser's sign-ins (cookies) in its profile. Hermes already masks secret-looking
+text in tool output; this layer sits in front of tool execution and file staging (``MEDIA:``,
+widgets, creations, avatar references) so protected files cannot be read, uploaded, or sent out.
 """
 
 from __future__ import annotations
 
+import contextlib
 import re
+from pathlib import Path
 from typing import Any, Optional
 
 # Tools that touch the local disk or run code.
 _LOCAL_TOOLS = re.compile(
-    r"^(?:terminal|execute_code|process_manage|run_cli_app|exec|exec_session|read_file|write_file|edit_file"
-    r"|apply_patch|patch|search_files|list_dir|find_files|grep|rg)$|file"
+    r"^(?:terminal|execute_code|process|process_manage|run_cli_app|exec|exec_session|read_file|write_file|edit_file"
+    r"|apply_patch|patch|search_files|list_dir|find_files|grep|rg|send_file|send_document)$|file"
 )
-# What a call may not name. ``.env.example`` (no secrets) stays readable.
+# Browser tools (Playwright MCP ``mcp__browser__*`` / ``mcp_browser_*`` and Hermes ``browser_*``).
+_BROWSER_TOOLS = re.compile(r"^(?:browser_|mcp__?.+?__?browser_)", re.IGNORECASE)
+_FILE_URL = re.compile(r"(?:^|[\s'\"(=])file://", re.IGNORECASE)
+
+# What a call or staged path may not name. ``.env.example`` / ``.env.sample`` / ``.env.template`` stay readable.
 _PROTECTED = re.compile(
-    r"(?:^|[\s/\\'\"`=:(])\.env(?!\.example)(?:\.[a-z]+)?(?=$|[\s'\"`;|&)>,])"
-    r"|auth\.json|media\.key|browser-profile|hermes-home[/\\]+vault|hermes_home[^\s]*[/\\]+vault"
-    r"|[/\\]vault[/\\]|[/\\](?:Login Data|Cookies)\b",
+    r"(?:^|[\s/\\'\"`=:(])\.env(?!(?:\.example|\.sample|\.template)\b)(?:\.[a-z0-9_-]+)?(?=$|[\s'\"`;|&)>,])"
+    r"|(?:^|[\s/\\'\"`=:()])(?:auth\.json|media\.key|vapid_private\.pem|devices\.json|triggers\.json"
+    r"|subscriptions\.json|vault-keys\.json|approval-grants\.json)(?=$|[\s/\\'\"`;|&)>,])"
+    r"|browser-profile|hermes-home[/\\]+vault|hermes_home[^\s]*[/\\]+vault"
+    r"|[/\\]vault(?:[/\\]|$)|[/\\](?:Login Data|Cookies|Web Data|Local State)\b"
+    r"|[/\\]\.codex[/\\]+auth\.json\b"
+    r"|[/\\]\.ssh[/\\]+(?:id_[a-z0-9_]+|config|authorized_keys|known_hosts)\b"
+    r"|[/\\]\.aws[/\\]+credentials\b|[/\\]\.gnupg[/\\]|(?:^|[/\\])_?\.netrc\b",
     re.IGNORECASE,
 )
 
@@ -45,7 +53,7 @@ SELF_CHANGE_MESSAGE = (
 )
 
 MESSAGE = (
-    "这一步碰到了存放密钥或登录信息的文件（.env、auth.json、vault、浏览器登录数据），为了安全不能读取或修改。"
+    "这一步碰到了存放密钥或登录信息的文件（.env、auth.json、vault、配对凭证、浏览器登录数据或私钥），为了安全不能读取或修改。"
     "需要用到某个服务时，直接调用已经配置好的工具；需要换密钥或配置时，请用户自己在设置里改。"
 )
 
@@ -60,14 +68,74 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
+def _hermes_home() -> Optional[Path]:
+    with contextlib.suppress(Exception):
+        from hermes_constants import get_hermes_home
+
+        return Path(get_hermes_home()).resolve()
+    return None
+
+
+def is_secret_path(path_or_text: str | Path) -> bool:
+    """True when ``path_or_text`` names or resolves to a protected secret file or directory."""
+    raw = str(path_or_text or "").strip()
+    if not raw:
+        return False
+    if _PROTECTED.search(raw):
+        return True
+    with contextlib.suppress(OSError, RuntimeError, ValueError):
+        resolved = Path(raw).expanduser().resolve()
+        if _PROTECTED.search(str(resolved)) or _PROTECTED.search(resolved.as_posix()):
+            return True
+        home = _hermes_home()
+        if home is not None:
+            protected_roots = (
+                home / ".env",
+                home / "auth.json",
+                home / "vault",
+                home / "companion" / "media.key",
+                home / "companion" / "devices.json",
+                home / "companion" / "triggers.json",
+                home / "companion" / "vault-keys.json",
+                home / "companion" / "approval-grants.json",
+                home / "companion" / "push",
+                home / "companion" / "mcp" / "browser" / "browser-profile",
+            )
+            for target in protected_roots:
+                if resolved == target or target in resolved.parents:
+                    return True
+    return False
+
+
+def _targets_hermes_config(texts: list[str]) -> bool:
+    home = _hermes_home()
+    if home is None:
+        return False
+    config_file = home / "config.yaml"
+    plugins_dir = home / "plugins"
+    for text in texts:
+        if "config.yaml" not in text and "plugins" not in text:
+            continue
+        with contextlib.suppress(OSError, RuntimeError, ValueError):
+            resolved = Path(text.strip()).expanduser().resolve()
+            if resolved == config_file or plugins_dir == resolved or plugins_dir in resolved.parents:
+                return True
+    return False
+
+
 def check(tool_name: str, args: Any) -> Optional[str]:
-    """The block message when a shell or file call names a secret file, else ``None``."""
-    if not _LOCAL_TOOLS.search(tool_name or ""):
+    """The block message when a shell, file, or browser call touches a secret file, else ``None``."""
+    name = tool_name or ""
+    is_local = bool(_LOCAL_TOOLS.search(name))
+    is_browser = bool(_BROWSER_TOOLS.search(name))
+    if not (is_local or is_browser):
         return None
     texts = _strings(args)
-    if any(_PROTECTED.search(text) for text in texts):
+    if is_browser and any(_FILE_URL.search(text) for text in texts):
+        return MESSAGE
+    if any(_PROTECTED.search(text) or is_secret_path(text) for text in texts):
         return MESSAGE
     # Reading its own config is fine; running these commands or writing those files is not.
-    if tool_name not in _READS and any(_SELF_CHANGE.search(text) for text in texts):
+    if is_local and name not in _READS and (any(_SELF_CHANGE.search(text) for text in texts) or _targets_hermes_config(texts)):
         return SELF_CHANGE_MESSAGE
     return None

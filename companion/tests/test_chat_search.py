@@ -4,13 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _loader import chat_store, load
+from _loader import chat_store, load, temp_dir
 
 
 class ChatSearchTest(unittest.TestCase):
     def setUp(self):
         _, (self.search,) = load("chat_search")
-        self.store = chat_store(Path(tempfile.mkdtemp(prefix="companion-search-")))
+        self.store = chat_store(temp_dir("companion-search-"))
         self.main, self.side, self.helper = self.store.create(), self.store.create(), self.store.create()
         self.store.set_title(self.side, "买电脑")
         index = self.store._read_index()

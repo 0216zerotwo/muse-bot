@@ -34,7 +34,7 @@ from .auth import TokenIssuer
 from .devices import Devices
 from .media import MediaStore
 from .modules import log_privacy, stt_sensevoice
-from .modules import avatar_make, avatar_motion, companion_state, computer, connections, creations, feed, goals, helper_learn, helpers, hermes_words, interrupted, job_snapshots, memory_fade, memory_learn, memory_tidy, models, oauth_login, plans, push, router, routines, triggers, vault, video_backends, widgets
+from .modules import avatar_make, avatar_motion, companion_state, computer, connections, creations, egress, feed, goals, helper_learn, helpers, hermes_words, interrupted, job_snapshots, memory_fade, memory_learn, memory_tidy, models, oauth_login, plans, push, router, routines, triggers, vault, video_backends, widgets
 from .modules.paths import get_webui_dir
 from .modules.persona import write_locale_overlay, write_soul
 from .store import ChatStore
@@ -236,11 +236,27 @@ class CompanionAdapter(BasePlatformAdapter):
 
     async def broadcast(self, event: dict[str, Any]) -> None:
         """To every connected app, whichever chat it shows (动态 has new posts)."""
-        for socket in list(set().union(*self._subs.values())):
+        sockets = set(getattr(self, "socket_devices", {}).keys())
+        if getattr(self, "_subs", None):
+            sockets |= set().union(*self._subs.values())
+        for socket in list(sockets):
             try:
                 await socket.send_json(event)
             except Exception:
                 self.detach_all(socket)
+
+    async def emit_approval_updated(self, record: Any) -> None:
+        """Live WebSocket event whenever an approval card is created or decided."""
+        session_key = str(getattr(record, "session_key", "") or "")
+        chat_id = session_key.split(":", 1)[-1] if ":" in session_key else session_key
+        await self.broadcast({
+            "event": "approval_updated",
+            "chat_id": chat_id,
+            "session_key": session_key,
+            "approval_id": record.id,
+            "status": record.status,
+            "approval": record.public(),
+        })
 
     def _fail(self, code: str, message: str) -> bool:
         self._set_fatal_error(code, message, retryable=True)
@@ -485,6 +501,7 @@ class CompanionAdapter(BasePlatformAdapter):
     async def _hand_helper(self, origin: Optional[str], helper_chat: str, task: str, timeout: float) -> str:
         if origin:
             self._helper_origins[helper_chat] = origin
+            egress.propagate_chat(origin, helper_chat)
         main = companion_state.read_companion_state().get("chat_id")
         label = "主要聊天" if origin and origin == main else (self.store.title(origin) or "旁聊") if origin else "定时任务"
         turn_id = uuid.uuid4().hex
@@ -500,6 +517,8 @@ class CompanionAdapter(BasePlatformAdapter):
             await self._start_turn(helper_chat, f"【{label}交给你的事】{task}", turn_id)
             return await asyncio.wait_for(asyncio.shield(waiter), timeout)
         finally:
+            if origin:
+                egress.propagate_chat(helper_chat, origin)
             if self._helper_waits.get(helper_chat, (None,))[0] == turn_id and waiter.done():
                 self._helper_waits.pop(helper_chat, None)
 
@@ -604,9 +623,11 @@ class CompanionAdapter(BasePlatformAdapter):
 
             resolve_gateway_approval(prompt.session_key, "session")
             return SendResult(success=True)
+        raw_chat = prompt.chat_id or activity._home_chat() or ""
+        facing = self.facing_chat(raw_chat) if raw_chat else raw_chat
         record = self.approvals.hold_exec(
-            prompt.chat_id, prompt.command, prompt.description, prompt.session_key, prompt.choices)
-        await self.emit_activity(prompt.chat_id, {
+            facing, prompt.command, prompt.description, prompt.session_key, prompt.choices)
+        await self.emit_activity(facing, {
             "version": 1, "phase": "end", "call_id": record.call_id, "name": "terminal",
             "arguments": {"command": prompt.command}, "result": f"{DEFERRED_PREFIX} {record.id}",
             "error": None, "files": [], "embeds": [],
@@ -938,17 +959,25 @@ def _without_tips(text: str) -> str:
     return _PARAGRAPH.join(part for part in paragraphs if not part.lstrip().startswith(_TIP)).strip()
 
 
+def _translate_or_overlay(key: str) -> str:
+    try:
+        from agent.i18n import t
+
+        return t(key).strip()
+    except ImportError:
+        from .modules import persona
+
+        return str(persona._COMPANION_ZH.get(key, "")).strip()
+    except Exception:
+        return ""
+
+
 def _busy_heads() -> tuple[str, ...]:
     """How each answer to a message sent while it works begins (in the overlay's words)."""
-    from agent.i18n import t
-
     heads = []
     for key in ("steered_head", "steered_subagents_head", "redirected_head", "queued_head", "interrupting_head",
                 "subagent_working_head", "compressing_head"):
-        try:
-            head = t(f"gateway.busy.{key}").strip()
-        except Exception:
-            continue
+        head = _translate_or_overlay(f"gateway.busy.{key}")
         if head:
             heads.append(head)
     return tuple(heads)
@@ -960,16 +989,13 @@ def _is_busy_ack(text: str) -> bool:
 
 
 def _idle_lifecycle_notices() -> set[str]:
-    from agent.i18n import t
-
     keys = ("gateway.shutdown.notice_shutdown", "gateway.shutdown.notice_restart",
             "gateway.startup.restarted", "gateway.startup.online")
     notices = set()
     for key in keys:
-        try:
-            notices.add(t(key).strip())
-        except Exception:
-            pass
+        val = _translate_or_overlay(key)
+        if val:
+            notices.add(val)
     return notices
 
 

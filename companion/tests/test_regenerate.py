@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _loader import chat_store
+from _loader import chat_store, temp_dir
 from test_stream import _adapter_module
 
 
@@ -15,7 +15,7 @@ class RegenerateTest(unittest.TestCase):
         module = _adapter_module()
         adapter = object.__new__(module.CompanionAdapter)
         adapter._turns = {}
-        adapter.store = chat_store(Path(tempfile.mkdtemp(prefix="companion-regen-")))
+        adapter.store = chat_store(temp_dir("companion-regen-"))
         self.started = []
 
         async def start(chat_id, text, turn_id, files=None):

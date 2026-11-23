@@ -10,12 +10,14 @@ import asyncio
 import contextlib
 from pathlib import Path
 import ipaddress
+import re
 import uuid
 import logging
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
+from urllib.parse import urlsplit
 
 from starlette.applications import Starlette
-from starlette.requests import Request
+from starlette.requests import HTTPConnection, Request
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
@@ -45,26 +47,174 @@ def adapter_debug() -> bool:
     return bool(os.environ.get("COMPANION_DEBUG_FRAMES"))
 
 
-_FORWARDED = ("x-forwarded-for", "forwarded", "x-real-ip", "cf-connecting-ip", "tailscale-user-login")
+_FORWARDED = (
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "forwarded",
+    "x-real-ip",
+    "cf-connecting-ip",
+    "tailscale-user-login",
+)
+_SAFE_HOST = re.compile(r"^[A-Za-z0-9.\-:\[\]]+$")
+_HOOK_STREAM_LIMIT = 1024 * 1024
+_HOOK_BODY_CHARS = 65_536
 
 
-def _is_local(request: Request) -> bool:
-    """A browser on this machine itself. Behind a reverse proxy every request comes from loopback,
-    so a request the proxy forwarded (it adds these headers) never counts as local."""
-    host = request.client.host if request.client else None
-    if not host or any(request.headers.get(h) for h in _FORWARDED):
+def _is_loopback_ip(raw: str | None) -> bool:
+    if not raw:
         return False
     try:
-        return ipaddress.ip_address(host).is_loopback
+        addr = ipaddress.ip_address(raw.strip())
     except ValueError:
-        return host == "localhost"
+        return raw.strip().lower() == "localhost"
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped.is_loopback
+    return addr.is_loopback
+
+
+_PRIVATE_PROXY_NETS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
+
+
+def _is_trusted_proxy_peer(raw: str | None) -> bool:
+    if not raw:
+        return False
+    try:
+        addr = ipaddress.ip_address(raw.strip())
+    except ValueError:
+        return raw.strip().lower() == "localhost"
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return addr.is_loopback or any(addr in net for net in _PRIVATE_PROXY_NETS)
+
+
+def _is_loopback_netloc(netloc: str | None) -> bool:
+    if not netloc:
+        return False
+    try:
+        host = urlsplit(f"//{netloc.strip()}").hostname
+    except ValueError:
+        return False
+    return _is_loopback_ip(host)
+
+
+def _origin_allowed(conn: HTTPConnection, *, local_only: bool = False) -> bool:
+    """Validate browser ``Origin`` against ``Host`` (or loopback in local mode) to prevent CSRF and
+    cross-site WebSocket hijacking. Non-browser clients (native iOS, CLI scripts) omit ``Origin``."""
+    origin = (conn.headers.get("origin") or "").strip()
+    if not origin:
+        return True
+    if origin.lower() == "null":
+        return False
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname or not parsed.netloc:
+        return False
+    if local_only:
+        return _is_loopback_netloc(parsed.netloc)
+    origin_netloc = parsed.netloc.strip().lower()
+    host_header = (conn.headers.get("host") or "").strip().lower()
+    if _is_loopback_netloc(origin_netloc) and _is_loopback_netloc(host_header):
+        return True
+    if host_header and origin_netloc == host_header:
+        return True
+    peer = conn.client.host if conn.client else None
+    if _is_trusted_proxy_peer(peer):
+        forwarded_host = (conn.headers.get("x-forwarded-host") or "").split(",", 1)[0].strip().lower()
+        if forwarded_host and origin_netloc == forwarded_host:
+            return True
+    return False
+
+
+def _is_local(conn: HTTPConnection) -> bool:
+    """A browser or CLI on this machine itself. Behind a reverse proxy every request comes from
+    loopback, so forwarded headers disqualify it; ``Host`` and ``Origin`` must also be loopback so a
+    DNS-rebinding or cross-origin page cannot mint tokens without a password."""
+    peer = conn.client.host if conn.client else None
+    if not _is_loopback_ip(peer) or any(conn.headers.get(h) for h in _FORWARDED):
+        return False
+    host_header = (conn.headers.get("host") or "").strip()
+    if host_header and not _is_loopback_netloc(host_header):
+        return False
+    return _origin_allowed(conn, local_only=True)
+
+
+def _client_ip(request: Request) -> str:
+    peer = request.client.host if request.client else ""
+    if _is_trusted_proxy_peer(peer):
+        forwarded = (request.headers.get("x-real-ip") or request.headers.get("x-forwarded-for") or "").split(",", 1)[0].strip()
+        if forwarded:
+            return forwarded
+    return peer or ""
+
+
+def _clean_base_url(raw: str) -> str | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
+        return None
+    if parsed.query or parsed.fragment or not _SAFE_HOST.fullmatch(parsed.netloc):
+        return None
+    path = parsed.path.rstrip("/")
+    if any(ch.isspace() or ord(ch) < 32 for ch in path):
+        return None
+    return f"{scheme}://{parsed.netloc}{path}"
 
 
 def _public_base(request: Request) -> str:
-    """This server's address as the device sees it (the proxy's, when behind one)."""
-    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    """This server's address as the device sees it (the proxy's, only when behind a trusted proxy)."""
+    peer = request.client.host if request.client else None
+    trusted_proxy = _is_trusted_proxy_peer(peer)
+    raw_scheme = (request.headers.get("x-forwarded-proto") if trusted_proxy else None) or request.url.scheme
+    scheme = raw_scheme.split(",", 1)[0].strip().lower()
+    if scheme not in ("http", "https"):
+        scheme = "http"
+    raw_host = (
+        (request.headers.get("x-forwarded-host") if trusted_proxy else None)
+        or request.headers.get("host")
+        or request.url.netloc
+    )
+    host = raw_host.split(",", 1)[0].strip()
+    if not host or not _SAFE_HOST.fullmatch(host):
+        host = request.url.netloc or "127.0.0.1:8766"
     return f"{scheme}://{host}"
+
+
+async def _read_body_bounded(request: Request, max_bytes: int, *, keep_bytes: Optional[int] = None) -> Optional[bytes]:
+    """Read request body via ``request.stream()``, returning ``None`` immediately if it exceeds ``max_bytes``."""
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            if int(cl) > max_bytes:
+                return None
+        except ValueError:
+            return None
+    limit = keep_bytes if keep_bytes is not None else max_bytes
+    chunks: list[bytes] = []
+    total = 0
+    kept = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_bytes:
+            return None
+        if kept < limit:
+            take = chunk[: limit - kept]
+            chunks.append(take)
+            kept += len(take)
+    return b"".join(chunks)
 
 
 def _device_token(request: Request) -> str | None:
@@ -707,6 +857,8 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
         return adapter.tokens.valid(_bearer(request))
 
     async def bootstrap(request: Request) -> Response:
+        if not _origin_allowed(request):
+            return JSONResponse({"error": "forbidden_origin"}, status_code=403, headers=NO_STORE)
         offered = _device_token(request)
         device = await asyncio.to_thread(adapter.devices.check, offered) if offered else None
         if offered and device is None:
@@ -717,8 +869,8 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
             return JSONResponse({"error": "pair_required"}, status_code=401, headers=NO_STORE)
         return JSONResponse(
             {
-                "token": adapter.tokens.issue(device),
-                "api_token": adapter.tokens.issue(device),
+                "token": adapter.tokens.issue(device, reuse=True, purpose="ws"),
+                "api_token": adapter.tokens.issue(device, reuse=True, purpose="api"),
                 "device_id": device,
                 "ws_path": WS_PATH,
                 "expires_in": 24 * 60 * 60,
@@ -731,29 +883,41 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
 
     async def pair(request: Request) -> Response:
         """A pairing code for a device token (see ``devices``)."""
+        if not _origin_allowed(request):
+            return JSONResponse({"error": "forbidden_origin"}, status_code=403, headers=NO_STORE)
+        raw = await _read_body_bounded(request, 16 * 1024)
+        if raw is None:
+            return JSONResponse({"error": "too_large"}, status_code=413, headers=NO_STORE)
         try:
-            body = await request.json()
-        except ValueError:
+            import json as _json
+
+            body = _json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, ValueError):
             body = {}
         if not isinstance(body, dict):
             body = {}
-        result = await asyncio.to_thread(adapter.devices.pair, str(body.get("code") or ""), str(body.get("name") or ""))
+        client_ip = _client_ip(request)
+        result = await asyncio.to_thread(
+            adapter.devices.pair, str(body.get("code") or ""), str(body.get("name") or ""), client_ip
+        )
         if result is None:
-            error = "locked" if adapter.devices.locked() else "wrong_code"
+            error = "locked" if adapter.devices.locked(client_ip) else "wrong_code"
             return JSONResponse({"error": error}, status_code=403, headers=NO_STORE)
         logger.info("Companion: paired a new device (%s)", result["device_id"])
         return JSONResponse(result, headers=NO_STORE)
 
     async def pair_code(request: Request) -> Response:
         """A new pairing code: for the server's own console, or a device that is already connected."""
-        if not (_is_local(request) or authorized(request)):
+        if not _origin_allowed(request):
+            return JSONResponse({"error": "forbidden_origin"}, status_code=403, headers=NO_STORE)
+        local = _is_local(request)
+        if not (local or authorized(request)):
             return JSONResponse({"error": "unauthorized"}, status_code=401, headers=NO_STORE)
         code = adapter.devices.new_code()
         # As nanoMuse's printed link: opening it pairs at once. The code rides in the fragment,
         # which browsers never send, so it stays out of every access log on the way.
-        base = request.query_params.get("base", "")  # the console names the public address
-        if not base.startswith(("http://", "https://")):
-            base = _public_base(request)
+        requested_base = _clean_base_url(request.query_params.get("base", "")) if local else None
+        base = requested_base or _public_base(request)
         return JSONResponse({**code, "link": f"{base.rstrip('/')}/companion.html#pair={code['code']}"}, headers=NO_STORE)
 
     async def sessions(request: Request) -> Response:
@@ -835,7 +999,9 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
     # 自动触发: other services call in with the trigger's own key (no sign-in), and Hermes's monitor
     # reads a trigger's state the same way (see modules/triggers).
     async def hook(request: Request) -> Response:
-        raw = (await request.body())[:65_536]
+        raw = await _read_body_bounded(request, _HOOK_STREAM_LIMIT, keep_bytes=_HOOK_BODY_CHARS)
+        if raw is None:
+            return JSONResponse({"ok": False, "error": "too_large"}, status_code=413)
         try:
             body = raw.decode("utf-8")
         except UnicodeDecodeError:  # some Chinese services and Windows tools still send GBK
@@ -911,12 +1077,14 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
 
     async def attachment(request: Request) -> Response:
         """A file the app sends with a message (any kind): kept briefly until the message names it."""
+        if not _origin_allowed(request):
+            return JSONResponse({"error": "forbidden_origin"}, status_code=403, headers=NO_STORE)
         if not authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         mime = (request.headers.get("content-type") or "").split(";")[0].strip().lower() or "application/octet-stream"
-        body = await request.body()
-        if not body or len(body) > _ATTACHMENT_LIMIT:
-            return JSONResponse({"error": "too_large"}, status_code=413)
+        body = await _read_body_bounded(request, _ATTACHMENT_LIMIT)
+        if not body:
+            return JSONResponse({"error": "too_large" if body is None else "empty"}, status_code=413 if body is None else 400)
         from urllib.parse import unquote
 
         name = unquote(request.headers.get("x-attachment-name") or "")[:120]
@@ -924,6 +1092,9 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
         return JSONResponse({"reference": reference}, headers=NO_STORE)
 
     async def websocket(socket: WebSocket) -> None:
+        if not _origin_allowed(socket):
+            await socket.close(code=4403)
+            return
         token = socket.query_params.get("token")
         if not adapter.tokens.valid(token):
             await socket.close(code=4401)
@@ -948,6 +1119,9 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
             adapter.socket_devices.pop(socket, None)
 
     async def computer_socket(socket: WebSocket) -> None:
+        if not _origin_allowed(socket):
+            await socket.close(code=4403)
+            return
         token = socket.query_params.get("token")
         if not adapter.tokens.valid(token):
             await socket.close(code=4401)

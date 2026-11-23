@@ -4,12 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _loader import chat_store
+from _loader import chat_store, temp_dir
 
 
 class ThreadSyncTest(unittest.TestCase):
     def setUp(self):
-        self.store = chat_store(Path(tempfile.mkdtemp(prefix="companion-thread-")))
+        self.store = chat_store(temp_dir("companion-thread-"))
         self.chat = self.store.create()
         for n, text in enumerate(["早", "早上好", "今天下雨吗", "下午有雨"]):
             self.store.append(self.chat, {"event": "user_message" if n % 2 == 0 else "message", "chat_id": self.chat,

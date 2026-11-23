@@ -13,18 +13,38 @@ The user adds them in 设置 → 安全凭证, or on a card the companion puts i
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import threading
 import time
+import uuid
 from typing import Any, Optional
 
 from .paths import get_webui_dir
 
 TOOLSET = "companion"
 _ENV = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+_FORBIDDEN_ENV = frozenset({
+    "PATH", "PATHEXT", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONEXECUTABLE", "PYTHONINSPECT",
+    "PYTHONWARNINGS", "PYTHONNOUSERSITE", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_OPTIONS",
+    "NODE_EXTRA_CA_CERTS", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "TMPDIR",
+    "COMSPEC", "SHELL", "SYSTEMROOT", "WINDIR", "HERMES_HOME", "BROWSER", "GIT_ASKPASS", "SSH_AUTH_SOCK",
+})
+_FORBIDDEN_ENV_PREFIXES = ("COMPANION_", "HERMES_", "PYTHON", "LD_", "DYLD_", "GIT_SSH", "SSH_")
 _LOCK = threading.Lock()
+
+
+def is_allowed_env_name(env: str) -> bool:
+    name = (env or "").strip().upper()
+    if not _ENV.match(name):
+        return False
+    if name in _FORBIDDEN_ENV or name.startswith(_FORBIDDEN_ENV_PREFIXES):
+        return False
+    return True
 
 
 def _keys_path():
@@ -42,9 +62,17 @@ def _read_keys() -> list[dict[str, Any]]:
 def _write_keys(rows: list[dict[str, Any]]) -> None:
     path = _keys_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o600)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
 
 
 def _store():
@@ -88,6 +116,8 @@ def add_key(label: str, env: str, value: str) -> dict[str, Any]:
     env, value = str(env or "").strip().upper(), str(value or "").strip()
     if not _ENV.match(env):
         raise ValueError("变量名用大写字母、数字和下划线，比如 GITHUB_TOKEN")
+    if not is_allowed_env_name(env):
+        raise ValueError("这个环境变量属于系统或运行配置，不能作为服务密钥保存")
     if not value:
         raise ValueError("密钥是空的")
     save_env_value(env, value)
@@ -138,6 +168,8 @@ def _handle_request(args: dict[str, Any], **_: Any) -> str:
         env = str(args.get("env") or "").strip().upper()
         if not _ENV.match(env):
             return json.dumps({"success": False, "error": "env 要写这个密钥用的环境变量名，比如 GITHUB_TOKEN"}, ensure_ascii=False)
+        if not is_allowed_env_name(env):
+            return json.dumps({"success": False, "error": "这个环境变量属于系统或运行配置，不能在这里请求"}, ensure_ascii=False)
         if os.environ.get(env):
             return json.dumps({"success": True, "exists": True, "note": f"{env} 已经设好了，直接用"}, ensure_ascii=False)
         card["env"] = env

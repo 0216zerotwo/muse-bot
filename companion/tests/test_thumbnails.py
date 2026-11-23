@@ -6,19 +6,20 @@ from pathlib import Path
 
 from PIL import Image
 
-from _loader import load
+from _loader import load, temp_dir
 
 
 class ThumbnailTest(unittest.TestCase):
     def setUp(self):
         self.folder, (self.creations,) = load("creations")
-        self.source = Path(tempfile.mkdtemp(prefix="companion-thumb-")) / "大图.png"
+        self.source = temp_dir("companion-thumb-") / "大图.png"
         Image.new("RGB", (1600, 1200), (200, 120, 40)).save(self.source)
 
     def test_a_picture_becomes_a_small_webp_made_once(self):
         thumb = self.creations.thumbnail(self.source)
         self.assertEqual(thumb.suffix, ".webp")
-        self.assertEqual(max(Image.open(thumb).size), self.creations.THUMB_SIDE)
+        with Image.open(thumb) as opened:
+            self.assertEqual(max(opened.size), self.creations.THUMB_SIDE)
         self.assertTrue(thumb.is_relative_to(self.folder))
         self.assertEqual(self.creations.thumbnail(self.source), thumb)
 

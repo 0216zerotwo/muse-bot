@@ -8,20 +8,167 @@ reach the scheduled jobs, the network or a model is stubbed by the test itself.
 
 from __future__ import annotations
 
+import atexit
 import importlib
 import importlib.util
+import shutil
 import sys
 import tempfile
 import types
 import uuid
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
+_TEMP_DIRS: list[Path] = []
+
+
+def _cleanup_temp_dirs() -> None:
+    while _TEMP_DIRS:
+        shutil.rmtree(_TEMP_DIRS.pop(), ignore_errors=True)
+
+
+atexit.register(_cleanup_temp_dirs)
+
+
+def temp_dir(prefix: str = "companion-test-") -> Path:
+    folder = Path(tempfile.mkdtemp(prefix=prefix))
+    _TEMP_DIRS.append(folder)
+    return folder
+
+
+def ensure_hermes_stubs() -> None:
+    """Ensure ``gateway.*`` and ``hermes_constants`` are importable even in standalone CI runs
+    where a full Hermes checkout is not present alongside ``companion/``."""
+    hermes_dir = ROOT.parent / "hermes"
+    if hermes_dir.is_dir() and str(hermes_dir) not in sys.path:
+        sys.path.insert(0, str(hermes_dir))
+    try:
+        import gateway.config  # noqa: F401
+        import gateway.platforms.base  # noqa: F401
+        import gateway.platforms.event  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    class Platform(str, Enum):
+        COMPANION = "companion"
+
+        @classmethod
+        def _missing_(cls, value: object) -> "Platform":
+            obj = str.__new__(cls, str(value))
+            obj._name_ = str(value).upper()
+            obj._value_ = str(value)
+            return obj
+
+    @dataclass
+    class HomeChannel:
+        platform: Any
+        chat_id: str
+        name: str = ""
+
+    @dataclass
+    class SendResult:
+        success: bool = True
+        message_id: Optional[str] = None
+        error: Optional[str] = None
+
+    @dataclass
+    class ExecApprovalPrompt:
+        chat_id: str
+        session_key: str
+        text: str
+        actions: list[tuple[str, str, str]]
+        command: str
+        description: str
+        smart_denied: bool = False
+        metadata: Optional[dict[str, Any]] = None
+
+        @property
+        def choices(self) -> list[str]:
+            return [choice for _, choice, _ in self.actions]
+
+    class MessageType(str, Enum):
+        TEXT = "text"
+        PHOTO = "photo"
+        DOCUMENT = "document"
+
+    @dataclass
+    class MessageSource:
+        platform: str = "companion"
+        chat_id: str = ""
+        chat_name: str = ""
+        chat_type: str = "dm"
+        user_id: str = ""
+        user_name: str = ""
+
+    @dataclass
+    class MessageEvent:
+        text: str
+        message_type: Any
+        source: MessageSource
+        user_id: str = ""
+        user_name: str = ""
+        message_id: str = ""
+        timestamp: Any = None
+        media_urls: list[str] = field(default_factory=list)
+        media_types: list[str] = field(default_factory=list)
+        media_text_inlined: list[Optional[bool]] = field(default_factory=list)
+
+    class BasePlatformAdapter:
+        def __init__(self, config: Any = None, platform: Any = None, **kwargs: Any) -> None:
+            self.config = config
+            self.platform = platform
+            self.gateway_runner = None
+
+        def build_source(self, **kwargs: Any) -> MessageSource:
+            return MessageSource(**kwargs)
+
+        def _mark_connected(self) -> None:
+            pass
+
+        def _mark_disconnected(self) -> None:
+            pass
+
+        def _set_fatal_error(self, code: str, message: str, *, retryable: bool = True) -> None:
+            pass
+
+        async def handle_message(self, event: MessageEvent) -> None:
+            pass
+
+    gw = sys.modules.setdefault("gateway", types.ModuleType("gateway"))
+    gw_cfg = types.ModuleType("gateway.config")
+    gw_cfg.HomeChannel = HomeChannel
+    gw_cfg.Platform = Platform
+    gw_cfg.persist_home_channel = lambda home: None
+    sys.modules["gateway.config"] = gw_cfg
+    gw.config = gw_cfg
+
+    gw_plat = sys.modules.setdefault("gateway.platforms", types.ModuleType("gateway.platforms"))
+    gw_base = types.ModuleType("gateway.platforms.base")
+    gw_base.BasePlatformAdapter = BasePlatformAdapter
+    gw_base.ExecApprovalPrompt = ExecApprovalPrompt
+    gw_base.SendResult = SendResult
+    sys.modules["gateway.platforms.base"] = gw_base
+    gw_plat.base = gw_base
+
+    gw_event = types.ModuleType("gateway.platforms.event")
+    gw_event.MessageEvent = MessageEvent
+    gw_event.MessageType = MessageType
+    sys.modules["gateway.platforms.event"] = gw_event
+    gw_plat.event = gw_event
+
+    if "hermes_constants" not in sys.modules:
+        hc = types.ModuleType("hermes_constants")
+        hc_root = temp_dir("companion-hermes-home-")
+        hc.get_hermes_home = lambda: hc_root
+        sys.modules["hermes_constants"] = hc
 
 
 def load(*names: str) -> tuple[Path, list[Any]]:
-    folder = Path(tempfile.mkdtemp(prefix="companion-test-"))
+    folder = temp_dir("companion-test-")
     package = f"companion_test_{uuid.uuid4().hex[:8]}"
     module = types.ModuleType(package)
     module.__path__ = [str(ROOT / "modules")]

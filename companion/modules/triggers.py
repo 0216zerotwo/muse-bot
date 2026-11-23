@@ -21,6 +21,7 @@ goes when it is deleted.
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import json
 import os
@@ -32,6 +33,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from . import net_safety
 from .companion_state import read_companion_state
 from .paths import get_webui_dir
 
@@ -72,9 +74,17 @@ def _read() -> list[dict[str, Any]]:
 def _write(triggers: list[dict[str, Any]]) -> None:
     path = _path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(triggers, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        tmp.write_text(json.dumps(triggers, ensure_ascii=False, indent=2), encoding="utf-8")
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o600)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
 
 
 def _find(triggers: list[dict[str, Any]], trigger_id: Any) -> dict[str, Any]:
@@ -153,8 +163,11 @@ def add_trigger(kind: str, name: str, instruction: str, url: Optional[str] = Non
     instruction = " ".join(str(instruction or "").split())[:400]
     if not name or not instruction:
         raise ValueError("要有名字和要做的事（instruction）")
-    if kind == "page" and not (isinstance(url, str) and url.startswith(("http://", "https://"))):
-        raise ValueError("盯网页要给出 http(s) 网址")
+    if kind == "page":
+        if not (isinstance(url, str) and url.startswith(("http://", "https://"))):
+            raise ValueError("盯网页要给出 http(s) 网址")
+        if not net_safety.is_safe_url_target(url):
+            raise ValueError("不能盯本机或内网网址")
     if kind in ("email", "calendar") and not _connected(kind):
         raise ValueError(f"还没有连接{'邮箱' if kind == 'email' else '日历'}，请用户先在 设置 → 连接 里连上")
     if kind != "webhook":
@@ -242,12 +255,23 @@ def receive(trigger_id: str, key: Optional[str], body: str) -> bool:
 
 def _page_text(url: str) -> str:
     import html
-    import httpx
 
-    response = httpx.get(url, timeout=20, follow_redirects=True,
-                         headers={"User-Agent": "Mozilla/5.0 (companion page watch)"})
-    response.raise_for_status()
-    text = re.sub(r"(?is)<(script|style|noscript|svg|head)\b.*?</\1>", " ", response.text)
+    raw, headers = net_safety.fetch_bytes(
+        url,
+        max_bytes=2 * 1024 * 1024,
+        timeout=20,
+        headers={"User-Agent": "Mozilla/5.0 (companion page watch)"},
+        truncate=True,
+    )
+    charset = "utf-8"
+    ctype = headers.get("content-type", "")
+    if "charset=" in ctype.lower():
+        charset = ctype.lower().split("charset=", 1)[1].split(";", 1)[0].strip() or "utf-8"
+    try:
+        body = raw.decode(charset, errors="replace")
+    except LookupError:
+        body = raw.decode("utf-8", errors="replace")
+    text = re.sub(r"(?is)<(script|style|noscript|svg|head)\b.*?</\1>", " ", body)
     text = html.unescape(re.sub(r"(?s)<[^>]+>", "\n", text))
     lines = [" ".join(line.split()) for line in text.splitlines()]
     return "\n".join(line for line in lines if line)[:_PAGE_CHARS]

@@ -7,13 +7,11 @@ import importlib.util
 import sys
 import unittest
 
-from _loader import ROOT
-
-HERMES = ROOT.parent / "hermes"
+from _loader import ROOT, ensure_hermes_stubs
 
 
 def _adapter_module():
-    sys.path.insert(0, str(HERMES))
+    ensure_hermes_stubs()
     name = "companion_stream_test"
     if name not in sys.modules:
         spec = importlib.util.spec_from_file_location(name, ROOT / "__init__.py", submodule_search_locations=[str(ROOT)])

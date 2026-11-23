@@ -109,6 +109,10 @@ def _place(root: Path, kind: str, title: str, suffix: str) -> Path:
 def import_file(source: Path, *, key: str, title: str, origin: str, prompt: Optional[str] = None,
                 created_at: Optional[str] = None, move: bool = False) -> Optional[str]:
     """File ``source`` in its kind folder once per ``key``; returns its id (path under 创意)."""
+    from .secrets_guard import is_secret_path
+
+    if is_secret_path(source):
+        return None
     root = creations_root()
     with _LOCK:
         data = _read_index(root)
@@ -152,7 +156,9 @@ def is_screenshot(path: Path) -> bool:
 
 def collect_sent_file(path: Path, *, title: str) -> None:
     """File what the companion sent in the chat (web-page screenshots stay out)."""
-    if not path.is_file() or is_screenshot(path):
+    from .secrets_guard import is_secret_path
+
+    if is_secret_path(path) or not path.is_file() or is_screenshot(path):
         return
     try:
         if path.resolve().is_relative_to(creations_root().resolve()):
@@ -176,6 +182,8 @@ def reply_title(text: str) -> str:
 
 def _media_in(text: str) -> tuple[list[str], list[Path]]:
     """Media links and existing local media files mentioned in a tool result."""
+    from .secrets_guard import is_secret_path
+
     urls, files = [], []
     for match in _MEDIA_URL.finditer(text or ""):
         url = match.group(0).rstrip(".,;:!?\"')")
@@ -183,42 +191,19 @@ def _media_in(text: str) -> tuple[list[str], list[Path]]:
             urls.append(url)
     for match in _LOCAL_PATH.finditer(text or ""):
         path = Path(match.group(0).replace("\\\\", "\\"))
-        if kind_of(path.name) in ("image", "video", "audio") and path.is_file() and path not in files:
+        if not is_secret_path(path) and kind_of(path.name) in ("image", "video", "audio") and path.is_file() and path not in files:
             files.append(path)
     return urls, files
 
 
 async def _download(url: str, target_dir: Path) -> Optional[Path]:
     """Fetch a public media URL, re-checking every redirect; None when not allowed or too big."""
-    import httpx
+    from .net_safety import async_download_to_file
 
-    from tools.url_safety import is_safe_url
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    tmp = target_dir / f".download-{os.getpid()}-{datetime.now():%H%M%S%f}"
-    current = url
-    async with httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT_S, follow_redirects=False) as client:
-        for _ in range(_MAX_REDIRECTS + 1):
-            if not is_safe_url(current):
-                logger.warning("companion: not downloading media from %s", urlparse(current).hostname)
-                return None
-            async with client.stream("GET", current) as response:
-                if response.status_code in (301, 302, 303, 307, 308) and response.headers.get("location"):
-                    current = urljoin(current, response.headers["location"])
-                    continue
-                if response.status_code != 200:
-                    return None
-                size = 0
-                with tmp.open("wb") as out:
-                    async for chunk in response.aiter_bytes(1 << 16):
-                        size += len(chunk)
-                        if size > _MAX_DOWNLOAD_BYTES:
-                            out.close()
-                            tmp.unlink(missing_ok=True)
-                            return None
-                        out.write(chunk)
-                return tmp
-    return None
+    downloaded, _ = await async_download_to_file(
+        url, target_dir, max_bytes=_MAX_DOWNLOAD_BYTES, timeout=_DOWNLOAD_TIMEOUT_S, max_redirects=_MAX_REDIRECTS
+    )
+    return downloaded
 
 
 async def collect_generated(text: str, *, title: str, prompt: Optional[str]) -> None:
@@ -257,7 +242,9 @@ def on_generation_result(tool_name: str, args: Any, result: Any, loop: Optional[
     """From the plugin's post_tool_call hook (agent thread): file what a generation tool made."""
     if loop is None or not isinstance(result, str) or not _MEDIA_TOOL.search(tool_name or ""):
         return
-    if tool_name.startswith("browser") or "browser_" in tool_name or "vision" in tool_name:
+    from . import computer
+
+    if computer.is_browser_tool(tool_name) or tool_name.startswith("browser") or "browser_" in tool_name or "vision" in tool_name:
         return  # screenshots and looking at pictures are not creations
     raw = args.get("prompt") if isinstance(args, dict) else None
     prompt = raw.strip() if isinstance(raw, str) and raw.strip() else None

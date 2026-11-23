@@ -9,16 +9,20 @@ in that folder can ever be served.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import logging
 import mimetypes
+import os
 import re
 import secrets
 import shutil
 import uuid
 from pathlib import Path
 from typing import Optional
+
+from .modules import net_safety, secrets_guard
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +53,8 @@ class MediaStore:
             secret = secrets.token_bytes(32)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(secret.hex(), encoding="ascii")
+            with contextlib.suppress(OSError):
+                os.chmod(path, 0o600)
             return secret
 
     def sign(self, prefix: str, rel: str) -> str:
@@ -79,9 +85,12 @@ class MediaStore:
 
     def stage_file(self, path: str | Path, name: Optional[str] = None) -> Optional[dict[str, str]]:
         """Copy a local file in; ``{"url", "name"}`` for the chat, or None if it can't be read."""
+        if secrets_guard.is_secret_path(path):
+            logger.warning("companion: refused to stage protected file")
+            return None
         source = Path(path).expanduser()
-        if not source.is_file():
-            logger.warning("companion: media file not found: %s", source)
+        if secrets_guard.is_secret_path(source) or not source.is_file():
+            logger.warning("companion: media file not found or blocked")
             return None
         display = name or source.name
         target = self._target(display)
@@ -91,23 +100,26 @@ class MediaStore:
     async def stage_url(self, url: str, name: Optional[str] = None) -> Optional[dict[str, str]]:
         """Download a remote image/video so the phone loads it from this server (remote hosts may
         be unreachable from the phone, and their links expire)."""
-        import httpx
-
         display = name or Path(url.split("?", 1)[0]).name or "image"
+        downloaded: Optional[Path] = None
         try:
-            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                if len(response.content) > _DOWNLOAD_LIMIT:
-                    return None
-                if not Path(display).suffix:
-                    kind = response.headers.get("content-type", "").split(";")[0].strip()
-                    display += mimetypes.guess_extension(kind) or ""
-                target = self._target(display)
-                target.write_bytes(response.content)
+            downloaded, headers = await net_safety.async_download_to_file(
+                url, self.root, max_bytes=_DOWNLOAD_LIMIT, timeout=60
+            )
+            if downloaded is None:
+                return None
+            if not Path(display).suffix:
+                kind = headers.get("content-type", "").split(";")[0].strip()
+                display += mimetypes.guess_extension(kind) or ""
+            target = self._target(display)
+            os.replace(downloaded, target)
+            downloaded = None
         except Exception as exc:
-            logger.warning("companion: could not download media %s: %s", url[:120], exc)
+            logger.warning("companion: could not download media %s: %s", url.split("?", 1)[0][:120], type(exc).__name__)
             return None
+        finally:
+            if downloaded is not None:
+                downloaded.unlink(missing_ok=True)
         return {"url": self._sign(target.name), "name": display}
 
     def path_of(self, item: Optional[dict[str, str]]) -> Optional[str]:

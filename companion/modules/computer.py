@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 
 CDP_PORT = 9333
 BROWSER_SERVER = "browser"
-_BROWSER_TOOL_PREFIX = f"mcp_{BROWSER_SERVER}_"
+_BROWSER_TOOL_PREFIX = f"mcp__{BROWSER_SERVER}__"
+_BROWSER_TOOL_PREFIXES = (_BROWSER_TOOL_PREFIX, f"mcp_{BROWSER_SERVER}_")
 _LOCK = threading.Lock()
 _FRAME_QUALITY = 60
 _FRAME_MAX = 1280
@@ -304,10 +305,10 @@ def share_with_builtin_tools() -> None:
 # ── the hold ──────────────────────────────────────────────────────────────────────────────────────
 
 def is_browser_tool(tool_name: str) -> bool:
-    """Playwright's tools (``mcp_browser_*``) and Hermes's own (``browser_*``), not the hand-over or a
-    helper's request for the companion to use it (``browser_request``)."""
+    """Playwright's tools (``mcp__browser__*`` / ``mcp_browser_*``) and Hermes's own (``browser_*``),
+    not the hand-over or a helper's request for the companion to use it (``browser_request``)."""
     name = tool_name or ""
-    return name.startswith((_BROWSER_TOOL_PREFIX, "browser_")) and name not in ("browser_hand_over", "browser_request")
+    return name.startswith((*_BROWSER_TOOL_PREFIXES, "browser_")) and name not in ("browser_hand_over", "browser_request")
 
 
 def held() -> Optional[str]:
@@ -362,7 +363,10 @@ def note_action(tool_name: str, args: Any, chat_id: Optional[str] = None) -> Non
     global _last_action
     _used_by.add(chat_id)
     _touch()
-    verb = tool_name.removeprefix(_BROWSER_TOOL_PREFIX).removeprefix("browser_")
+    verb = tool_name or ""
+    for prefix in (*_BROWSER_TOOL_PREFIXES, "browser_"):
+        if verb.startswith(prefix):
+            verb = verb[len(prefix):]
     detail = ""
     if isinstance(args, dict):
         detail = str(args.get("element") or args.get("url") or args.get("text") or args.get("key") or "")[:60]

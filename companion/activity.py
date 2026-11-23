@@ -100,38 +100,57 @@ def on_pre_tool_call(tool_name: str = "", args: Any = None, **kwargs: Any) -> Op
     secret = secrets_guard.check(tool_name, args)
     if secret:
         return {"action": "block", "message": secret}
-    if computer.is_browser_tool(tool_name):
+    session_chat = _chat_for_session(str(session_id)) if session_id else None
+    is_browser = computer.is_browser_tool(tool_name)
+    if is_browser:
         # The browser is the companion's: a helper asks it with browser_request instead.
         from .modules.helpers import helper_for_chat
 
-        if helper_for_chat(_chat_for_session(str(session_id)) if session_id else None):
+        if helper_for_chat(session_chat):
             return {"action": "block", "message": (
                 "帮手不能直接用浏览器。用 browser_request 把要在网页上做的事交给主助理，它做完会把结果告诉你。")}
         if computer.holding():
             return {"action": "block", "message": (
                 "用户正在亲自操作浏览器，等用户说好了再继续。现在不要操作浏览器，可以先做别的或者等一等。")}
         computer.ensure_browser()
-    action = approval_action(tool_name, args)
-    # After reading private data, sending to a site needs the user too (see modules/egress).
-    egress_target = None if action else egress.check(session_id, tool_name, args)
-    if egress_target:
-        action = "send_private"
+    base_action = approval_action(tool_name, args)
+    # After reading private data, sending to a site needs the user too (see modules/egress) —
+    # always evaluated even when ``base_action`` is set so ``browser_submit=allow`` cannot bypass ``send_private``.
+    egress_target = egress.check(session_id, tool_name, args, chat_id=session_chat)
     host = (egress_target or {}).get("host")
-    # 设置 → 权限: what the user lets it do on its own, per kind of action.
-    kind = permissions.kind_of(tool_name, args, action, computer.is_browser_tool(tool_name))
-    level = permissions.level_of(kind) if kind else permissions.ALLOW
-    if level == permissions.DENY:
-        return {"action": "block", "message": permissions.denied_message(kind)}
-    if action != "goal_plan":  # a plan change is always the user's call
-        if level == permissions.ALLOW:
+    base_kind = permissions.kind_of(tool_name, args, base_action, is_browser)
+    base_level = permissions.level_of(base_kind) if base_kind else permissions.ALLOW
+    if base_level == permissions.DENY:
+        return {"action": "block", "message": permissions.denied_message(base_kind)}
+    egress_level = permissions.level_of("send_private") if egress_target else permissions.ALLOW
+    if egress_level == permissions.DENY:
+        return {"action": "block", "message": permissions.denied_message("send_private")}
+
+    if base_action == "goal_plan":  # a plan change is always the user's call
+        action, kind = "goal_plan", base_kind
+    else:
+        base_needs_ask = bool(base_kind and base_level == permissions.ASK and (base_action or base_kind != "run_command"))
+        egress_needs_ask = bool(egress_target and egress_level == permissions.ASK)
+        if not base_needs_ask and not egress_needs_ask:
             return None
-        if not action and kind != "run_command":  # Hermes asks about risky commands itself
-            action = kind
-    if not action or (_adapter is not None and _adapter.approvals.granted(action, args, host)):
+        if base_needs_ask:
+            action = base_action or base_kind
+            kind = base_kind
+        else:
+            action = "send_private"
+            kind = "send_private"
+
+    if not action:
         return None
+    if _adapter is not None:
+        base_covered = (not base_action and action == "send_private") or _adapter.approvals.granted(action, args, host)
+        egress_covered = (not egress_target or egress_level == permissions.ALLOW
+                          or _adapter.approvals.granted("send_private", args, host))
+        if base_covered and egress_covered and action != "goal_plan":
+            return None
     # Acting in the user's name: hold the call as an approval card instead of running it. Calls
     # from outside a companion chat (scheduled jobs) are shown in the main companion chat.
-    chat_id = (_chat_for_session(str(session_id)) if session_id else None) or _home_chat()
+    chat_id = session_chat or _home_chat()
     if chat_id is None or _adapter is None:
         return {"action": "block", "message": "这个操作需要用户确认，但现在没法让用户确认，所以没有执行。"}
     facing = _adapter.facing_chat(chat_id)
@@ -171,11 +190,12 @@ def _home_chat() -> Optional[str]:
 
 def on_post_tool_call(tool_name: str = "", args: Any = None, result: Any = None, **kwargs: Any) -> None:
     error = kwargs.get("error_message") if kwargs.get("status") == "error" else None
+    session_id = kwargs.get("session_id")
+    session_chat = _chat_for_session(str(session_id)) if session_id else None
     if computer.is_browser_tool(tool_name) and kwargs.get("status") not in ("error", "blocked"):
-        session_id = kwargs.get("session_id")
-        computer.note_action(tool_name, args, _chat_for_session(str(session_id)) if session_id else None)
+        computer.note_action(tool_name, args, session_chat)
     if kwargs.get("status") not in ("error", "blocked"):
-        egress.note(kwargs.get("session_id"), tool_name)
+        egress.note(session_id, tool_name, chat_id=session_chat)
         # Images, videos and audio a generation tool made go into 创意.
         creations.on_generation_result(tool_name, args, result, _loop)
         _record_media(tool_name, args, result)
