@@ -5,19 +5,18 @@ companion's style, into web/public/icons/<name>.webp (transparent, 192px).
 
 The emoji each icon stands for is in web/src/companion/icons.ts.
 """
+from __future__ import annotations
+
 import importlib.util
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "hermes"))
-
-# The companion's drawing helpers, loaded on their own (importing the plugin package would start it).
-_spec = importlib.util.spec_from_file_location("companion_drawing", ROOT / "companion" / "modules" / "drawing.py")
-drawing = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(drawing)
-
 OUT = ROOT / "web" / "public" / "icons"
 
 SUBJECTS = {
@@ -50,24 +49,56 @@ SUBJECTS = {
     "memo": "a notepad with a pen",
 }
 
-STYLE = ("A single cute kawaii sticker-style app icon of {subject}. Flat illustration with soft cel shading, "
-         "warm palette (cream, soft orange, with one gentle accent color), chunky rounded shapes, "
-         "a thin warm dark-brown outline, small highlights, friendly and cozy, in the same style as a cute "
-         "orange tabby cat mascot. Centered, filling about 80% of the frame, on a plain pure white background. "
-         "No text, no letters, no border, no drop shadow on the background.")
+STYLE = (
+    "A single cute kawaii sticker-style app icon of {subject}. Flat illustration with soft cel shading, "
+    "warm palette (cream, soft orange, with one gentle accent color), chunky rounded shapes, "
+    "a thin warm dark-brown outline, small highlights, friendly and cozy, in the same style as a cute "
+    "orange tabby cat mascot. Centered, filling about 80% of the frame, on a plain pure white background. "
+    "No text, no letters, no border, no drop shadow on the background."
+)
+
+USAGE = f"""Usage: python tools/draw_icons.py [icon_name ...]
+
+Draws transparent 192x192 WebP sticker icons into web/public/icons/<name>.webp.
+Available names ({len(SUBJECTS)}): {", ".join(SUBJECTS)}
+"""
 
 
-def draw(name: str) -> str:
-    raw, why = drawing.generate(STYLE.format(subject=SUBJECTS[name]))
-    if raw is None:
-        return f"{name}: failed ({why[:120]})"
-    OUT.mkdir(parents=True, exist_ok=True)
-    drawing.cut_out(raw, 192).save(OUT / f"{name}.webp", "WEBP", quality=90)
-    return f"{name}: ok"
+def _load_drawing():
+    sys.path.insert(0, str(ROOT / "hermes"))
+    spec = importlib.util.spec_from_file_location("companion_drawing", ROOT / "companion" / "modules" / "drawing.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-if __name__ == "__main__":
-    names = sys.argv[1:] or list(SUBJECTS)
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "-h" in args or "--help" in args:
+        print(USAGE.rstrip())
+        return 0
+    names = args or list(SUBJECTS)
+    unknown = [n for n in names if n not in SUBJECTS]
+    if unknown:
+        print(f"Unknown icon name(s): {', '.join(unknown)}\n\n{USAGE.rstrip()}", file=sys.stderr)
+        return 1
+
+    drawing = _load_drawing()
+
+    def draw(name: str) -> str:
+        raw, why = drawing.generate(STYLE.format(subject=SUBJECTS[name]))
+        if raw is None:
+            return f"{name}: failed ({why[:120]})"
+        OUT.mkdir(parents=True, exist_ok=True)
+        drawing.cut_out(raw, 192).save(OUT / f"{name}.webp", "WEBP", quality=90)
+        return f"{name}: ok"
+
     with ThreadPoolExecutor(3) as pool:
         for line in pool.map(draw, names):
             print(line, flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
