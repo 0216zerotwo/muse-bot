@@ -1,5 +1,20 @@
-import { useLayoutEffect, useRef, useState } from "react";
-import { CalendarX, Check, CircleAlert, Globe, Mail, ShieldAlert, SquareTerminal, Target, Trash2, Upload, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  CalendarX,
+  Check,
+  CircleAlert,
+  Clock,
+  CreditCard,
+  Globe,
+  Mail,
+  Plug,
+  ShieldAlert,
+  SquareTerminal,
+  Target,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
 
 import type { ApprovalRecord, ApprovalScope } from "./companion-api";
 import {
@@ -48,14 +63,17 @@ function standingLabel(scope: ApprovalScope, subject: string): string {
 
 const DESTRUCTIVE: ReadonlySet<ApprovalAction> = new Set(["delete_emails", "delete_event"]);
 
-function ActionIcon({ action }: { action: ApprovalAction }) {
+function ActionIcon({ action, paying }: { action: ApprovalAction; paying?: boolean }) {
+  if (paying || action === "payment") return <CreditCard className="h-4 w-4" />;
   if (action === "delete_event") return <CalendarX className="h-4 w-4" />;
   if (action === "delete_emails") return <Trash2 className="h-4 w-4" />;
-  if (action === "browser_submit") return <Globe className="h-4 w-4" />;
+  if (action === "browser_submit" || action === "browse") return <Globe className="h-4 w-4" />;
   if (action === "browser_upload") return <Upload className="h-4 w-4" />;
   if (action === "run_command") return <SquareTerminal className="h-4 w-4" />;
   if (action === "goal_plan") return <Target className="h-4 w-4" />;
   if (action === "send_private") return <ShieldAlert className="h-4 w-4" />;
+  if (action === "schedule") return <Clock className="h-4 w-4" />;
+  if (action === "connector_read" || action === "connector_write") return <Plug className="h-4 w-4" />;
   return <Mail className="h-4 w-4" />;
 }
 
@@ -166,6 +184,16 @@ export function ApprovalCard({
   const [scope, setScope] = useState<ApprovalScope>("once");
   const pending = approval.status === "pending";
   const destructive = DESTRUCTIVE.has(action);
+  const paying = action === "payment" || Boolean(browser?.paying);
+  const expiresAtMs = typeof approval.expires_at_ms === "number" ? approval.expires_at_ms : null;
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!pending || expiresAtMs === null || nowMs >= expiresAtMs) return;
+    const delay = Math.min(Math.max(1_000, expiresAtMs - Date.now()), 30_000);
+    const timer = window.setTimeout(() => setNowMs(Date.now()), delay);
+    return () => window.clearTimeout(timer);
+  }, [pending, expiresAtMs, nowMs]);
+  const expired = pending && expiresAtMs !== null && nowMs >= expiresAtMs;
   const body = text(args.body);
   // Offer "展开全文" only when the clamped body actually hides text (wrapping included).
   const bodyRef = useRef<HTMLParagraphElement>(null);
@@ -196,11 +224,22 @@ export function ApprovalCard({
         aria-label={`${copy.title}${pending ? "，等你确认" : ""}`}
       >
         <header className="flex items-center gap-2">
-          <span className="c-primary grid h-8 w-8 place-items-center rounded-full" aria-hidden="true">
-            <ActionIcon action={action} />
+          <span
+            className={`grid h-8 w-8 place-items-center rounded-full ${paying ? "bg-amber-500 text-white" : "c-primary"}`}
+            aria-hidden="true"
+          >
+            <ActionIcon action={action} paying={paying} />
           </span>
           <span className="flex-1 text-[15px] font-semibold">{copy.title}</span>
-          {pending && <span className="c-muted text-[12px]">等你确认</span>}
+          {pending && (
+            <span className={expired ? "c-danger text-[12px] font-medium" : "c-muted text-[12px]"}>
+              {expired
+                ? "已超时失效"
+                : expiresAtMs !== null
+                  ? `${new Date(expiresAtMs).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} 前有效`
+                  : "等你确认"}
+            </span>
+          )}
         </header>
 
         {browser?.summary && <p className="mt-3 text-[15px] leading-6">{browser.summary}</p>}
@@ -216,8 +255,13 @@ export function ApprovalCard({
           )}
           {action === "email_command" && <Field label="协议" value={text(args.protocol).toUpperCase()} />}
           {action === "delete_event" && <Field label="日程" value={scalarText(args.event_id)} />}
+          {browser?.host && !browser?.summary && <Field label="网站" value={browser.host} />}
+          {(action === "browse" || action === "payment") && !browser?.summary && <Field label="网址" value={text(args.url)} />}
           {action === "browser_submit" && !browser && <Field label="点击" value={text(args.element)} />}
           {action === "browser_upload" && !browser && <Field label="文件" value={list(args.paths)} />}
+          {action === "schedule" && <Field label="任务" value={text(args.name) || text(args.message) || text(args.instruction)} />}
+          {action === "schedule" && <Field label="时间" value={text(args.schedule) || text(args.cron) || text(args.every)} />}
+          {(action === "connector_read" || action === "connector_write") && <Field label="操作" value={approval.tool_name} />}
           {action === "run_command" && <Field label="原因" value={text(args.reason)} />}
           {action === "goal_plan" && <Field label="目标" value={approval.context?.goal?.title ?? ""} />}
           {action === "goal_plan" && <Field label="原因" value={text(args.reason)} />}
@@ -276,27 +320,34 @@ export function ApprovalCard({
             <div className="flex flex-col gap-2">
               <button
                 type="button"
-                disabled={busy !== null}
+                disabled={busy !== null || expired}
                 onClick={() => decide("approve", "once")}
                 className={`min-h-[46px] w-full rounded-full text-[15px] font-semibold transition active:scale-[0.98] disabled:opacity-60 ${
-                  destructive ? "text-white" : "c-primary"
+                  destructive ? "text-white" : paying ? "bg-amber-600 text-white" : "c-primary"
                 }`}
                 style={destructive ? { background: "var(--c-danger-fill)" } : undefined}
               >
-                {busy === "approve" && scope === "once" ? `${copy.confirm}中…` : standing.length ? `${copy.confirm}，仅这次` : copy.confirm}
+                {expired
+                  ? "已超时失效"
+                  : busy === "approve" && scope === "once"
+                    ? `${copy.confirm}中…`
+                    : standing.length
+                      ? `${copy.confirm}，仅这次`
+                      : copy.confirm}
               </button>
-              {standing.map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  disabled={busy !== null}
-                  onClick={() => decide("approve", option)}
-                  className="c-pressable min-h-11 w-full truncate rounded-full px-4 text-[15px] font-medium transition active:scale-[0.98] disabled:opacity-60"
-                  style={{ background: "var(--c-fill)" }}
-                >
-                  {busy === "approve" && scope === option ? `${copy.confirm}中…` : standingLabel(option, subject)}
-                </button>
-              ))}
+              {!expired &&
+                standing.map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    disabled={busy !== null}
+                    onClick={() => decide("approve", option)}
+                    className="c-pressable min-h-11 w-full truncate rounded-full px-4 text-[15px] font-medium transition active:scale-[0.98] disabled:opacity-60"
+                    style={{ background: "var(--c-fill)" }}
+                  >
+                    {busy === "approve" && scope === option ? `${copy.confirm}中…` : standingLabel(option, subject)}
+                  </button>
+                ))}
               <button
                 type="button"
                 disabled={busy !== null}

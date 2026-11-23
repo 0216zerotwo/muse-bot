@@ -24,6 +24,8 @@ interface AndroidShell {
   attach?(): void;
   /** A file of the companion's into the system share sheet. */
   shareFile?(url: string, name: string): void;
+  /** Open a file of the companion's in another Android app (VIEW intent). */
+  openFile?(url: string, name: string): void;
   /** A PDF's first page, answered as a companion:pdf-preview event ({ id, image }). */
   pdfPreview?(url: string, id: string): void;
 }

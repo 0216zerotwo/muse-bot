@@ -3,6 +3,7 @@ import { Menu, Settings2, SlidersHorizontal, X } from "lucide-react";
 
 import { useNanobotStream, type SendAttachment } from "@/hooks/useNanobotStream";
 import { useSessionHistory } from "@/hooks/useSessions";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import type { StreamError } from "@/lib/nanobot-client";
 import type { ChatSummary, ConnectionStatus, UIMessage } from "@/lib/types";
 import { parseQuotedUserMessage } from "@/lib/user-message-quote";
@@ -12,6 +13,7 @@ import { ChatThread, EmptyThread } from "./ChatThread";
 import {
   decideApproval,
   deleteMessage,
+  fetchAllApprovals,
   fetchApprovals,
   changeFeed,
   fetchComputer,
@@ -64,6 +66,11 @@ const FEED_WAIT_MS = 5 * 60_000;
 const STICKY_BOTTOM_PX = 160;
 /** Reload history after the app was in the background this long (iOS drops the socket). */
 const RESUME_REFRESH_MS = 15_000;
+const HOME_STARTERS = [
+  { label: "帮我理一下今天要做的事", prompt: "帮我理一下今天最重要的几件事，排个轻重缓急。" },
+  { label: "看看最近有什么值得关注的新动态", prompt: "帮我看看最近我关心的领域有什么值得留意的新消息。" },
+  { label: "帮我拆解一个近期目标", prompt: "我想定一个近期目标，你先问我几个关键问题，再帮我拆成可执行的步骤。" },
+] as const;
 
 function useConnectionStatus(): ConnectionStatus {
   const { client } = useClient();
@@ -262,11 +269,17 @@ export function LiveScreen({
 
   /* Approval cards: the server's records are the source of truth for what will run. */
   const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
+  const [allApprovals, setAllApprovals] = useState<ApprovalRecord[]>([]);
   const loadApprovals = useCallback(() => {
     fetchApprovals(token, sessionKey)
       .then(setApprovals)
       .catch(() => {
         // Cards stay as last loaded; the next turn or reload retries.
+      });
+    fetchAllApprovals(token)
+      .then(setAllApprovals)
+      .catch(() => {
+        // Older servers or transient errors: session approvals still work.
       });
   }, [sessionKey, token]);
   // A stable key: refetch when the companion finishes asking for a new approval.
@@ -290,6 +303,7 @@ export function LiveScreen({
       try {
         const updated = await decideApproval(client, approval.id, decision, scope);
         setApprovals((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+        setAllApprovals((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       } catch (error) {
         loadApprovals(); // e.g. decided on another device; show the real state.
         throw error;
@@ -297,6 +311,15 @@ export function LiveScreen({
     },
     [client, loadApprovals],
   );
+  const mergedApprovals = useMemo(() => {
+    const byId = new Map<string, ApprovalRecord>();
+    for (const item of approvals) byId.set(item.id, item);
+    for (const item of allApprovals) {
+      const prev = byId.get(item.id);
+      if (!prev || prev.status !== item.status) byId.set(item.id, item);
+    }
+    return Array.from(byId.values());
+  }, [approvals, allApprovals]);
 
   /* Which model answered each turn, when the router chose it. */
   const [routes, setRoutes] = useState<ReadonlyMap<string, RoutingDecision>>(new Map());
@@ -343,10 +366,13 @@ export function LiveScreen({
     const timer = setInterval(load, statusOpen || isStreaming ? 3_000 : 15_000);
     return () => clearInterval(timer);
   }, [ready, token, statusOpen, isStreaming]);
+  useEffect(() => {
+    if (ready && statusOpen) loadApprovals();
+  }, [ready, statusOpen, loadApprovals]);
   const handoff = computer?.handoff ?? null;
-  const pendingApprovals = approvals.filter((approval) => approval.status === "pending").length;
+  const pendingApprovals = mergedApprovals.filter((approval) => approval.status === "pending").length;
   const asking = statusOpen ? undefined : approvals.find((approval) => approval.status === "pending" && !laterIds.has(approval.id));
-  const planProposals = approvals.filter((approval) => approval.status === "pending" && approval.action === "goal_plan").length;
+  const planProposals = mergedApprovals.filter((approval) => approval.status === "pending" && approval.action === "goal_plan").length;
 
   /* Layout: content scrolls beneath the floating header and dock. */
   const headerRef = useRef<HTMLElement>(null);
@@ -419,7 +445,7 @@ export function LiveScreen({
       if (action === "quote") {
         setQuote(words.slice(0, 300) || (role === "user" ? "（我发的）" : "（它的回复）"));
       } else if (action === "copy") {
-        void navigator.clipboard?.writeText(words).catch(() => undefined);
+        void copyTextToClipboard(words);
       } else if (action === "speak") {
         speakAloud(message.content);
       } else if (action === "regenerate") {
@@ -515,7 +541,7 @@ export function LiveScreen({
   const pet = usePetMood({
     connected,
     activity: connected ? (activity?.kind ?? null) : null,
-    approvals,
+    approvals: mergedApprovals,
     failed: !!streamError,
   });
   const status = !connected
@@ -554,6 +580,8 @@ export function LiveScreen({
               avatar={companion.avatar}
               face={sideFace}
               hint={side?.startsWith("群聊") ? "说一件事，大家一起做。@ 谁就交给谁，不 @ 就由我来分派。" : undefined}
+              starters={!side ? HOME_STARTERS : undefined}
+              onSend={!side ? (text) => submit(text) : undefined}
             />
           ) : (
             <ChatThread
@@ -609,7 +637,7 @@ export function LiveScreen({
               <GoalsScreen
                 active={tab === "goals"}
                 name={companion.name}
-                approvals={approvals}
+                approvals={mergedApprovals}
                 onDecide={decide}
                 onSend={sendFromTab}
                 working={isStreaming ? { label: activity?.label ?? null, asked: lastAsked } : null}
@@ -696,6 +724,7 @@ export function LiveScreen({
               streaming={isStreaming}
               connected={connected && ready}
               transcribeAudio={transcribeAudio}
+              voiceEnabled={companion.capabilities?.stt !== false}
               onFocusChange={setComposerFocused}
               quote={quote}
               onClearQuote={() => setQuote(null)}
@@ -752,7 +781,8 @@ export function LiveScreen({
           stop();
           setStatusOpen(false);
         }}
-        approvals={approvals}
+        approvals={mergedApprovals}
+        sessionKey={sessionKey}
         history={messages}
         computer={computer}
         onDecide={decide}

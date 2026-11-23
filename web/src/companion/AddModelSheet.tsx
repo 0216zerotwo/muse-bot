@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Check,
@@ -12,6 +12,7 @@ import {
   Sparkles,
 } from "lucide-react";
 
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { useClient } from "@/providers/ClientProvider";
 
 import {
@@ -268,9 +269,7 @@ function SubscriptionSignIn({
             <button
               type="button"
               onClick={() =>
-                void navigator.clipboard
-                  ?.writeText(login.user_code)
-                  .then(() => setCopied(true))
+                void copyTextToClipboard(login.user_code).then((ok) => ok && setCopied(true))
               }
               className="c-pressable grid h-10 w-10 place-items-center rounded-full"
               style={{ background: "var(--c-fill)" }}
@@ -365,9 +364,11 @@ export function AddModelSheet({
   const [baseUrl, setBaseUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const vendorReqSeq = useRef(0);
 
   useEffect(() => {
     if (!open) return;
+    vendorReqSeq.current += 1;
     setVendor(null);
     setError(null);
     fetchModelCatalog(token)
@@ -376,8 +377,10 @@ export function AddModelSheet({
   }, [open, token]);
 
   const choose = (next: ModelVendor) => {
+    vendorReqSeq.current += 1;
     setVendor(next);
     setModels(null);
+    setChecking(false);
     setShowAll(false);
     setPicked("");
     setOwnId("");
@@ -392,6 +395,7 @@ export function AddModelSheet({
   };
 
   const loadModels = (next: ModelVendor) => {
+    const seq = ++vendorReqSeq.current;
     if (next.login && !next.has_key) {
       setModels([]);
       return;
@@ -400,12 +404,14 @@ export function AddModelSheet({
     setCheckedAt(null);
     fetchVendorModels(client, next.id, kind)
       .then((body) => {
+        if (seq !== vendorReqSeq.current) return;
         setModels(body.models);
         setCheckedAt(body.checked ?? null);
         setCanCheck(!!body.can_check);
         setPicked(body.models.find((m) => m.recommended)?.id ?? "");
       })
       .catch((e) => {
+        if (seq !== vendorReqSeq.current) return;
         setModels([]);
         setError(e instanceof Error ? e.message : String(e));
       });
@@ -414,10 +420,12 @@ export function AddModelSheet({
   /** 检测: read the company's platform now for its current model IDs and prices. */
   const checkNow = () => {
     if (!vendor || checking) return;
+    const seq = ++vendorReqSeq.current;
     setChecking(true);
     setError(null);
     checkVendorModels(client, vendor.id, kind)
       .then((body) => {
+        if (seq !== vendorReqSeq.current) return;
         setModels(body.models);
         setCheckedAt(body.checked);
         // Keep the pick when the platform still has it; else its newest.
@@ -425,8 +433,13 @@ export function AddModelSheet({
           current === "__own" || body.models.some((m) => m.id === current) ? current : body.models.find((m) => m.recommended)?.id ?? "",
         );
       })
-      .catch((e) => setError(`检测没成功：${e instanceof Error ? e.message : String(e)}`))
-      .finally(() => setChecking(false));
+      .catch((e) => {
+        if (seq !== vendorReqSeq.current) return;
+        setError(`检测没成功：${e instanceof Error ? e.message : String(e)}`);
+      })
+      .finally(() => {
+        if (seq === vendorReqSeq.current) setChecking(false);
+      });
   };
 
   const offered = useMemo(

@@ -42,6 +42,7 @@
 
   var lastHeight = 0;
   var report = function () {
+    if (typeof document === "undefined" || !document.documentElement) return;
     var height = Math.ceil(document.documentElement.scrollHeight);
     if (Math.abs(height - lastHeight) > 2) {
       lastHeight = height;

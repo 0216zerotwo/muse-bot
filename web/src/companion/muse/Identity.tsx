@@ -3,8 +3,8 @@
  * and the 身份与记忆 pane of the status sheet — SOUL.md and MEMORY.md, edited in place. The pen and
  * the two file cards follow nanoMuse's MuseSheet (vendor/nanomuse-web, GPL-3.0-or-later).
  */
-import { Check, Loader2, RefreshCw, Undo2 } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Check, Loader2, RefreshCw, Sparkles, Undo2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 import { useClient } from "@/providers/ClientProvider";
@@ -12,6 +12,7 @@ import { useClient } from "@/providers/ClientProvider";
 import {
   fetchMemory,
   learnMemory,
+  tidyMemory,
   fetchMemoryDoc,
   fetchSoul,
   saveMemoryDoc,
@@ -153,6 +154,9 @@ export function SoulMemoryPane({ identity }: { identity?: ReactNode } = {}) {
   const [changes, setChanges] = useState<MemoryChange[]>([]);
   const [learnedAt, setLearnedAt] = useState<number | null>(null);
   const [learning, setLearning] = useState(false);
+  const [tidying, setTidying] = useState(false);
+  const [pendingSwitch, setPendingSwitch] = useState<Doc | "close" | null>(null);
+  const openSeq = useRef(0);
 
   const loadChanges = useCallback(() => {
     fetchMemory(token)
@@ -183,22 +187,59 @@ export function SoulMemoryPane({ identity }: { identity?: ReactNode } = {}) {
     }
   };
 
-  const openDoc = async (doc: Doc) => {
-    if (open === doc) {
+  /* 整理一下: deduplicate and consolidate memory entries via tidyMemory. */
+  const tidyNow = async () => {
+    setTidying(true);
+    setNote(null);
+    try {
+      const view = await tidyMemory(client);
+      setChanges(view.changes ?? []);
+      const body = await fetchMemoryDoc(token);
+      setText(body.text);
+      setSaved(body.text);
+      const changed = view.tidied?.changed ?? 0;
+      setNote({ ok: true, text: changed ? `整理了 ${changed} 处` : "已经很整齐了" });
+    } catch (e) {
+      setNote({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setTidying(false);
+    }
+  };
+
+  const dirty = text !== saved;
+
+  const loadDoc = async (doc: Doc | "close") => {
+    setPendingSwitch(null);
+    const seq = ++openSeq.current;
+    if (doc === "close") {
       setOpen(null);
+      setText(saved);
+      setNote(null);
       return;
     }
     setOpen(doc);
     setNote(null);
     setText("");
+    setSaved("");
     try {
       const body = doc === "soul" ? await fetchSoul(token) : await fetchMemoryDoc(token);
+      if (seq !== openSeq.current) return;
       setText(body.text);
       setSaved(body.text);
       if (doc === "memory") loadChanges();
     } catch (e) {
+      if (seq !== openSeq.current) return;
       setNote({ ok: false, text: e instanceof Error ? e.message : String(e) });
     }
+  };
+
+  const openDoc = async (doc: Doc) => {
+    const target: Doc | "close" = open === doc ? "close" : doc;
+    if (open && dirty) {
+      setPendingSwitch(target);
+      return;
+    }
+    await loadDoc(target);
   };
 
   const save = async () => {
@@ -209,6 +250,7 @@ export function SoulMemoryPane({ identity }: { identity?: ReactNode } = {}) {
       const body = open === "soul" ? await saveSoul(client, text) : await saveMemoryDoc(client, text);
       setText(body.text);
       setSaved(body.text);
+      setPendingSwitch(null);
       setNote({ ok: true, text: open === "soul" ? "已保存，下次对话生效" : "已保存" });
     } catch (e) {
       setNote({ ok: false, text: e instanceof Error ? e.message : String(e) });
@@ -229,7 +271,6 @@ export function SoulMemoryPane({ identity }: { identity?: ReactNode } = {}) {
     }
   };
 
-  const dirty = text !== saved;
   return (
     <div className="pb-2">
       {identity}
@@ -254,13 +295,41 @@ export function SoulMemoryPane({ identity }: { identity?: ReactNode } = {}) {
 
       {open && (
         <div className="om-rise mt-4">
+          {pendingSwitch && dirty && (
+            <div className="mb-3 flex items-center gap-2 rounded-2xl border border-om-border bg-om-surface-2 px-3.5 py-2.5 text-[13px]" role="alert">
+              <span className="min-w-0 flex-1">还有没保存的修改，要放弃吗？</span>
+              <button
+                type="button"
+                onClick={() => setPendingSwitch(null)}
+                className="rounded-full px-3 py-1 font-medium text-om-muted"
+              >
+                继续编辑
+              </button>
+              <button
+                type="button"
+                onClick={() => void loadDoc(pendingSwitch)}
+                className="rounded-full bg-om-danger px-3 py-1 font-semibold text-white"
+              >
+                放弃修改
+              </button>
+            </div>
+          )}
           <p className="mb-2 text-[12.5px] leading-snug text-om-muted">{DOCS[open].hint}</p>
           {open === "memory" && (
-            <div className="mb-2 flex items-center gap-2 text-[12.5px] text-om-muted">
+            <div className="mb-2 flex flex-wrap items-center gap-2 text-[12.5px] text-om-muted">
               <span className="min-w-0 flex-1">{learnedAt ? `上次更新：${dayLabel(learnedAt * 1000)}` : "还没自己更新过"}</span>
               <button
                 type="button"
-                disabled={learning || dirty}
+                disabled={learning || tidying || dirty}
+                onClick={() => void tidyNow()}
+                className="inline-flex items-center gap-1 rounded-full bg-om-surface-2 px-3 py-1.5 font-medium text-om-fg disabled:opacity-40"
+              >
+                {tidying ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+                {tidying ? "整理中…" : "整理一下"}
+              </button>
+              <button
+                type="button"
+                disabled={learning || tidying || dirty}
                 onClick={() => void learnNow()}
                 className="inline-flex items-center gap-1 rounded-full bg-om-surface-2 px-3 py-1.5 font-medium text-om-fg disabled:opacity-40"
               >

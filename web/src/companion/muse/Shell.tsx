@@ -8,6 +8,7 @@ import { ClipboardList, Fingerprint, Globe, Hand, LayoutGrid, Lightbulb, Loader2
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { fetchAutomations } from "@/lib/api";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import type { SessionAutomationJob, UIMessage } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useClient } from "@/providers/ClientProvider";
@@ -135,6 +136,7 @@ export function StatusSheet({
   working,
   onStop,
   approvals,
+  sessionKey,
   history,
   computer,
   onDecide,
@@ -149,6 +151,7 @@ export function StatusSheet({
   working: boolean;
   onStop: () => void;
   approvals: ApprovalRecord[];
+  sessionKey?: string;
   history: UIMessage[];
   /** The browser it works in (polled by the screen). */
   computer: ComputerStatus | null;
@@ -238,7 +241,14 @@ export function StatusSheet({
           {pending.length === 0 && !computer?.handoff ? (
             <p className="text-center text-[13.5px] text-om-muted">没有等你确认的事。</p>
           ) : (
-            pending.map((approval) => <ApprovalCard key={approval.id} approval={approval} onDecide={onDecide} />)
+            pending.map((approval) => (
+              <div key={approval.id} className="flex flex-col gap-1">
+                {sessionKey && approval.session_key && approval.session_key !== sessionKey && (
+                  <span className="px-1 text-[12px] text-om-muted">来自后台任务</span>
+                )}
+                <ApprovalCard approval={approval} onDecide={onDecide} />
+              </div>
+            ))
           )}
         </div>
       )}
@@ -298,7 +308,7 @@ export function TriggerList({ name, owner }: { name: string; owner?: string }) {
     changeTrigger(client, id, action).then((all) => setTriggers(mine(all))).catch(() => undefined);
   const copy = (trigger: Trigger) => {
     if (!trigger.hook_url) return;
-    void navigator.clipboard?.writeText(trigger.hook_url).then(() => setCopied(trigger.id));
+    void copyTextToClipboard(trigger.hook_url).then((ok) => ok && setCopied(trigger.id));
   };
   return (
     <>

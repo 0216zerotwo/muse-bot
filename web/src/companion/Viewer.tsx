@@ -5,7 +5,7 @@ import { MarkdownText } from "@/components/MarkdownText";
 
 import { androidShell } from "./android-shell";
 import type { CreationKind } from "./companion-api";
-import { useBackKey } from "./Screen";
+import { useBackKey, useDialogFocus } from "./Screen";
 
 /** Something to look at full screen: a file in 创意 or media from the chat. */
 export interface ViewerItem {
@@ -90,8 +90,10 @@ export function Viewer({
   const [zoomed, setZoomed] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
   const item = items[Math.min(index, items.length - 1)];
   useBackKey(onClose);
+  useDialogFocus(panelRef);
 
   useEffect(() => {
     setZoomed(false);
@@ -156,10 +158,12 @@ export function Viewer({
 
   return (
     <div
+      ref={panelRef}
+      tabIndex={-1}
       role="dialog"
       aria-modal="true"
       aria-label={item.title}
-      className="c-screen fixed inset-0 z-50 flex flex-col"
+      className="c-screen fixed inset-0 z-50 flex flex-col outline-none"
       style={dark ? { background: "#000", color: "#fff" } : { background: "var(--c-bg)", color: "var(--c-text)" }}
     >
       <header className="flex min-h-14 shrink-0 items-center gap-1 px-2" style={{ paddingTop: "env(safe-area-inset-top)" }}>
@@ -360,6 +364,13 @@ function DocumentBody({ item }: { item: ViewerItem }) {
         href={item.url}
         target="_blank"
         rel="noreferrer"
+        onClick={(event) => {
+          const android = androidShell();
+          if (android?.openFile) {
+            event.preventDefault();
+            android.openFile(new URL(item.url, window.location.href).href, item.name);
+          }
+        }}
         className="c-card c-pressable inline-flex min-h-11 items-center gap-2 rounded-full px-4 text-[15px]"
       >
         <ExternalLink className="h-4 w-4" aria-hidden="true" />

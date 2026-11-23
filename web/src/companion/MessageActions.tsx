@@ -35,8 +35,18 @@ export function Pressable({
     const away = (event: PointerEvent) => {
       if (!box.current?.contains(event.target as Node)) setOpen(false);
     };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+    };
     document.addEventListener("pointerdown", away);
-    return () => document.removeEventListener("pointerdown", away);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("pointerdown", away);
+      window.removeEventListener("keydown", onKey, true);
+    };
   }, [open]);
 
   if (!onAction) return <>{children}</>;
@@ -52,7 +62,14 @@ export function Pressable({
   return (
     <div
       ref={box}
-      className="flex flex-col gap-1.5"
+      tabIndex={0}
+      className="flex flex-col gap-1.5 rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-[var(--c-primary)]"
+      onKeyDown={(event) => {
+        if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+          event.preventDefault();
+          setOpen(true);
+        }
+      }}
       onPointerDown={(event) => {
         if (event.button !== 0) return;
         press.current = {

@@ -24,13 +24,39 @@ function hello(now = new Date()): string {
   return hour < 5 ? "这么晚还没睡？" : hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好";
 }
 
-export function EmptyThread({ avatar, face, hint }: { avatar: string; face?: ReactNode; hint?: string }) {
+export function EmptyThread({
+  avatar,
+  face,
+  hint,
+  starters,
+  onSend,
+}: {
+  avatar: string;
+  face?: ReactNode;
+  hint?: string;
+  starters?: ReadonlyArray<{ label: string; prompt: string }>;
+  onSend?: (prompt: string) => void;
+}) {
   const petPx = usePetScale();
   return (
     <div className="c-rise flex min-h-full flex-col items-center justify-center px-6 pb-8 text-center">
       {face ?? <PetStage value={avatar} size={petPx(120)} />}
       <h2 className="mt-4 text-[22px] font-semibold">{hello()}</h2>
       {hint && <p className="c-muted mt-1.5 max-w-xs text-[14.5px] leading-relaxed">{hint}</p>}
+      {starters && starters.length > 0 && onSend && (
+        <div className="mt-5 flex max-w-md flex-wrap justify-center gap-2">
+          {starters.map((starter) => (
+            <button
+              key={starter.label}
+              type="button"
+              onClick={() => onSend(starter.prompt)}
+              className="c-card c-pressable rounded-full px-3.5 py-2 text-[13.5px] leading-snug"
+            >
+              {starter.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

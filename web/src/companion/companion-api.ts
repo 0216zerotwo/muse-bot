@@ -27,6 +27,12 @@ export interface CompanionState {
   pet_size?: "small" | "medium" | "large";
   /** The newest 动态 post read (ms): the red dot counts only newer ones. */
   feed_seen_at?: number;
+  /** Optional server runtime capabilities (backward-compatible when omitted). */
+  capabilities?: {
+    stt?: boolean;
+    push?: boolean;
+    browser?: boolean;
+  };
   updated_at: string | null;
 }
 
@@ -80,6 +86,8 @@ export interface ApprovalRecord {
   status: "pending" | "executed" | "failed" | "rejected";
   created_at_ms: number;
   decided_at_ms: number | null;
+  /** Optional server-side approval timeout epoch ms (e.g. held exec commands). */
+  expires_at_ms?: number | null;
   result: string | null;
   /** What sort of action it is (``APPROVAL_ACTIONS`` on the server); can depend on the arguments. */
   action?: string;
@@ -248,6 +256,17 @@ export async function revokeApprovalGrant(client: NanobotClient, key?: string): 
 export async function fetchApprovals(token: string, sessionKey: string): Promise<ApprovalRecord[]> {
   const res = await fetchWithTimeout(
     `/api/webui/approvals?session_key=${encodeURIComponent(sessionKey)}`,
+    { headers: { Authorization: `Bearer ${token}` }, credentials: "same-origin" },
+    20_000,
+  );
+  if (!res.ok) throw new Error(`approvals failed: HTTP ${res.status}`);
+  return ((await res.json()) as { approvals: ApprovalRecord[] }).approvals;
+}
+
+/** Global approvals across main, helper, browser_desk, and scheduled sessions. */
+export async function fetchAllApprovals(token: string): Promise<ApprovalRecord[]> {
+  const res = await fetchWithTimeout(
+    "/api/webui/approvals?all=1",
     { headers: { Authorization: `Bearer ${token}` }, credentials: "same-origin" },
     20_000,
   );

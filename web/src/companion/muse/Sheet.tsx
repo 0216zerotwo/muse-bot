@@ -5,9 +5,10 @@
  * it (useSheetDrag), or tap outside it.
  */
 import { X } from "lucide-react";
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { useId, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
+import { useBackKey, useDialogFocus } from "../Screen";
 import { useSheetDrag } from "../sheetDrag";
 
 export function MuseSheet({
@@ -25,17 +26,9 @@ export function MuseSheet({
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  const close = useRef(onClose);
-  close.current = onClose;
   useSheetDrag(panel, onClose, open);
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close.current();
-    window.addEventListener("keydown", onKey);
-    // Once, on opening: refocusing on every render would steal focus from what is inside.
-    panel.current?.focus();
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open]);
+  useBackKey(onClose, open);
+  useDialogFocus(panel, open);
 
   if (!open) return null;
   return createPortal(

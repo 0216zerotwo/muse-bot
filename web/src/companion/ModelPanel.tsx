@@ -198,9 +198,9 @@ function MediaList({
                   .join(" · ")
               }
               trailing={
-                // A subscription (会员账号登录) has no price list to read: no 检测价格 for it.
-                !model.price && model.vendor && vendor && !vendor.login ? (
-                  <span className="flex shrink-0 items-center gap-2">
+                <span className="flex shrink-0 items-center gap-2">
+                  {/* A subscription (会员账号登录) has no price list to read: no 检测价格 for it. */}
+                  {!model.price && model.vendor && vendor && !vendor.login && (
                     <button
                       type="button"
                       disabled={busy}
@@ -213,23 +213,27 @@ function MediaList({
                     >
                       {busy ? "检测中…" : "检测价格"}
                     </button>
-                    {inUse && <Check className="h-4 w-4 shrink-0" style={{ color: "var(--c-primary)" }} aria-label="正在用" />}
-                  </span>
-                ) : inUse ? (
-                  <Check className="h-4 w-4 shrink-0" style={{ color: "var(--c-primary)" }} aria-label="正在用" />
-                ) : (
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      if (confirm === model.name) onRemove(model.name);
-                      else setConfirm(model.name);
-                    }}
-                    className="c-danger shrink-0 px-1 text-[13px]"
-                  >
-                    {confirm === model.name ? "确认删除" : "删除"}
-                  </button>
-                )
+                  )}
+                  {inUse && <Check className="h-4 w-4 shrink-0" style={{ color: "var(--c-primary)" }} aria-label="正在用" />}
+                  {(!inUse || models.length === 1) && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (confirm === model.name) {
+                          setConfirm(null);
+                          onRemove(model.name);
+                        } else {
+                          setConfirm(model.name);
+                        }
+                      }}
+                      className="c-danger shrink-0 px-1 text-[13px] disabled:opacity-50"
+                    >
+                      {confirm === model.name ? "确认删除" : "删除"}
+                    </button>
+                  )}
+                </span>
               }
               onSelect={busy || inUse ? undefined : () => onUse(model.name)}
             />
@@ -275,6 +279,22 @@ export function ModelPanel({ active, onOpenModel }: { active: boolean; onOpenMod
       />
 
       {kind === "text" ? (
+        names.length === 0 ? (
+          <div className="c-card flex flex-col items-center rounded-[22px] px-6 py-8 text-center">
+            <span className="grid h-12 w-12 place-items-center rounded-2xl" style={{ background: "var(--c-fill)" }}>
+              <Sparkles className="h-6 w-6" />
+            </span>
+            <p className="mt-3 text-[16px] font-semibold">还没有对话模型</p>
+            <p className="c-muted mt-1 text-[13.5px]">添加一个对话模型（填 API key 或用会员账号登录），伙伴就能开始陪你聊天做事。</p>
+            <button
+              type="button"
+              onClick={() => setSheet("add")}
+              className="c-primary mt-4 min-h-11 rounded-full px-6 text-[15px] font-semibold"
+            >
+              添加对话模型
+            </button>
+          </div>
+        ) : (
         <>
           <section className="flex flex-col gap-1.5">
             <MenuGroup
@@ -382,6 +402,7 @@ export function ModelPanel({ active, onOpenModel }: { active: boolean; onOpenMod
             </MenuGroup>
           </section>
         </>
+        )
       ) : (
         <MediaList
           kind={kind}

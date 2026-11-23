@@ -1,8 +1,4 @@
-import { useState } from "react";
-import { Brain } from "lucide-react";
-
 import type { CompanionChanges, CompanionState, CompanionTone } from "./companion-api";
-import { MenuGroup, MenuRow } from "./Menu";
 
 /** Same keys as ``TONES`` on the server; the sample shows how a reply would sound. */
 export const TONE_OPTIONS: { key: CompanionTone; label: string; sample: string }[] = [
@@ -117,56 +113,5 @@ export function PersonalityFields({ draft, onChange, showNote = true }: DraftPro
         </label>
       )}
     </>
-  );
-}
-
-/**
- * 身份, like Muse's Identity screen: what it is called, how it looks and talks,
- * and what it remembers about the user.
- */
-export function IdentityPanel({
-  companion,
-  onSave,
-  onOpenMemory,
-}: {
-  companion: CompanionState;
-  onSave: (changes: CompanionChanges) => Promise<void>;
-  onOpenMemory: () => void;
-}) {
-  const [draft, setDraft] = useState(() => personaDraft(companion));
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const dirty = JSON.stringify(personaChanges(draft)) !== JSON.stringify(personaChanges(personaDraft(companion)));
-
-  return (
-    <form
-      className="flex flex-col gap-5"
-      onSubmit={async (event) => {
-        event.preventDefault();
-        if (!draft.name.trim()) return;
-        setSaving(true);
-        try {
-          await onSave(personaChanges(draft));
-        } catch (e) {
-          setError(e instanceof Error ? e.message : String(e));
-        } finally {
-          setSaving(false);
-        }
-      }}
-    >
-      <NameAndLookFields draft={draft} onChange={setDraft} />
-      <PersonalityFields draft={draft} onChange={setDraft} />
-      <MenuGroup>
-        <MenuRow icon={<Brain className="h-4 w-4" />} label="它记得的事" onSelect={onOpenMemory} />
-      </MenuGroup>
-      {error && <p className="c-danger text-sm">{error}</p>}
-      <button
-        type="submit"
-        disabled={!draft.name.trim() || saving || !dirty}
-        className="c-primary min-h-12 rounded-full text-[16px] font-semibold disabled:opacity-50"
-      >
-        {saving ? "保存中…" : "保存"}
-      </button>
-    </form>
   );
 }

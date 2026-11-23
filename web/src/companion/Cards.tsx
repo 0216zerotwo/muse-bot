@@ -20,6 +20,7 @@ import {
 import { ConnectCard } from "./ConnectCard";
 import { CredentialCard } from "./CredentialCard";
 import { formMessage, type Card, type CardButton, type FormField } from "./replyCards";
+import { useBackKey } from "./Screen";
 
 /** Taps send a message while the card is the latest thing it said; older cards only show. */
 type Send = ((text: string) => void) | undefined;
@@ -800,6 +801,7 @@ function SandboxFrame({
   const lastSendAt = useRef(0);
   const [height, setHeight] = useState(fixedHeight ?? 240);
   const [expanded, setExpanded] = useState(false);
+  useBackKey(() => setExpanded(false), expanded);
   const [srcDoc, setSrcDoc] = useState<string | undefined>(undefined);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -868,7 +870,7 @@ function SandboxFrame({
 
   if (expanded) {
     return createPortal(
-      <div className="companion fixed inset-0 z-50 flex flex-col" style={{ background: "var(--c-bg)" }} role="dialog" aria-label={title}>
+      <div data-sheet className="companion fixed inset-0 z-50 flex flex-col" style={{ background: "var(--c-bg)" }} role="dialog" aria-modal="true" aria-label={title}>
         <header className="flex items-center gap-2 px-3 pb-1 pt-[max(env(safe-area-inset-top),12px)]">
           <span className="min-w-0 flex-1 truncate text-[15px] font-semibold">{title}</span>
           <button
