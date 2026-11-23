@@ -16,6 +16,7 @@ import { deriveWsUrl } from "@/lib/bootstrap";
 import { useClient } from "@/providers/ClientProvider";
 
 import type { ComputerStatus, TaughtStep } from "../companion-api";
+import { useBackKey } from "../Screen";
 
 type Frame = { data: string; w: number; h: number };
 
@@ -250,13 +251,7 @@ export function BrowserFullscreen({
     send({ type: "close" });
     onClose();
   };
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !typing) leave();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [leave, typing]);
+  useBackKey(leave, !typing);
 
   const point = (event: React.PointerEvent<HTMLImageElement>) => {
     const box = event.currentTarget.getBoundingClientRect();

@@ -37,6 +37,17 @@ function unsupportedReason(): string | null {
   return null;
 }
 
+const SW_READY_TIMEOUT_MS = 4_000;
+
+function serviceWorkerReady(timeoutMs = SW_READY_TIMEOUT_MS): Promise<ServiceWorkerRegistration> {
+  return Promise.race([
+    navigator.serviceWorker.ready,
+    new Promise<never>((_, reject) => {
+      window.setTimeout(() => reject(new Error("后台通知服务未就绪，刷新页面后再试")), timeoutMs);
+    }),
+  ]);
+}
+
 /** Phone notifications for this device: whether they are on, and turning them on or off. */
 export function useNotifications() {
   const { client, token } = useClient();
@@ -49,13 +60,13 @@ export function useNotifications() {
     const reason = unsupportedReason();
     if (reason) return setStatus({ kind: "unsupported", reason });
     if (Notification.permission === "denied") return setStatus({ kind: "denied" });
-    const registration = await navigator.serviceWorker.ready;
+    const registration = await serviceWorkerReady();
     const subscription = await registration.pushManager.getSubscription();
     setStatus({ kind: subscription && Notification.permission === "granted" ? "on" : "off" });
   }, []);
 
   useEffect(() => {
-    void refresh().catch((e: unknown) => setStatus({ kind: "error", message: String(e) }));
+    void refresh().catch((e: unknown) => setStatus({ kind: "error", message: e instanceof Error ? e.message : String(e) }));
   }, [refresh]);
 
   const toggle = async () => {
@@ -65,7 +76,7 @@ export function useNotifications() {
       return void refresh();
     }
     try {
-      const registration = await navigator.serviceWorker.ready;
+      const registration = await serviceWorkerReady();
       const existing = await registration.pushManager.getSubscription();
       if (status.kind === "on" && existing) {
         setStatus({ kind: "busy", label: "正在关闭…" });

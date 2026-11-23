@@ -294,7 +294,7 @@ export function GoalsScreen({
           }
         }}
         onRemove={async () => {
-          if (!goal || !window.confirm(`删除「${goal.title}」？`)) return;
+          if (!goal) return;
           try {
             setGoals(await changeGoal(client, goal.id, "remove"));
             setSelected(null);
@@ -417,14 +417,18 @@ function ProposalCard({
   onDecide: (approval: ApprovalRecord, decision: "approve" | "reject") => Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const goal = approval.context?.goal;
   const steps = Array.isArray(approval.arguments.steps) ? approval.arguments.steps.filter((s): s is string => typeof s === "string") : [];
   const reason = typeof approval.arguments.reason === "string" ? approval.arguments.reason : "";
   const kept = goal?.steps.filter((s) => s.status === "done").length ?? 0;
   const act = async (accept: boolean) => {
     setBusy(true);
+    setError(null);
     try {
       await onDecide(approval, accept ? "approve" : "reject");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -452,6 +456,11 @@ function ProposalCard({
           用{name}的计划
         </button>
       </div>
+      {error && (
+        <p className="mt-2 text-[12.5px] text-om-danger" role="alert">
+          {error}
+        </p>
+      )}
     </div>
   );
 }
@@ -591,9 +600,16 @@ function GoalDetail({
   const [editing, setEditing] = useState(false);
   const [watching, setWatching] = useState(false);
   const [allLog, setAllLog] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const log = [...(goal?.log ?? [])].reverse();
   const due = goal ? dueLabel(goal.due) : "";
   const { done, total } = goal ? progress(goal) : { done: 0, total: 0 };
+
+  useEffect(() => {
+    setConfirmDelete(false);
+    setRemoving(false);
+  }, [goal?.id]);
 
   const addStep = async () => {
     if (!newStep.trim()) return;
@@ -606,11 +622,41 @@ function GoalDetail({
       open={!!goal}
       onClose={() => {
         setEditing(false);
+        setConfirmDelete(false);
         onClose();
       }}
       title={goal?.title}
       footer={
-        goal && (
+        goal &&
+        (confirmDelete ? (
+          <div className="flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-[13.5px] text-om-muted">删除「{goal.title}」？</span>
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(false)}
+              disabled={removing}
+              className="rounded-2xl border border-om-border px-4 py-2 text-[14px] font-medium"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              disabled={removing}
+              onClick={async () => {
+                setRemoving(true);
+                try {
+                  await onRemove();
+                } finally {
+                  setRemoving(false);
+                  setConfirmDelete(false);
+                }
+              }}
+              className="rounded-2xl bg-om-danger px-4 py-2 text-[14px] font-semibold text-white disabled:opacity-50"
+            >
+              {removing ? "删除中…" : "确认删除"}
+            </button>
+          </div>
+        ) : (
           <div className="flex gap-2">
             {!goal.done && (
               <button
@@ -630,11 +676,16 @@ function GoalDetail({
                 <Play size={16} /> 现在就推进
               </button>
             )}
-            <button type="button" onClick={() => void onRemove()} aria-label="删除目标" className="rounded-2xl border border-om-border px-3 text-om-muted">
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(true)}
+              aria-label="删除目标"
+              className="rounded-2xl border border-om-border px-3 text-om-muted"
+            >
               <Trash2 size={18} />
             </button>
           </div>
-        )
+        ))
       }
     >
       {goal && (

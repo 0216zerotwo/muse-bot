@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode, type RefObject } from "react";
 import { ChevronLeft, X } from "lucide-react";
 
 import { useSheetDrag } from "./sheetDrag";
 
 /**
- * Open full-screen pages, numbered when first rendered: a page rendered later
- * (opened on top, or nested inside) has a higher number and answers the back key.
+ * Open overlays/pages, numbered when they enter the active stack: a layer opened on top
+ * (a nested sheet, viewer, fullscreen browser, or dock) has a higher number and answers
+ * Escape / Android Back / edge-swipe alone without dismissing layers underneath it.
  */
 const openScreens = new Set<number>();
 let renderedScreens = 0;
@@ -39,36 +40,62 @@ function onEdgeSwipe(run: () => void): () => void {
   };
 }
 
-/** A sheet is open over everything: gestures and the back key are its own. */
+/** A Radix dialog is open over everything: it owns its own Escape handling. */
+const radixDialogOnTop = () => !!document.querySelector('[role="dialog"][data-state="open"]');
 const sheetOnTop = () => !!document.querySelector('[role="dialog"][data-state="open"], [data-sheet]');
+
+/** Move focus into a modal surface on open (without stealing from autoFocus inputs or higher layers) and restore on close. */
+export function useDialogFocus(panelRef: RefObject<HTMLElement | null>, enabled = true, screenId?: number) {
+  useEffect(() => {
+    if (!enabled) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const panel = panelRef.current;
+    const topped = screenId !== undefined && openScreens.size > 0 && Math.max(...openScreens) > screenId;
+    if (!topped && panel && !panel.contains(document.activeElement)) {
+      panel.focus({ preventScroll: true });
+    }
+    return () => {
+      if (opener && opener.isConnected) {
+        opener.focus({ preventScroll: true });
+      }
+    };
+  }, [enabled, panelRef, screenId]);
+}
 
 /**
  * Escape (and the phone's back key, which the Android app sends as Escape), or a swipe in from the
- * left edge, runs ``onBack`` for the topmost full-screen page. Sheets opened on top of it are
- * dialogs that handle their own Escape.
+ * left edge, runs ``onBack`` for the topmost active overlay/page only.
  */
-export function useBackKey(onBack: () => void) {
+export function useBackKey(onBack: () => void, enabled = true): number {
   const latest = useRef(onBack);
   latest.current = onBack;
-  const [id] = useState(() => ++renderedScreens);
+  const activeId = useRef(0);
+  if (enabled && activeId.current === 0) {
+    activeId.current = ++renderedScreens;
+  } else if (!enabled) {
+    activeId.current = 0;
+  }
+  const id = activeId.current;
   useEffect(() => {
+    if (!enabled || !id) return;
     openScreens.add(id);
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || Math.max(...openScreens) !== id) return;
-      if (document.querySelector('[role="dialog"][data-state="open"]')) return;
+      if (event.key !== "Escape" || event.defaultPrevented || Math.max(...openScreens) !== id) return;
+      if (radixDialogOnTop()) return;
       event.preventDefault();
       latest.current();
     };
     document.addEventListener("keydown", onKey);
     const stopSwipe = onEdgeSwipe(() => {
-      if (Math.max(...openScreens) === id && !sheetOnTop()) latest.current();
+      if (Math.max(...openScreens) === id && !radixDialogOnTop()) latest.current();
     });
     return () => {
       document.removeEventListener("keydown", onKey);
       stopSwipe();
       openScreens.delete(id);
     };
-  }, [id]);
+  }, [enabled, id]);
+  return id;
 }
 
 /** The same swipe on the main screen, with no page open over it (it opens the side menu). */
@@ -101,13 +128,17 @@ export function FullScreen({
   flush?: boolean;
   children: ReactNode;
 }) {
-  useBackKey(onBack);
+  const panel = useRef<HTMLDivElement>(null);
+  const screenId = useBackKey(onBack);
+  useDialogFocus(panel, true, screenId);
   return (
     <div
+      ref={panel}
+      tabIndex={-1}
       role="dialog"
       aria-modal="true"
       aria-label={title}
-      className="c-screen fixed inset-0 z-40 flex flex-col"
+      className="c-screen fixed inset-0 z-40 flex flex-col outline-none"
       style={{ background: "var(--c-bg)", color: "var(--c-text)" }}
     >
       <header className="relative flex min-h-14 shrink-0 items-center px-2" style={{ paddingTop: "env(safe-area-inset-top)" }}>
@@ -155,18 +186,20 @@ export function PageSheet({
   flush?: boolean;
   children: ReactNode;
 }) {
-  useBackKey(onBack);
+  const screenId = useBackKey(onBack);
   const panel = useRef<HTMLDivElement>(null);
+  useDialogFocus(panel, true, screenId);
   useSheetDrag(panel, onClose);
   return (
     <div className="fixed inset-0 z-40 flex items-end sm:items-center sm:justify-center">
       <div className="absolute inset-0 bg-black/45 backdrop-blur-[2px]" onClick={onClose} aria-hidden="true" />
       <div
         ref={panel}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="sheet-in c-glass-panel relative flex h-[90dvh] w-full flex-col rounded-t-3xl border border-om-border text-om-fg shadow-2xl sm:h-[80dvh] sm:max-w-lg sm:rounded-3xl"
+        className="sheet-in c-glass-panel relative flex h-[90dvh] w-full flex-col rounded-t-3xl border border-om-border text-om-fg shadow-2xl outline-none sm:h-[80dvh] sm:max-w-lg sm:rounded-3xl"
       >
         <header data-sheet-grip className="relative flex min-h-14 shrink-0 items-center px-2 pt-2">
           <div className="absolute left-1/2 top-2 h-1 w-10 -translate-x-1/2 rounded-full bg-om-border sm:hidden" aria-hidden="true" />

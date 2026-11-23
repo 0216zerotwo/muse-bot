@@ -3,12 +3,13 @@
  * 旁聊 (side chats on a topic of their own, kept apart from the main chat); and at the bottom
  * settings, search and a new side chat.
  */
-import { Search, Settings, SquarePen } from "lucide-react";
+import { MoreHorizontal, Search, Settings, SquarePen } from "lucide-react";
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import type { ChatSummary } from "@/lib/types";
 
 import type { ChatSearchHit } from "../companion-api";
+import { useBackKey } from "../Screen";
 
 import { useSheetDrag } from "../sheetDrag";
 
@@ -173,7 +174,7 @@ export function SwipeRow({
   };
 
   return (
-    <li data-no-sheet-drag className={`relative overflow-hidden ${rounded}`}>
+    <li data-no-sheet-drag className={`group relative overflow-hidden ${rounded}`}>
       <button
         type="button"
         tabIndex={swiped ? 0 : -1}
@@ -192,6 +193,22 @@ export function SwipeRow({
       </button>
       <button
         type="button"
+        onKeyDown={(event) => {
+          if (event.key === "Delete") {
+            event.preventDefault();
+            onDelete();
+          } else if (event.key === "F2" || event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+            event.preventDefault();
+            onEdit();
+          } else if (event.key === "ArrowLeft" && !swiped) {
+            event.preventDefault();
+            onSwipe(true);
+          } else if ((event.key === "ArrowRight" || event.key === "Escape") && swiped) {
+            event.preventDefault();
+            event.stopPropagation();
+            onSwipe(false);
+          }
+        }}
         onPointerDown={(event) => {
           press.current = {
             x: event.clientX,
@@ -231,7 +248,10 @@ export function SwipeRow({
           if (swiped) onSwipe(false);
           else onOpen();
         }}
-        onContextMenu={(event) => event.preventDefault()}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          onEdit();
+        }}
         className={`relative flex w-full select-none text-left ${className}`}
         style={{
           background: active ? "var(--c-fill)" : undefined,
@@ -242,6 +262,19 @@ export function SwipeRow({
       >
         {children}
       </button>
+      {!swiped && (
+        <button
+          type="button"
+          aria-label="编辑"
+          onClick={(event) => {
+            event.stopPropagation();
+            onEdit();
+          }}
+          className="c-muted c-pressable absolute right-2 top-1/2 z-10 grid h-8 w-8 -translate-y-1/2 place-items-center rounded-full opacity-0 transition-opacity focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+        >
+          <MoreHorizontal className="h-4 w-4" aria-hidden="true" />
+        </button>
+      )}
     </li>
   );
 }
@@ -318,12 +351,7 @@ export function MuseDrawer({
       setSwiped(null);
     }
   }, [open]);
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  useBackKey(onClose, open);
 
   const needle = query.trim().toLowerCase();
   const chats = needle

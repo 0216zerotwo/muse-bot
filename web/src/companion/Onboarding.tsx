@@ -1,18 +1,20 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { ChevronLeft } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Bell, Check, ChevronLeft, Plus } from "lucide-react";
 
 import { fetchMcpPresets } from "@/lib/api";
 import type { McpPresetInfo } from "@/lib/types";
 import { useClient } from "@/providers/ClientProvider";
 
-import { deviceTimezone, updateCompanionState, type CompanionState, type Routines } from "./companion-api";
+import { AddModelSheet } from "./AddModelSheet";
+import { deviceTimezone, fetchModels, updateCompanionState, type CompanionState, type Routines } from "./companion-api";
 import { ConnectSheet, recommendedPresets, RecommendedServices } from "./ConnectSheet";
 import { NameAndLookFields, PersonalityFields, personaChanges, personaDraft } from "./IdentityPanel";
 import { PetView } from "./Pet";
 import { DEFAULT_BRIEF_TIME, RoutineFields, useSaveRoutines } from "./ProactivePanel";
 
-const STEPS = ["welcome", "look", "personality", "proactive", "connect"] as const;
-type Step = (typeof STEPS)[number];
+const BASE_STEPS = ["welcome", "look", "personality", "proactive", "connect"] as const;
+const MODEL_STEPS = ["welcome", "look", "personality", "model", "proactive", "connect"] as const;
+type Step = (typeof MODEL_STEPS)[number];
 
 /**
  * First-run setup, like Muse's: name it, pick how it talks, decide when it may
@@ -31,10 +33,32 @@ export function Onboarding({
   const [step, setStep] = useState<Step>("welcome");
   const [draft, setDraft] = useState(() => personaDraft(companion));
   const [routines, setRoutines] = useState<Routines>({ brief_time: DEFAULT_BRIEF_TIME, checkins: true });
+  const [needsModel, setNeedsModel] = useState(false);
+  const [addedModels, setAddedModels] = useState<string[]>([]);
+  const [addingModel, setAddingModel] = useState(false);
+  const [notifPerm, setNotifPerm] = useState<NotificationPermission | "unsupported">(() =>
+    typeof Notification === "undefined" ? "unsupported" : Notification.permission,
+  );
   const [presets, setPresets] = useState<McpPresetInfo[] | null>(null);
   const [connecting, setConnecting] = useState<McpPresetInfo | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchModels(token)
+      .then((payload) => {
+        if (cancelled) return;
+        if (payload.presets.length === 0) setNeedsModel(true);
+        else setAddedModels(payload.presets.map((m) => m.name));
+      })
+      .catch(() => {
+        // Offline or mocked environment without models endpoint: keep standard steps.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   useEffect(() => {
     if (step !== "connect") return;
@@ -51,9 +75,10 @@ export function Onboarding({
     };
   }, [step, token]);
 
-  const index = STEPS.indexOf(step);
-  const next = () => setStep(STEPS[Math.min(index + 1, STEPS.length - 1)]);
-  const back = () => setStep(STEPS[Math.max(index - 1, 0)]);
+  const steps: readonly Step[] = useMemo(() => (needsModel ? MODEL_STEPS : BASE_STEPS), [needsModel]);
+  const index = Math.max(0, steps.indexOf(step));
+  const next = () => setStep(steps[Math.min(index + 1, steps.length - 1)]);
+  const back = () => setStep(steps[Math.max(index - 1, 0)]);
 
   const finish = async (keep: boolean) => {
     setSaving(true);
@@ -88,8 +113,8 @@ export function Onboarding({
         ) : (
           <span className="h-11 w-11" />
         )}
-        <div className="flex gap-1.5" aria-label={`第 ${index + 1} 步，共 ${STEPS.length} 步`}>
-          {STEPS.map((key, i) => (
+        <div className="flex gap-1.5" aria-label={`第 ${index + 1} 步，共 ${steps.length} 步`}>
+          {steps.map((key, i) => (
             <span
               key={key}
               className="h-1.5 w-5 rounded-full"
@@ -126,10 +151,58 @@ export function Onboarding({
             <PersonalityFields draft={draft} onChange={setDraft} showNote={false} />
           </div>
         )}
+        {step === "model" && (
+          <div className="flex flex-col gap-5">
+            <StepTitle
+              title={`先给${name}配一个对话模型`}
+              subtitle="还没有配置可用的对话模型。选一家常用平台填上 API key，或直接用会员账号登录。"
+            />
+            {addedModels.length > 0 && (
+              <div className="c-card flex items-center gap-2.5 rounded-2xl px-4 py-3 text-[15px]">
+                <Check className="h-4 w-4 shrink-0" style={{ color: "var(--c-primary)" }} aria-hidden="true" />
+                <span className="truncate">已配好：{addedModels.join("、")}</span>
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => setAddingModel(true)}
+              className="c-card c-pressable flex min-h-12 items-center justify-center gap-2 rounded-2xl px-4 py-3 text-[15.5px] font-medium"
+            >
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              {addedModels.length > 0 ? "再加一个模型" : "选择并添加模型"}
+            </button>
+          </div>
+        )}
         {step === "proactive" && (
           <div className="flex flex-col gap-5">
             <StepTitle title="要我主动找你吗？" subtitle="消息会出现在「动态」里，开了通知还会推送到手机。" />
             <RoutineFields value={routines} onChange={(changes) => setRoutines({ ...routines, ...changes })} />
+            {(routines.brief_time !== null || routines.checkins) &&
+              companion.capabilities?.push !== false &&
+              notifPerm === "default" && (
+                <div className="c-card flex items-center justify-between gap-3 rounded-2xl px-4 py-3">
+                  <div className="min-w-0">
+                    <p className="text-[15px] font-medium">顺便开启系统通知</p>
+                    <p className="c-muted text-[13px]">早报或提醒发来时，在锁屏上叫你一声。</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void Notification.requestPermission()
+                        .then((perm) => setNotifPerm(perm))
+                        .catch(() => undefined);
+                    }}
+                    className="c-primary shrink-0 rounded-full px-3.5 py-2 text-[14px] font-semibold"
+                  >
+                    开启通知
+                  </button>
+                </div>
+              )}
+            {notifPerm === "granted" && (routines.brief_time !== null || routines.checkins) && (
+              <p className="c-muted flex items-center gap-1.5 px-1 text-[13px]">
+                <Bell className="h-3.5 w-3.5" aria-hidden="true" /> 已开启通知提醒
+              </p>
+            )}
           </div>
         )}
         {step === "connect" && (
@@ -162,6 +235,16 @@ export function Onboarding({
           {step === "welcome" ? "开始" : step === "connect" ? (saving ? "保存中…" : "完成") : "下一步"}
         </button>
       </footer>
+
+      <AddModelSheet
+        open={addingModel}
+        kind="text"
+        onClose={() => setAddingModel(false)}
+        onAdded={(payload) => {
+          setAddedModels(payload.presets.map((m) => m.name));
+          setAddingModel(false);
+        }}
+      />
 
       <ConnectSheet
         preset={connecting}

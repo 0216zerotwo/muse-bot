@@ -20,8 +20,18 @@ function LevelPicker({ kind, onChange }: { kind: PermissionKind; onChange: (leve
     const away = (event: PointerEvent) => {
       if (!box.current?.contains(event.target as Node)) setOpen(false);
     };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+    };
     document.addEventListener("pointerdown", away);
-    return () => document.removeEventListener("pointerdown", away);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("pointerdown", away);
+      window.removeEventListener("keydown", onKey, true);
+    };
   }, [open]);
 
   return (
@@ -75,10 +85,13 @@ export function PermissionLevels() {
   }, [token]);
 
   const change = async (kind: PermissionKind, level: PermissionLevel) => {
+    const previous = kinds;
+    setError(null);
     setKinds((current) => current?.map((k) => (k.key === kind.key ? { ...k, level } : k)) ?? null);
     try {
       setKinds((await setPermission(client, kind.key, level)).kinds);
     } catch (e) {
+      setKinds(previous);
       setError(e instanceof Error ? e.message : String(e));
     }
   };

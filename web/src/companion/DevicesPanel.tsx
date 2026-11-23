@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Laptop, Smartphone } from "lucide-react";
 
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { useClient } from "@/providers/ClientProvider";
 
 import { fetchDevices, newPairCode, type PairedDevice } from "./device";
@@ -17,13 +18,22 @@ export function setCurrentDevice(id: string | null): void {
 export function DevicesPanel({ onDisconnect }: { onDisconnect: () => void }) {
   const { client, token } = useClient();
   const [devices, setDevices] = useState<PairedDevice[] | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [code, setCode] = useState<{ code: string; expires_at: number; link: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
 
   const load = useCallback(() => {
-    fetchDevices(token).then(setDevices).catch(() => setDevices([]));
+    setLoadFailed(false);
+    fetchDevices(token)
+      .then((rows) => {
+        setDevices(rows);
+        setLoadFailed(false);
+      })
+      .catch(() => {
+        setLoadFailed(true);
+      });
   }, [token]);
   useEffect(load, [load]);
 
@@ -45,7 +55,19 @@ export function DevicesPanel({ onDisconnect }: { onDisconnect: () => void }) {
       <section className="flex flex-col gap-1.5">
         <h2 className="c-muted px-3.5 text-[13px]">已连接的设备</h2>
         <ul className="c-card flex flex-col overflow-hidden rounded-2xl">
-          {devices === null ? (
+          {loadFailed ? (
+            <li className="flex items-center justify-between gap-3 px-4 py-3 text-[14px]">
+              <span className="c-danger">设备列表没读出来，检查一下网络</span>
+              <button
+                type="button"
+                onClick={load}
+                className="c-pressable rounded-full px-3 py-1.5 text-[13px] font-medium"
+                style={{ background: "var(--c-fill)" }}
+              >
+                重试
+              </button>
+            </li>
+          ) : devices === null ? (
             <li className="c-muted px-4 py-3 text-[14px]">正在读取…</li>
           ) : devices.length === 0 ? (
             <li className="c-muted px-4 py-3 text-[14px]">这台是服务器本机，不需要配对。</li>
@@ -88,7 +110,7 @@ export function DevicesPanel({ onDisconnect }: { onDisconnect: () => void }) {
               <p className="font-mono text-[28px] font-semibold tracking-[0.2em]">{code.code}</p>
               <button
                 type="button"
-                onClick={() => void navigator.clipboard?.writeText(code.link).then(() => setCopied(true))}
+                onClick={() => void copyTextToClipboard(code.link).then((ok) => ok && setCopied(true))}
                 className="c-pressable min-h-10 rounded-full px-4 text-[14px] font-medium"
                 style={{ background: "var(--c-fill)" }}
               >

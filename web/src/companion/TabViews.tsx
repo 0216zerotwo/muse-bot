@@ -348,6 +348,14 @@ export function IdeasView({ active, onDo }: { active: boolean; onDo: (prompt: st
         <div className="flex flex-col items-center px-8 pt-12 text-center" role="status">
           <CompanionPet size={64} animation="review" />
         </div>
+      ) : !payload?.ideas.length ? (
+        <div className="flex flex-col items-center gap-2 px-8 pt-14 text-center">
+          <CompanionPet size={64} animation="idle" />
+          <p className="mt-2 text-[15px] font-medium">暂时还没有新点子</p>
+          <p className="c-muted max-w-xs text-[13.5px] leading-relaxed">
+            多跟它聊几句你的日常和打算，或点右上角刷新，它就会想到能顺手帮你的事。
+          </p>
+        </div>
       ) : (
         // A plain list, one idea per row: tap it and it starts.
         <ul className="c-divider divide-y">

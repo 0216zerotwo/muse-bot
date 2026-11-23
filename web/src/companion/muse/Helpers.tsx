@@ -8,6 +8,7 @@ import { Check, ChevronDown, Copy, Download, ImagePlus, Loader2, MessageCircle, 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { fetchAutomations, runAutomationAction } from "@/lib/api";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import type { SessionAutomationJob } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useClient } from "@/providers/ClientProvider";
@@ -428,11 +429,10 @@ function ShareButton({ helper }: { helper: Helper }) {
   const [copied, setCopied] = useState<boolean | null>(null);
   const text = helperShareText(helper);
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await copyTextToClipboard(text)) {
       setCopied(true);
       setTimeout(() => setCopied(null), 2000);
-    } catch {
+    } else {
       setCopied(false); // no clipboard here: show the text to copy by hand
     }
   };
@@ -779,15 +779,24 @@ export function GroupSheet({
               </button>
               <button
                 type="button"
+                disabled={busy}
                 onClick={async () => {
-                  await changeGroup(client, "delete", { id: group.id });
-                  onClose();
-                  onDeleted?.();
+                  setBusy(true);
+                  setError(null);
+                  try {
+                    await changeGroup(client, "delete", { id: group.id });
+                    onClose();
+                    onDeleted?.();
+                  } catch (e) {
+                    setError(e instanceof Error ? e.message : String(e));
+                  } finally {
+                    setBusy(false);
+                  }
                 }}
-                className="min-h-11 flex-1 rounded-full text-[15px] font-semibold text-white"
+                className="min-h-11 flex-1 rounded-full text-[15px] font-semibold text-white disabled:opacity-50"
                 style={{ background: "var(--c-danger-fill)" }}
               >
-                删除
+                {busy ? "删除中…" : "删除"}
               </button>
             </div>
           ) : (
@@ -808,6 +817,13 @@ export function HelpersScreen({ active, onOpenChat }: { active: boolean; onOpenC
   const [importing, setImporting] = useState(false);
   const [pasted, setPasted] = useState("");
   const [imported, setImported] = useState<HelperFields | null>(null);
+  const [importModels, setImportModels] = useState<string[]>([]);
+  useEffect(() => {
+    if (!imported) return;
+    fetchModels(token)
+      .then((payload) => setImportModels(payload.presets.map((p) => p.name)))
+      .catch(() => setImportModels([]));
+  }, [imported, token]);
   // The one row swiped open to show 删除, the one asked about, and the one held for its profile.
   const [swiped, setSwiped] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<{ kind: "helper" | "group"; id: string; name: string } | null>(null);
@@ -1062,7 +1078,7 @@ export function HelpersScreen({ active, onOpenChat }: { active: boolean; onOpenC
         open={imported !== null}
         start={imported}
         title="导入的帮手"
-        models={[]}
+        models={importModels}
         canReset={false}
         onReset={async () => undefined}
         onClose={() => setImported(null)}

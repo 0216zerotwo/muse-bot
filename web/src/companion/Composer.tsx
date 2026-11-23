@@ -8,7 +8,7 @@ import { encodeImage } from "@/lib/imageEncode";
 import { useClient } from "@/providers/ClientProvider";
 
 import { androidShell, type PickedFile } from "./android-shell";
-import { fetchHelpers, type Helper } from "./companion-api";
+import { fetchHelpers, fetchSkills, type Helper, type SkillInfo } from "./companion-api";
 import { GOAL_COMMAND } from "./GoalBanner";
 
 /**
@@ -63,6 +63,7 @@ export function Composer({
   focusRequest,
   quote,
   onClearQuote,
+  voiceEnabled = true,
 }: {
   value: string;
   onChange: (next: string) => void;
@@ -72,12 +73,14 @@ export function Composer({
   streaming: boolean;
   connected: boolean;
   transcribeAudio: (dataUrl: string, options?: { durationMs?: number }) => Promise<string>;
-  onFocusChange: (focused: boolean) => void;
+  onFocusChange?: (focused: boolean) => void;
   /** Changes when the box was filled in for the user to finish (换形象): focus it, the caret at the end. */
   focusRequest?: number;
   /** What this message answers (long-press → 引用), shown above the box until sent or cleared. */
   quote?: string | null;
   onClearQuote?: () => void;
+  /** False when backend reports STT capability is unavailable; hides the guaranteed-to-fail mic button. */
+  voiceEnabled?: boolean;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -105,12 +108,32 @@ export function Composer({
     textareaRef.current?.focus();
   };
 
-  /* "/" at the start: the presets (a way of working, or a request to finish). */
+  /* "/" at the start: built-in presets plus skills the companion has learned. */
+  const [skills, setSkills] = useState<SkillInfo[] | null>(null);
   const slash = /^\/(\S{0,20})$/.exec(value)?.[1];
+  useEffect(() => {
+    if (slash === undefined || skills !== null) return;
+    fetchSkills(token)
+      .then((payload) => setSkills(payload.learned))
+      .catch(() => setSkills([]));
+  }, [skills, slash, token]);
+  const slashItems = [
+    ...SLASH_PRESETS,
+    ...(skills ?? [])
+      .filter((s) => !SLASH_PRESETS.some((p) => p.key === s.name))
+      .map((s) => ({
+        key: s.name,
+        label: s.name,
+        detail: s.description || "学会的技能",
+        text: `用「${s.name}」技能帮我：`,
+      })),
+  ];
   const pickable =
     slash === undefined
       ? []
-      : SLASH_PRESETS.filter((p) => !slash || p.key.startsWith(slash.toLowerCase()) || p.label.includes(slash));
+      : slashItems.filter(
+          (p) => !slash || p.key.toLowerCase().includes(slash.toLowerCase()) || p.label.toLowerCase().includes(slash.toLowerCase()),
+        );
   const pickPreset = (preset: (typeof SLASH_PRESETS)[number]) => {
     onChange(preset.text);
     textareaRef.current?.focus();
@@ -344,12 +367,12 @@ export function Composer({
               onKeyDown={onKeyDown}
               onFocus={() => {
                 if (blurTimerRef.current !== null) window.clearTimeout(blurTimerRef.current);
-                onFocusChange(true);
+                onFocusChange?.(true);
               }}
               // Report blur a beat later: showing the tab bar immediately would
               // move the composer while a tap on it is still in progress.
               onBlur={() => {
-                blurTimerRef.current = window.setTimeout(() => onFocusChange(false), BLUR_SETTLE_MS);
+                blurTimerRef.current = window.setTimeout(() => onFocusChange?.(false), BLUR_SETTLE_MS);
               }}
               placeholder={transcribing ? "正在转成文字…" : value.startsWith(GOAL_COMMAND) ? "想达成什么？说得越具体越好" : "发消息"}
               aria-label="发消息"
@@ -381,7 +404,7 @@ export function Composer({
                 <ArrowUp className="h-[18px] w-[18px]" aria-hidden="true" />
               </span>
             </button>
-          ) : (
+          ) : voiceEnabled ? (
             <button
               type="button"
               aria-label={recording ? "停止录音" : "语音输入"}
@@ -397,7 +420,7 @@ export function Composer({
                 <Mic className="h-5 w-5" aria-hidden="true" />
               )}
             </button>
-          )}
+          ) : null}
         </div>
       </div>
     </div>
