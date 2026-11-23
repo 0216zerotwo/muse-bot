@@ -16,6 +16,11 @@ private final class LockedFlag: @unchecked Sendable {
     }
 }
 
+struct PendingDeepLink: Equatable, Sendable {
+    let server: String
+    let connectTarget: String
+}
+
 @MainActor
 final class CompanionStore: ObservableObject {
     @Published var serverAddress: String
@@ -50,6 +55,7 @@ final class CompanionStore: ObservableObject {
     @Published private(set) var sttAvailable = true
     @Published private(set) var modelsChecked = false
     @Published private(set) var hasConfiguredChatModel = true
+    @Published private(set) var pendingDeepLink: PendingDeepLink?
 
     var baseURL: URL? { api?.baseURL ?? (try? APIClient.normalizedServer(serverAddress)) }
     var companionName: String { companionState["name"].nonemptyString ?? "伙伴" }
@@ -238,16 +244,48 @@ final class CompanionStore: ObservableObject {
     func handleIncomingURL(_ url: URL) async {
         let parsed = APIClient.parseConnectInput(url.absoluteString)
         if let server = parsed.server, !server.isEmpty {
-            if let code = parsed.pairingCode, !code.isEmpty, Self.pairingCode(in: server) == nil {
-                let cleanBase = (try? APIClient.normalizedServer(server).absoluteString) ?? server
-                await connect(server: cleanBase + "#pair=" + code)
-            } else {
-                await connect(server: server)
+            let normalized: String
+            do {
+                normalized = try APIClient.normalizedServer(server).absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            } catch {
+                if serverAddress.isEmpty || needsServer { show(error) }
+                return
             }
-        } else if let code = parsed.pairingCode, !code.isEmpty, !serverAddress.isEmpty {
-            needsPairing = true
+            let target: String
+            if let code = parsed.pairingCode, !code.isEmpty {
+                target = normalized + "#pair=" + code
+            } else {
+                target = normalized
+            }
+            if serverAddress.isEmpty || needsServer {
+                await connect(server: target)
+            } else if normalized == serverAddress {
+                // Never disrupt an active authenticated session with a stray pairing link.
+                guard needsPairing || !connected else { return }
+                if let code = parsed.pairingCode, !code.isEmpty {
+                    needsPairing = true
+                    await pair(code: code)
+                } else if !connecting {
+                    await openConnection()
+                }
+            } else {
+                // Require explicit user confirmation before switching away from an already-configured server.
+                pendingDeepLink = PendingDeepLink(server: normalized, connectTarget: target)
+            }
+        } else if let code = parsed.pairingCode, !code.isEmpty,
+                  !serverAddress.isEmpty, !needsServer, needsPairing {
             await pair(code: code)
         }
+    }
+
+    func confirmPendingDeepLink() async {
+        guard let pending = pendingDeepLink else { return }
+        pendingDeepLink = nil
+        await connect(server: pending.connectTarget)
+    }
+
+    func cancelPendingDeepLink() {
+        pendingDeepLink = nil
     }
 
     func disconnectCurrentDevice() async {
@@ -1000,6 +1038,7 @@ final class CompanionStore: ObservableObject {
         sttAvailable = true
         modelsChecked = false
         hasConfiguredChatModel = true
+        pendingDeepLink = nil
         knownChats = []
         runningChats = []
         goalStates = [:]

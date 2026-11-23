@@ -97,9 +97,10 @@ final class UXParityTests: XCTestCase {
         XCTAssertNil(VaultValidation.envNameError("GITHUB_TOKEN"))
 
         for rejected in [
-            "PATH", "PYTHONPATH", "HOME", "HTTPS_PROXY", "NODE_OPTIONS",
-            "HERMES_SECRET", "COMPANION_TOKEN", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
-            "SSH_AUTH_SOCK", "PYTHON_KEY", "ab", "1ABC", "github_token",
+            "PATH", "PATHEXT", "PYTHONPATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+            "TEMP", "TMP", "TMPDIR", "COMSPEC", "SYSTEMROOT", "WINDIR", "BROWSER", "GIT_ASKPASS",
+            "HTTPS_PROXY", "NODE_OPTIONS", "HERMES_SECRET", "COMPANION_TOKEN", "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES", "SSH_AUTH_SOCK", "PYTHON_KEY", "ab", "1ABC", "github_token",
         ] {
             XCTAssertFalse(VaultValidation.isAllowedEnvName(rejected), "Expected \(rejected) to be rejected")
             XCTAssertNotNil(VaultValidation.envNameError(rejected))
@@ -158,6 +159,10 @@ final class UXParityTests: XCTestCase {
             Schedules.automationRunPath(jobID: "job/1?a=b", runID: "run#2 c"),
             "/api/webui/automations/job%2F1%3Fa%3Db/runs/run%232%20c"
         )
+        XCTAssertEqual(
+            Schedules.automationRunPath(jobID: "..", runID: "."),
+            "/api/webui/automations/%2E%2E/runs/%2E"
+        )
 
         XCTAssertEqual(UsageSettingsPage.clampedProgress(value: 150, total: 100), 1.0)
         XCTAssertEqual(UsageSettingsPage.clampedProgress(value: -20, total: 100), 0.0)
@@ -186,5 +191,35 @@ final class UXParityTests: XCTestCase {
         store.closeHelperChat()
         XCTAssertEqual(store.currentChatID, "main-chat")
         XCTAssertEqual(store.helperChatID, "")
+    }
+
+    @MainActor
+    func testDeepLinkInterceptsCrossServerSwitchUntilConfirmed() async throws {
+        let store = CompanionStore()
+        store.serverAddress = "https://my.example.com"
+        store.needsServer = false
+        store.needsPairing = false
+        store.connected = true
+
+        // Same-server pairing link is ignored when already connected so active session stays undisturbed.
+        let sameServerURL = try XCTUnwrap(URL(string: "musebot://my.example.com/companion.html#pair=STRAY-1111"))
+        await store.handleIncomingURL(sameServerURL)
+        XCTAssertNil(store.pendingDeepLink)
+        XCTAssertEqual(store.serverAddress, "https://my.example.com")
+        XCTAssertFalse(store.needsPairing)
+
+        // Different server requires explicit user confirmation instead of silently rebinding.
+        let foreignURL = try XCTUnwrap(URL(string: "musebot://evil.example.com/companion.html#pair=HACK-9999"))
+        await store.handleIncomingURL(foreignURL)
+        XCTAssertEqual(store.serverAddress, "https://my.example.com")
+        XCTAssertTrue(store.connected)
+        XCTAssertEqual(
+            store.pendingDeepLink,
+            PendingDeepLink(server: "https://evil.example.com", connectTarget: "https://evil.example.com#pair=HACK-9999")
+        )
+
+        store.cancelPendingDeepLink()
+        XCTAssertNil(store.pendingDeepLink)
+        XCTAssertEqual(store.serverAddress, "https://my.example.com")
     }
 }

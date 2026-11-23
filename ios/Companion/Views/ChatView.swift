@@ -51,8 +51,9 @@ struct ChatView: View {
     @State private var openTask: ActivityTask?
     /// 选择文字: a message's text in a sheet where any part of it can be selected.
     @State private var selecting: SelectableText?
-    /// Learned skills fetched once on demand when `/` autocomplete opens.
-    @State private var learnedSkills: [JSONValue]?
+    /// Learned skills refreshed whenever `/` autocomplete opens.
+    @State private var learnedSkills: [JSONValue] = []
+    @State private var skillsLoadedOnce = false
     @State private var loadingSkills = false
     /// Empty-chat model onboarding sheet when no chat model is configured yet.
     @State private var modelSetup = false
@@ -231,12 +232,18 @@ struct ChatView: View {
                 followIfNeeded(proxy); revealSoon()
             }
             .onChange(of: focused) { _, value in if value && followingBottom { scrollBottom(proxy) } }
-            .onChange(of: text) { _, newValue in
+            .onChange(of: text) { oldValue, newValue in
                 if !draftKey.isEmpty { UserDefaults.standard.set(newValue, forKey: draftKey) }
                 if composerError != nil && !newValue.isEmpty { composerError = nil }
-                loadAutocompleteContextIfNeeded(for: newValue)
+                loadAutocompleteContextIfNeeded(from: oldValue, to: newValue)
             }
-            .onAppear { restoreDraft(); acceptDraft(); followIfNeeded(proxy); revealSoon() }
+            .onAppear {
+                restoreDraft()
+                acceptDraft()
+                loadAutocompleteContextIfNeeded(from: "", to: text)
+                followIfNeeded(proxy)
+                revealSoon()
+            }
             .onChange(of: store.suggestedDraft) { _, _ in acceptDraft() }
             .onChange(of: revealed) { _, _ in revealSearchHit(proxy) }
             .onChange(of: store.revealTurn) { _, _ in revealSearchHit(proxy) }
@@ -372,7 +379,7 @@ struct ChatView: View {
 
     private var slashMenuItems: [ComposerAutocomplete.SlashItem] {
         guard messenger == nil, let query = ComposerAutocomplete.slashQuery(in: text) else { return [] }
-        return ComposerAutocomplete.matchingSlashItems(query: query, learnedSkills: learnedSkills ?? [])
+        return ComposerAutocomplete.matchingSlashItems(query: query, learnedSkills: learnedSkills)
     }
 
     private var mentionMenuHelpers: [JSONValue] {
@@ -387,23 +394,26 @@ struct ChatView: View {
         return ComposerAutocomplete.matchingHelpers(query: query, helpers: pool)
     }
 
-    private func loadAutocompleteContextIfNeeded(for currentText: String) {
-        if messenger == nil, ComposerAutocomplete.slashQuery(in: currentText) != nil,
-           learnedSkills == nil, !loadingSkills, store.connected {
+    private func loadAutocompleteContextIfNeeded(from oldText: String, to currentText: String) {
+        let wasSlashOpen = ComposerAutocomplete.slashQuery(in: oldText) != nil
+        let isSlashOpen = ComposerAutocomplete.slashQuery(in: currentText) != nil
+        if messenger == nil, isSlashOpen, (!wasSlashOpen || !skillsLoadedOnce), !loadingSkills, store.connected {
             loadingSkills = true
             Task {
                 defer { loadingSkills = false }
                 do {
                     let payload = try await store.getResource("/api/webui/companion/skills")
                     learnedSkills = payload["learned"].array
+                    skillsLoadedOnce = true
                 } catch {
-                    learnedSkills = []
+                    // Keep prior skills without locking out retry on next `/` open or keystroke.
                 }
             }
         }
+        let wasMentionOpen = ComposerAutocomplete.mentionQuery(in: oldText) != nil
+        let isMentionOpen = ComposerAutocomplete.mentionQuery(in: currentText) != nil
         if (messenger == nil || messenger?.isGroup == true),
-           ComposerAutocomplete.mentionQuery(in: currentText) != nil,
-           store.helpers.isEmpty, store.connected {
+           isMentionOpen, (!wasMentionOpen || store.helpers.isEmpty), store.connected {
             Task { await store.refreshLibrary() }
         }
     }

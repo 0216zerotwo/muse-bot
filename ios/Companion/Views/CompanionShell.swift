@@ -79,6 +79,18 @@ struct CompanionRootView: View {
             Button("删除旁聊", role: .destructive) { Task { await store.deleteChat(id: store.currentChatID) } }
             Button("取消", role: .cancel) { }
         }
+        .alert("要切换到新的服务器吗？", isPresented: Binding(
+            get: { store.pendingDeepLink != nil },
+            set: { if !$0 { store.cancelPendingDeepLink() } }
+        )) {
+            Button("取消", role: .cancel) { store.cancelPendingDeepLink() }
+            Button("切换并连接", role: .destructive) {
+                settings = false; identity = false; appearance = false; menu = false
+                Task { await store.confirmPendingDeepLink() }
+            }
+        } message: {
+            Text("当前已配置服务器 \(store.serverAddress)。切换后将连接到 \(store.pendingDeepLink?.server ?? "")。")
+        }
         .task(id: store.connected) {
             guard store.connected else { return }
             while !Task.isCancelled {
