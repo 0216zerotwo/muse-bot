@@ -243,6 +243,11 @@ export interface SessionAutomationJob {
     kind?: "agent_turn" | "system_event" | "local_trigger" | string;
     command?: string;
   };
+  runs?: Array<{
+    id: string;
+    at_ms: number;
+    status: "ok" | "error" | "skipped" | string;
+  }>;
   state: {
     next_run_at_ms?: number | null;
     last_run_at_ms?: number | null;
@@ -1613,6 +1618,14 @@ export type InboundEvent =
   | {
       event: "sidebar_state_updated";
       state: SidebarStatePayload;
+    }
+  | {
+      event: "feed_updated";
+    }
+  | {
+      event: "approval_updated";
+      chat_id?: string;
+      session_key?: string;
     }
   | { event: "transcription_result"; request_id: string; text: string }
   | {

@@ -195,8 +195,32 @@ const TOOL_ACTIVITY: Record<string, Activity> = {
   feed_post: { kind: "working", label: "正在写动态" },
 };
 
-/** ``mcp_<server>_browser_click`` (the 浏览器 connection) or Hermes's own ``browser_click``. */
-const BROWSER_TOOL = /^(?:mcp_.+?_)?(browser_[a-z_]+)$/;
+/**
+ * Parse Hermes MCP tool names in both current ``mcp__<server>__<tool>`` and
+ * legacy ``mcp_<server>_<tool>`` forms.
+ */
+export function parseMcpToolName(name: string): { server: string; tool: string } | null {
+  if (name.startsWith("mcp__")) {
+    const rest = name.slice(5);
+    const sep = rest.indexOf("__");
+    if (sep > 0 && sep + 2 < rest.length) {
+      return { server: rest.slice(0, sep), tool: rest.slice(sep + 2) };
+    }
+    return null;
+  }
+  if (name.startsWith("mcp_")) {
+    const rest = name.slice(4);
+    const sep = rest.indexOf("_");
+    if (sep > 0 && sep + 1 < rest.length) {
+      return { server: rest.slice(0, sep), tool: rest.slice(sep + 1) };
+    }
+    return null;
+  }
+  return null;
+}
+
+/** ``mcp__<server>__browser_click`` / ``mcp_<server>_browser_click`` or Hermes's own ``browser_click``. */
+const BROWSER_TOOL = /^(?:mcp__?.+?__?)?(browser_[a-z_]+)$/;
 
 const BROWSER_ACTIVITY: Record<string, string> = {
   browser_navigate: "正在打开网页",
@@ -223,14 +247,17 @@ const TYPING: Activity = { kind: "typing", label: "正在输入" };
 export function toolActivity(name: string): Activity {
   const known = TOOL_ACTIVITY[name];
   if (known) return known;
-  const browserTool = BROWSER_TOOL.exec(name)?.[1];
+  const mcp = parseMcpToolName(name);
+  const browserTool = (mcp ? BROWSER_TOOL.exec(mcp.tool) : BROWSER_TOOL.exec(name))?.[1];
   if (browserTool) return { kind: "read", label: BROWSER_ACTIVITY[browserTool] ?? "正在操作浏览器" };
   const gated = approvalAction(name);
   if (gated) return { kind: "send", label: gated === "delete_event" ? "正在准备删除日程" : "正在准备邮件" };
-  if (name.startsWith("mcp_email_")) return { kind: "read", label: "正在查看邮箱" };
+  if (mcp) {
+    if (mcp.server === "email") return { kind: "read", label: "正在查看邮箱" };
+    return { kind: "app", label: mcp.server ? `正在使用 ${mcp.server}` : "正在使用应用" };
+  }
   if (name.startsWith("mcp_")) {
-    const server = name.slice(4).split("_")[0];
-    return { kind: "app", label: server ? `正在使用 ${server}` : "正在使用应用" };
+    return { kind: "app", label: "正在使用应用" };
   }
   return { kind: "working", label: "正在处理" };
 }
@@ -253,7 +280,20 @@ export function currentActivity(messages: UIMessage[], streaming: boolean): Acti
 /* ---------- Approvals ---------- */
 
 /** Must match the gated actions in the server's ``approvals.py``. */
-const APPROVAL_TOOL = /^mcp_.+_(send_email|forward_email|delete_emails|email_command|delete_event)$/;
+const GATED_MCP_ACTIONS: Record<string, ApprovalAction> = {
+  send_email: "send_email",
+  send_mail: "send_email",
+  reply_email: "send_email",
+  send_message: "send_email",
+  forward_email: "forward_email",
+  delete_emails: "delete_emails",
+  delete_email: "delete_emails",
+  trash_email: "delete_emails",
+  email_command: "email_command",
+  delete_event: "delete_event",
+  remove_event: "delete_event",
+};
+const APPROVAL_TOOL = /^mcp__?.+?__?(send_email|send_mail|reply_email|send_message|forward_email|delete_emails|delete_email|trash_email|email_command|delete_event|remove_event)$/;
 /** Local trigger that reports approval outcomes back into the chat. */
 export const APPROVAL_TRIGGER_NAME = "审批回执";
 
@@ -278,7 +318,12 @@ export type ApprovalAction =
 /** Tools that always wait for approval; browser clicks depend on what they click. */
 export function approvalAction(toolName: string): ApprovalAction | null {
   if (toolName === "goal_propose_plan") return "goal_plan";
-  return (APPROVAL_TOOL.exec(toolName)?.[1] as ApprovalAction | undefined) ?? null;
+  const mcp = parseMcpToolName(toolName);
+  if (mcp && mcp.tool in GATED_MCP_ACTIONS) {
+    return GATED_MCP_ACTIONS[mcp.tool];
+  }
+  const matched = APPROVAL_TOOL.exec(toolName)?.[1];
+  return matched ? GATED_MCP_ACTIONS[matched] ?? null : null;
 }
 
 /** What an approval card is about, as decided by the server when the call was held. */
@@ -556,13 +601,57 @@ const APPROVAL_STATUS: Record<ApprovalRecord["status"], [string, ActivityEntry["
   rejected: ["你取消了", "muted"],
 };
 
+/** Normalize string[], comma/semicolon-separated strings, or scalars into clean string items. */
+export function normalizeAddressList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === "string" || typeof item === "number" ? String(item).trim() : ""))
+      .filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(/[,;\n]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+/** Read email recipients from ``recipients`` or fallback ``to`` (matching backend ``_recipients``). */
+export function approvalRecipients(args: Record<string, unknown>): string[] {
+  const primary = normalizeAddressList(args.recipients);
+  return primary.length > 0 ? primary : normalizeAddressList(args.to);
+}
+
+/** Normalize message/email/item IDs supplied as string[], number[], or comma-separated strings. */
+export function normalizeIdList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter(
+        (item): item is string | number =>
+          (typeof item === "string" && item.trim().length > 0) ||
+          (typeof item === "number" && Number.isFinite(item)),
+      )
+      .map((item) => String(item).trim());
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return [String(value)];
+  }
+  if (typeof value === "string") {
+    return value
+      .split(/[,;\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
 function approvalTitle(approval: ApprovalRecord): string {
   // "要在 apple.com.cn 上点「立即购买」": its first sentence says it all.
   const summary = approval.context?.browser?.summary;
   if (summary) return summary.split("。")[0];
   const verb = APPROVAL_VERBS[approvalKind(approval)];
-  const recipients = approval.arguments.recipients;
-  const to = Array.isArray(recipients) ? recipients.filter((r) => typeof r === "string").join("、") : "";
+  const to = approvalRecipients(approval.arguments).join("、");
   const subject = typeof approval.arguments.subject === "string" ? approval.arguments.subject : "";
   const element = typeof approval.arguments.element === "string" ? approval.arguments.element : "";
   const site = approval.context?.egress?.host ?? "";
@@ -576,10 +665,13 @@ function approvalTitle(approval: ApprovalRecord): string {
 /** Tools whose name says they only look (``list_events``, ``get_email``…). */
 const READ_ONLY_TOOL = /^(list|get|search|read|query|find|check|debug|fetch|view|describe|count|lookup)_/;
 
-/** ``mcp_<server>_<tool>`` → ``<tool>``. */
+/** ``mcp__<server>__<tool>`` / ``mcp_<server>_<tool>`` → ``<tool>`` (including ``-`` → ``_`` sanitized server names). */
 export function rawToolName(name: string, server: string): string {
-  const prefix = `mcp_${server}_`;
-  return name.startsWith(prefix) ? name.slice(prefix.length) : name;
+  const sanitized = server.replace(/[^A-Za-z0-9_]/g, "_");
+  for (const prefix of [`mcp__${sanitized}__`, `mcp__${server}__`, `mcp_${sanitized}_`, `mcp_${server}_`]) {
+    if (name.startsWith(prefix)) return name.slice(prefix.length);
+  }
+  return name;
 }
 
 export function isReadOnlyTool(raw: string): boolean {
@@ -741,14 +833,13 @@ export function describeToolCall(name: string, args: unknown): string {
     case "my":
       return "查看了自己的设置";
   }
-  if (name.startsWith("mcp_")) {
-    const [server, ...rest] = name.slice(4).split("_");
-    const tool = rest.join("_");
-    const known = APP_ACTIONS[tool];
+  const mcp = parseMcpToolName(name);
+  if (mcp) {
+    const known = APP_ACTIONS[mcp.tool];
     if (known) return known(args);
-    if (tool.startsWith("browser_")) return "操作了浏览器";
-    if (server === "email") return "查看了邮箱";
-    return `使用了 ${server}（${tool}）`;
+    if (mcp.tool.startsWith("browser_")) return "操作了浏览器";
+    if (mcp.server === "email") return "查看了邮箱";
+    return `使用了 ${mcp.server}（${mcp.tool}）`;
   }
   return toolActivity(name).label.replace(/^正在/, "");
 }
@@ -780,7 +871,12 @@ export function toolActions(messages: UIMessage[]): ActivityEntry[] {
 /** Everything done (or waiting to be done) on the user's behalf, newest first. */
 export function activityLog(
   approvals: ApprovalRecord[],
-  jobs: { id: string; name: string; state: { run_history?: { run_at_ms: number; status: string }[] } }[],
+  jobs: {
+    id: string;
+    name: string;
+    runs?: { id?: string; at_ms: number; status: string }[];
+    state?: { run_history?: { run_at_ms: number; status: string }[] };
+  }[],
   messages: UIMessage[] = [],
   limit = 30,
 ): ActivityEntry[] {
@@ -796,15 +892,28 @@ export function activityLog(
     };
   });
   for (const job of jobs) {
-    for (const run of job.state.run_history ?? []) {
-      entries.push({
-        id: `${job.id}-${run.run_at_ms}`,
-        kind: "task",
-        title: job.name,
-        status: run.status === "ok" ? "已运行" : run.status === "skipped" ? "跳过了" : "出错了",
-        tone: run.status === "ok" ? "ok" : run.status === "skipped" ? "muted" : "bad",
-        at: run.run_at_ms,
-      });
+    if (job.runs?.length) {
+      for (const run of job.runs) {
+        entries.push({
+          id: `${job.id}-${run.id ?? run.at_ms}`,
+          kind: "task",
+          title: job.name,
+          status: run.status === "ok" ? "已运行" : run.status === "skipped" ? "跳过了" : "出错了",
+          tone: run.status === "ok" ? "ok" : run.status === "skipped" ? "muted" : "bad",
+          at: run.at_ms,
+        });
+      }
+    } else {
+      for (const run of job.state?.run_history ?? []) {
+        entries.push({
+          id: `${job.id}-${run.run_at_ms}`,
+          kind: "task",
+          title: job.name,
+          status: run.status === "ok" ? "已运行" : run.status === "skipped" ? "跳过了" : "出错了",
+          tone: run.status === "ok" ? "ok" : run.status === "skipped" ? "muted" : "bad",
+          at: run.run_at_ms,
+        });
+      }
     }
   }
   entries.push(...toolActions(messages));

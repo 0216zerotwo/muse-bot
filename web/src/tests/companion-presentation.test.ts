@@ -11,8 +11,11 @@ import {
   chunkReply,
   currentActivity,
   dayLabel,
+  describeToolCall,
   isProactive,
   linkedMedia,
+  rawToolName,
+  toolActivity,
 } from "@/companion/presentation";
 
 function msg(partial: Partial<UIMessage> & Pick<UIMessage, "id" | "role">): UIMessage {
@@ -84,7 +87,7 @@ describe("currentActivity", () => {
     expect(currentActivity([user], false)).toBeNull();
   });
 
-  it("names the running tool, including MCP servers", () => {
+  it("names the running tool, including both single- and double-underscore MCP servers", () => {
     const trace = msg({
       id: "t",
       role: "assistant",
@@ -92,6 +95,15 @@ describe("currentActivity", () => {
       toolEvents: [{ call_id: "1", name: "web_search", phase: "end" }, { call_id: "2", name: "mcp_mail_send", phase: "start" }],
     });
     expect(currentActivity([user, trace], true)?.label).toBe("正在使用 mail");
+    expect(toolActivity("mcp__github__create_issue").label).toBe("正在使用 github");
+    expect(toolActivity("mcp__email__get_thread").label).toBe("正在查看邮箱");
+    expect(toolActivity("mcp__browser__browser_navigate").label).toBe("正在打开网页");
+    expect(approvalAction("mcp__icloud-calendar__delete_event")).toBe("delete_event");
+    expect(approvalAction("mcp__icloud-calendar__update_event")).toBeNull();
+    expect(rawToolName("mcp__icloud-calendar__list_events", "icloud-calendar")).toBe("list_events");
+    expect(rawToolName("mcp__google_workspace__list_files", "google-workspace")).toBe("list_files");
+    expect(rawToolName("mcp_brave_search_web", "brave-search")).toBe("web");
+    expect(describeToolCall("mcp__icloud-calendar__create_event", { title: "周会" })).toBe("添加了日程「周会」");
   });
 
   it("reports typing once reply text streams, thinking otherwise", () => {
@@ -255,6 +267,27 @@ describe("activityLog", () => {
       ["早报", "出错了"],
       ["发邮件 给 sarah@example.com 「周六爬山」", "已完成"],
       ["早报", "已运行"],
+    ]);
+
+    const currentSchemaJob = {
+      id: "j2",
+      name: "晚报",
+      runs: [
+        { id: "r1", at_ms: 500, status: "ok" },
+        { id: "r2", at_ms: 600, status: "skipped" },
+      ],
+    };
+    const toStringApproval: ApprovalRecord = {
+      ...approval,
+      id: "apv_2",
+      tool_name: "mcp__email__send_email",
+      arguments: { to: "a@example.com, b@example.com", subject: "提醒" },
+      decided_at_ms: 550,
+    };
+    expect(activityLog([toStringApproval], [currentSchemaJob]).map((entry) => [entry.title, entry.status])).toEqual([
+      ["晚报", "跳过了"],
+      ["发邮件 给 a@example.com、b@example.com 「提醒」", "已完成"],
+      ["晚报", "已运行"],
     ]);
   });
 

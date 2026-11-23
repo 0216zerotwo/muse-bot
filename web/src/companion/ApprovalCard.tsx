@@ -2,7 +2,13 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { CalendarX, Check, CircleAlert, Globe, Mail, ShieldAlert, SquareTerminal, Target, Trash2, Upload, X } from "lucide-react";
 
 import type { ApprovalRecord, ApprovalScope } from "./companion-api";
-import { approvalKind, type ApprovalAction } from "./presentation";
+import {
+  approvalKind,
+  approvalRecipients,
+  normalizeAddressList,
+  normalizeIdList,
+  type ApprovalAction,
+} from "./presentation";
 
 const ACTIONS: Record<ApprovalAction, { title: string; confirm: string; done: string }> = {
   send_email: { title: "邮件", confirm: "发送", done: "已发送" },
@@ -26,8 +32,11 @@ const SCOPE_LABELS: Record<ApprovalScope, string> = { once: "仅这次", "24h": 
 
 /** What a standing yes covers, in words: "发给 a@x.com" for mail, the reason for a command. */
 function grantSubject(approval: ApprovalRecord, action: ApprovalAction, args: Record<string, unknown>): string {
-  if (action === "send_email" || action === "forward_email") return `发给 ${list(args.recipients)}`;
-  if (action === "send_private") return `发到 ${approval.context?.egress?.host ?? ""}`;
+  if (action === "send_email" || action === "forward_email") {
+    const to = approvalRecipients(args).join("、");
+    return to ? `发给 ${to}` : "";
+  }
+  if (action === "send_private") return approval.context?.egress?.host ? `发到 ${approval.context.egress.host}` : "";
   if (action === "run_command") return text(args.reason);
   return "";
 }
@@ -51,11 +60,17 @@ function ActionIcon({ action }: { action: ApprovalAction }) {
 }
 
 function list(value: unknown): string {
-  return Array.isArray(value) ? value.filter((item) => typeof item === "string").join("、") : "";
+  return normalizeAddressList(value).join("、");
 }
 
 function text(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function scalarText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return "";
 }
 
 function Field({ label, value }: { label: string; value: string }) {
@@ -191,14 +206,16 @@ export function ApprovalCard({
         {browser?.summary && <p className="mt-3 text-[15px] leading-6">{browser.summary}</p>}
 
         <div className="mt-3 flex flex-col gap-1.5">
-          <Field label="收件人" value={list(args.recipients)} />
+          <Field label="收件人" value={approvalRecipients(args).join("、")} />
           <Field label="抄送" value={list(args.cc)} />
           <Field label="密送" value={list(args.bcc)} />
           <Field label="主题" value={text(args.subject)} />
-          {action === "forward_email" && <Field label="原邮件" value={`#${text(args.email_id)}`} />}
-          {action === "delete_emails" && <Field label="数量" value={`${list(args.email_ids).split("、").filter(Boolean).length} 封`} />}
+          {action === "forward_email" && scalarText(args.email_id) && <Field label="原邮件" value={`#${scalarText(args.email_id)}`} />}
+          {action === "delete_emails" && normalizeIdList(args.email_ids).length > 0 && (
+            <Field label="数量" value={`${normalizeIdList(args.email_ids).length} 封`} />
+          )}
           {action === "email_command" && <Field label="协议" value={text(args.protocol).toUpperCase()} />}
-          {action === "delete_event" && <Field label="日程" value={text(args.event_id)} />}
+          {action === "delete_event" && <Field label="日程" value={scalarText(args.event_id)} />}
           {action === "browser_submit" && !browser && <Field label="点击" value={text(args.element)} />}
           {action === "browser_upload" && !browser && <Field label="文件" value={list(args.paths)} />}
           {action === "run_command" && <Field label="原因" value={text(args.reason)} />}

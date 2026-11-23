@@ -138,6 +138,7 @@ export function useNanobotStream(
   hasPendingToolCalls = false,
   onTurnEnd?: () => void,
   onStreamDetach?: (messages: UIMessage[]) => void,
+  historyVersion?: number,
 ): {
   messages: UIMessage[];
   /** Whether ``messages`` belongs to the current ``chatId`` after a session switch. */
@@ -204,6 +205,11 @@ export function useNanobotStream(
   const streamTimerRef = useRef<number | null>(null);
   const lastStreamFlushRef = useRef(0);
   const sideChannelTurnIdsRef = useRef<Set<string>>(new Set());
+  const liveSocketStreamActiveRef = useRef(false);
+  const appliedHistoryRef = useRef<{ chatId: string | null; version: number | undefined }>({
+    chatId,
+    version: historyVersion,
+  });
 
   const dismissStreamError = useCallback(() => setStreamError(null), []);
 
@@ -214,7 +220,15 @@ export function useNanobotStream(
       || document.visibilityState === "visible"
       || !readLocalPreferences().browserNotifications
     ) return;
-    new Notification("nanobot", { body });
+    const title = document.title && document.title !== "nanobot" ? document.title : "伙伴";
+    try {
+      new Notification(title, { body });
+    } catch {
+      // Android Chrome / WebView forbids `new Notification()` and requires ServiceWorkerRegistration.
+      void navigator.serviceWorker?.ready
+        ?.then((reg) => reg.showNotification(title, { body }))
+        ?.catch(() => undefined);
+    }
   }, []);
 
   const clearPendingStreamWork = useCallback(() => {
@@ -490,10 +504,12 @@ export function useNanobotStream(
     return client.onRunStatus((runChatId, startedAt) => {
       if (runChatId !== chatId) return;
       if (startedAt !== null) {
+        liveSocketStreamActiveRef.current = true;
         setRunStartedAt(startedAt);
         setIsStreaming(true);
         return;
       }
+      liveSocketStreamActiveRef.current = false;
       flushPendingStreamEvents();
       setMessages((prev) => {
         const settled = prev.map((message) => (
@@ -510,10 +526,20 @@ export function useNanobotStream(
     });
   }, [chatId, client, clearActivitySegment, flushPendingStreamEvents, setMessages]);
 
+  // Clear live-socket stream flag whenever the WebSocket leaves the open state so a dead
+  // pre-background stream never overrides fresh HTTP history on resume.
+  useEffect(() => {
+    return client.onStatus((status) => {
+      if (status !== "open") liveSocketStreamActiveRef.current = false;
+    });
+  }, [client]);
+
   // Reset local state when switching chats. Do not reset on every
   // ``initialMessages`` update: a brand-new chat can receive an empty/404
   // history response after the optimistic first message has already rendered.
   useEffect(() => {
+    appliedHistoryRef.current = { chatId, version: historyVersion };
+    liveSocketStreamActiveRef.current = false;
     const restoredRunStartedAt = chatId ? client.getRunStartedAt(chatId) : null;
     setMessages(initialMessages);
     setMessageOwnerChatId(chatId);
@@ -532,6 +558,92 @@ export function useNanobotStream(
     sideChannelTurnIdsRef.current.clear();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId, client, clearActivitySegment, clearPendingStreamWork, setMessages]);
+
+  // Reconcile refreshed canonical history for the SAME chatId (e.g. after delete, regenerate, or
+  // background resume) without unmounting the parent UI or dropping live in-flight stream deltas.
+  useEffect(() => {
+    if (!chatId || historyVersion === undefined) return;
+    if (
+      appliedHistoryRef.current.chatId === chatId
+      && appliedHistoryRef.current.version === historyVersion
+    ) {
+      return;
+    }
+    appliedHistoryRef.current = { chatId, version: historyVersion };
+    flushPendingStreamEvents();
+
+    const currentProjection = projectionRef.current;
+    const hasActiveRun =
+      liveSocketStreamActiveRef.current
+      || client.getRunStartedAt(chatId) !== null
+      || client.hasUnsettledRun(chatId);
+    const persistedTurnIds = new Set(
+      initialMessages
+        .map((m) => m.turnId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    );
+    const pendingOptimisticUsers = messagesRef.current.filter(
+      (m) =>
+        m.role === "user"
+        && m.deliveryStatus === "sending"
+        && (!m.turnId || !persistedTurnIds.has(m.turnId)),
+    );
+    const liveCarryOver = hasActiveRun
+      ? messagesRef.current.filter((m) => {
+          const isLiveRow =
+            Boolean(m.isStreaming || m.reasoningStreaming)
+            || m.id === currentProjection.activeAssistantId
+            || (currentProjection.activitySegmentId !== null && m.activitySegmentId === currentProjection.activitySegmentId);
+          if (!isLiveRow) return false;
+          const persistedMatch = initialMessages.find(
+            (im) =>
+              im.role === m.role
+              && im.kind === m.kind
+              && im.turnId !== undefined
+              && im.turnId === m.turnId
+              && im.content.length >= m.content.length
+              && (im.reasoning?.length ?? 0) >= (m.reasoning?.length ?? 0),
+          );
+          return !persistedMatch;
+        })
+      : [];
+
+    const nextMessages = [...initialMessages, ...pendingOptimisticUsers, ...liveCarryOver];
+    const carryIds = new Set(liveCarryOver.map((m) => m.id));
+    const baseProjection = createThreadProjectionState(nextMessages);
+    projectionRef.current = liveCarryOver.length > 0
+      ? {
+          ...baseProjection,
+          activeAssistantId:
+            currentProjection.activeAssistantId && carryIds.has(currentProjection.activeAssistantId)
+              ? currentProjection.activeAssistantId
+              : baseProjection.activeAssistantId,
+          mergeReasoning: currentProjection.mergeReasoning,
+          activitySegmentId: currentProjection.activitySegmentId,
+          fileEditSegmentId: currentProjection.fileEditSegmentId,
+          activitySegmentCounter: Math.max(
+            baseProjection.activitySegmentCounter,
+            currentProjection.activitySegmentCounter,
+          ),
+        }
+      : baseProjection;
+    setMessages(nextMessages);
+    setIsStreaming(
+      liveCarryOver.length > 0
+      || pendingOptimisticUsers.length > 0
+      || hasPendingAgentActivity(nextMessages)
+      || hasPendingToolCalls
+      || client.getRunStartedAt(chatId) !== null,
+    );
+  }, [
+    chatId,
+    client,
+    flushPendingStreamEvents,
+    hasPendingToolCalls,
+    historyVersion,
+    initialMessages,
+    setMessages,
+  ]);
 
   useEffect(() => {
     if (hasPendingToolCalls) setIsStreaming(true);
@@ -673,6 +785,7 @@ export function useNanobotStream(
         if (projectionRef.current.suppressUntilTurnEnd) return;
         const chunk = typeof ev.text === "string" ? ev.text : "";
         if (!chunk) return;
+        liveSocketStreamActiveRef.current = true;
         setIsStreaming(true);
         pendingStreamEventsRef.current.push({
           kind: "delta",
@@ -689,6 +802,7 @@ export function useNanobotStream(
         if (projectionRef.current.suppressUntilTurnEnd) return;
         const chunk = ev.text;
         if (!chunk) return;
+        liveSocketStreamActiveRef.current = true;
         setIsStreaming(true);
         pendingStreamEventsRef.current.push({
           kind: "reasoning",
@@ -737,10 +851,12 @@ export function useNanobotStream(
 
       if (ev.event === "goal_status") {
         if (ev.status === "running" && typeof ev.started_at === "number") {
+          liveSocketStreamActiveRef.current = true;
           setStreamError(null);
           setRunStartedAt(ev.started_at);
           setIsStreaming(true);
         } else {
+          liveSocketStreamActiveRef.current = false;
           setRunStartedAt(null);
           setIsStreaming(false);
           setRetryStatus(null);
@@ -778,6 +894,7 @@ export function useNanobotStream(
       }
 
       if (ev.event === "turn_end") {
+        liveSocketStreamActiveRef.current = false;
         if (typeof ev.turn_id === "string") sideChannelTurnIdsRef.current.delete(ev.turn_id);
         if ("goal_state" in ev && ev.goal_state != null && typeof ev.goal_state === "object") {
           setGoalState(ev.goal_state);
@@ -1008,6 +1125,7 @@ export function useNanobotStream(
 
   const stop = useCallback(() => {
     if (!chatId) return;
+    liveSocketStreamActiveRef.current = false;
     flushPendingStreamEvents();
     setIsStreaming(false);
     setRetryStatus(null);

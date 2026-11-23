@@ -540,14 +540,36 @@ export async function changeAutomationChat(transport: WebUIMutationTransport, id
 export async function fetchAutomationRunResult(
   token: string,
   id: string,
-  runAtMs: number,
-  kind: "cron" | "local_trigger",
+  runId: string | number,
+  _kind?: "cron" | "local_trigger",
   signal?: AbortSignal,
-): Promise<{ response: string | null }> {
-  const query = new URLSearchParams({ id, run_at_ms: String(runAtMs), kind });
-  return request<{ response: string | null }>(
-    `/api/webui/automations/result?${query}`, token, { signal }, API_READ_TIMEOUT_MS,
+): Promise<{
+  response: string | null;
+  text?: string | null;
+  output?: string | null;
+  status?: string;
+  silent?: boolean;
+}> {
+  void _kind;
+  const data = await request<Record<string, unknown>>(
+    `/api/webui/automations/${encodeURIComponent(id)}/runs/${encodeURIComponent(String(runId))}`,
+    token,
+    { signal },
+    API_READ_TIMEOUT_MS,
   );
+  const response = typeof data.response === "string"
+    ? data.response
+    : typeof data.text === "string"
+      ? data.text
+      : typeof data.output === "string"
+        ? data.output
+        : typeof data.content === "string"
+          ? data.content
+          : null;
+  return {
+    ...(data as { text?: string | null; output?: string | null; status?: string; silent?: boolean }),
+    response,
+  };
 }
 
 export async function runAutomationAction(

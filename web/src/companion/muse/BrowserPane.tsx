@@ -22,6 +22,8 @@ type Frame = { data: string; w: number; h: number };
 /** One live connection to the browser: the latest frame, the page, and a way to send input. */
 function useBrowserStream(onFocus?: (editable: boolean) => void, onTaught?: (steps: TaughtStep[]) => void) {
   const { token } = useClient();
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
   const socket = useRef<WebSocket | null>(null);
   const focusRef = useRef(onFocus);
   focusRef.current = onFocus;
@@ -40,7 +42,7 @@ function useBrowserStream(onFocus?: (editable: boolean) => void, onTaught?: (ste
     let closed = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
     const open = () => {
-      const ws = new WebSocket(deriveWsUrl("/ws/computer", token));
+      const ws = new WebSocket(deriveWsUrl("/ws/computer", tokenRef.current));
       socket.current = ws;
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data as string) as Record<string, unknown>;
@@ -70,7 +72,7 @@ function useBrowserStream(onFocus?: (editable: boolean) => void, onTaught?: (ste
       clearTimeout(retry);
       socket.current?.close();
     };
-  }, [token]);
+  }, []);
 
   const send = useCallback((msg: Record<string, unknown>) => {
     if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(msg));

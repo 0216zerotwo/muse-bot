@@ -150,9 +150,11 @@ export function CompanionScreen({
   const ready = !history.loading || history.messages.length > 0;
   return (
     <LiveScreen
-      // The stream adopts history only on mount, so a reloaded history remounts it.
-      key={ready ? history.version : "loading"}
+      // Keep LiveScreen mounted across history refreshes so sheets, 2FA handoffs, composer
+      // attachments, and live streaming deltas survive background resume and regeneration.
+      key={session.key}
       ready={ready}
+      historyVersion={history.version}
       chatId={session.chatId}
       sessionKey={session.key}
       onReload={refresh}
@@ -180,8 +182,9 @@ export function CompanionScreen({
   );
 }
 
-function LiveScreen({
+export function LiveScreen({
   ready,
+  historyVersion,
   chatId,
   sessionKey,
   initial,
@@ -207,6 +210,7 @@ function LiveScreen({
   onReload,
 }: {
   ready: boolean;
+  historyVersion: number;
   chatId: string;
   sessionKey: string;
   initial: Parameters<typeof useNanobotStream>[1];
@@ -236,7 +240,7 @@ function LiveScreen({
 }) {
   const { client, token } = useClient();
   const { messages, isStreaming, goalState, send, stop, transcribeAudio, streamError, dismissStreamError } =
-    useNanobotStream(ready ? chatId : null, initial, pending, onTurnEnd);
+    useNanobotStream(ready ? chatId : null, initial, pending, onTurnEnd, undefined, historyVersion);
 
   /* Stopping a goal: halt the current run, then ask the companion to cancel the goal. */
   const cancelGoalAfterStop = useRef(false);
@@ -274,6 +278,13 @@ function LiveScreen({
     const missing = requestedKey.split(",").some((id) => id && !known.has(id));
     if (missing || !knownKey) loadApprovals();
   }, [ready, requestedKey, knownKey, loadApprovals]);
+  useEffect(() => {
+    if (!ready) return;
+    return client.onApprovalUpdate?.(loadApprovals);
+  }, [client, ready, loadApprovals]);
+  useEffect(() => {
+    if (ready && historyVersion > 0) loadApprovals();
+  }, [ready, historyVersion, loadApprovals]);
   const decide = useCallback(
     async (approval: ApprovalRecord, decision: "approve" | "reject", scope?: ApprovalScope) => {
       try {
@@ -437,6 +448,10 @@ function LiveScreen({
   useEffect(() => {
     if (ready) loadFeed();
   }, [ready, loadFeed, tab]);
+  useEffect(() => {
+    if (!ready) return;
+    return client.onFeedUpdate?.(loadFeed);
+  }, [client, ready, loadFeed]);
   useEffect(() => {
     if (writingSince === null) return;
     const timer = setInterval(loadFeed, FEED_POLL_MS);

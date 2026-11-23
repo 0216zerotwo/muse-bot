@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Component, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { useAppViewport } from "@/hooks/useAppViewport";
 import { BootstrapAuthRequiredError, deriveWsUrl, fetchBootstrap } from "@/lib/bootstrap";
@@ -29,6 +29,8 @@ type BootState =
     };
 
 const MIN_REFRESH_DELAY_MS = 5_000;
+const REFRESH_LEAD_MS = 60_000;
+const MAX_REFRESH_RETRY_MS = 60_000;
 /** Hidden longer than this, a socket that still looks open is replaced on return (see reconnectNow). */
 const STALE_SOCKET_MS = 15_000;
 
@@ -42,15 +44,62 @@ function expiresAtFrom(expiresIn: number | undefined): number | null {
   return expiresIn ? Date.now() + Math.max(0, expiresIn) * 1000 : null;
 }
 
+class CompanionErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <CenteredMessage text={`页面出了一点小问题：${this.state.error.message || "未知错误"}`}>
+        <button
+          type="button"
+          className="c-primary mt-5 min-h-12 rounded-full px-8 text-[16px] font-semibold"
+          onClick={() => this.setState({ error: null })}
+        >
+          重试
+        </button>
+        {androidShell() && (
+          <button
+            type="button"
+            className="c-muted mt-3 min-h-11 text-[14px]"
+            onClick={() => androidShell()?.changeServer()}
+          >
+            更换服务器地址
+          </button>
+        )}
+      </CenteredMessage>
+    );
+  }
+}
+
 /**
  * Connects to the companion's server. The first time, the device pairs with a code (see
  * ``device.ts``); after that it signs in with its device token on its own, also when session
  * tokens lapse or the server restarts, until the user disconnects this device.
  */
 export function CompanionApp() {
+  return (
+    <CompanionErrorBoundary>
+      <CompanionAppInner />
+    </CompanionErrorBoundary>
+  );
+}
+
+function CompanionAppInner() {
   useAppViewport();
   const [state, setState] = useState<BootState>({ status: "loading" });
-  const linkCode = useRef(consumePairCode());
+  const linkCode = useRef<string | null>(null);
+  if (linkCode.current === null) {
+    linkCode.current = consumePairCode();
+  }
+  const refreshInFlightRef = useRef<{ client: NanobotClient; promise: Promise<string> } | null>(null);
 
   /** Sign-in with this device's token; the device token itself is gone when the server no longer knows it. */
   const signIn = useCallback(async () => {
@@ -64,29 +113,41 @@ export function CompanionApp() {
   }, []);
 
   const toPairing = useCallback((removed: boolean) => {
-    setState({ status: "pair", code: linkCode.current, removed });
+    setState({ status: "pair", code: linkCode.current ?? "", removed });
     linkCode.current = "";
   }, []);
 
-  /** Re-run bootstrap for a live client: new socket URL and API token, same client. */
+  /** Re-run bootstrap for a live client: new socket URL, upload token, and API token, same client. */
   const refresh = useCallback(
-    async (client: NanobotClient) => {
-      const boot = await signIn();
-      const url = deriveWsUrl(boot.ws_path, boot.token, boot.ws_url);
-      client.updateUrl(url);
-      client.updateMaxFrameBytes(boot.limits?.transport.max_frame_bytes);
-      setState((current) =>
-        current.status === "ready" && current.client === client
-          ? {
-              ...current,
-              token: boot.api_token ?? "",
-              expiresAt: expiresAtFrom(boot.expires_in),
-              modelName: boot.model_name ?? current.modelName,
-              ingressLimits: boot.limits ?? current.ingressLimits,
-            }
-          : current,
-      );
-      return url;
+    (client: NanobotClient): Promise<string> => {
+      if (refreshInFlightRef.current?.client === client) {
+        return refreshInFlightRef.current.promise;
+      }
+      const promise = (async () => {
+        const boot = await signIn();
+        const url = deriveWsUrl(boot.ws_path, boot.token, boot.ws_url);
+        client.updateUrl(url);
+        client.updateUploadToken(boot.token || boot.api_token);
+        client.updateMaxFrameBytes(boot.limits?.transport.max_frame_bytes);
+        setState((current) =>
+          current.status === "ready" && current.client === client
+            ? {
+                ...current,
+                token: boot.api_token ?? "",
+                expiresAt: expiresAtFrom(boot.expires_in),
+                modelName: boot.model_name ?? current.modelName,
+                ingressLimits: boot.limits ?? current.ingressLimits,
+              }
+            : current,
+        );
+        return url;
+      })().finally(() => {
+        if (refreshInFlightRef.current?.promise === promise) {
+          refreshInFlightRef.current = null;
+        }
+      });
+      refreshInFlightRef.current = { client, promise };
+      return promise;
     },
     [signIn],
   );
@@ -142,31 +203,72 @@ export function CompanionApp() {
 
   useEffect(() => connect(), [connect]);
 
-  // Refresh the short-lived API token before it expires.
-  useEffect(() => {
-    if (state.status !== "ready" || state.expiresAt === null) return;
-    const client = state.client;
-    const remaining = state.expiresAt - Date.now();
-    const delay = Math.max(MIN_REFRESH_DELAY_MS, remaining - Math.min(60_000, remaining / 2));
-    const timer = window.setTimeout(() => {
-      refresh(client).catch((e) => {
-        if (isAuthError(e)) toPairing(true);
-      });
-    }, delay);
-    return () => window.clearTimeout(timer);
-  }, [refresh, state, toPairing]);
-
-  // The server keeps working while the app is in the background; coming back, reconnect at once.
   const readyClient = state.status === "ready" ? state.client : null;
+  const readyExpiresAt = state.status === "ready" ? state.expiresAt : null;
+  const expiresAtRef = useRef<number | null>(readyExpiresAt);
+  expiresAtRef.current = readyExpiresAt;
+
+  // Refresh the short-lived API token before it expires, retrying with backoff on transient network errors.
+  useEffect(() => {
+    if (!readyClient || readyExpiresAt === null) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    let attempt = 0;
+
+    const schedule = (delayMs: number) => {
+      timer = window.setTimeout(() => {
+        refresh(readyClient).catch((e) => {
+          if (cancelled) return;
+          if (isAuthError(e)) {
+            toPairing(true);
+            return;
+          }
+          attempt += 1;
+          const retryDelay = Math.min(MIN_REFRESH_DELAY_MS * 2 ** (attempt - 1), MAX_REFRESH_RETRY_MS);
+          schedule(retryDelay);
+        });
+      }, delayMs);
+    };
+
+    const remaining = readyExpiresAt - Date.now();
+    const delay = remaining <= REFRESH_LEAD_MS
+      ? 0
+      : Math.max(MIN_REFRESH_DELAY_MS, remaining - Math.min(REFRESH_LEAD_MS, remaining / 2));
+    schedule(delay);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [readyClient, readyExpiresAt, refresh, toPairing]);
+
+  // The server keeps working while the app is in the background; coming back, reconnect and renew expiring tokens at once.
   useEffect(() => {
     if (!readyClient) return;
     let hiddenAt = 0;
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") hiddenAt = Date.now();
-      else readyClient.reconnectNow(hiddenAt > 0 && Date.now() - hiddenAt > STALE_SOCKET_MS);
+    const maybeRefreshToken = () => {
+      if (expiresAtRef.current !== null && expiresAtRef.current - Date.now() <= REFRESH_LEAD_MS) {
+        refresh(readyClient).catch((e) => {
+          if (isAuthError(e)) toPairing(true);
+        });
+      }
     };
-    const onOnline = () => readyClient.reconnectNow();
-    const onPageShow = (event: PageTransitionEvent) => event.persisted && readyClient.reconnectNow(true);
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+      } else {
+        readyClient.reconnectNow(hiddenAt > 0 && Date.now() - hiddenAt > STALE_SOCKET_MS);
+        maybeRefreshToken();
+      }
+    };
+    const onOnline = () => {
+      readyClient.reconnectNow();
+      maybeRefreshToken();
+    };
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (!event.persisted) return;
+      readyClient.reconnectNow(true);
+      maybeRefreshToken();
+    };
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("online", onOnline);
     window.addEventListener("pageshow", onPageShow);
@@ -175,7 +277,7 @@ export function CompanionApp() {
       window.removeEventListener("online", onOnline);
       window.removeEventListener("pageshow", onPageShow);
     };
-  }, [readyClient]);
+  }, [readyClient, refresh, toPairing]);
 
   // Close a client once it is replaced (disconnect, re-pair) or unmounted.
   useEffect(() => () => readyClient?.close(), [readyClient]);

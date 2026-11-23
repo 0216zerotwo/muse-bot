@@ -50,4 +50,12 @@ describe("companion push", () => {
     await without.fire("notificationclick", { notification });
     expect(without.openWindow).toHaveBeenCalledWith(`${ORIGIN}/companion.html`);
   });
+
+  it("blocks cross-origin notification URLs and falls back to /companion.html", async () => {
+    const sw = loadSw([]);
+    await sw.fire("notificationclick", {
+      notification: { close: vi.fn(), data: { url: "https://evil.example/phish" } },
+    });
+    expect(sw.openWindow).toHaveBeenCalledWith(`${ORIGIN}/companion.html`);
+  });
 });
