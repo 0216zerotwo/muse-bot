@@ -281,7 +281,7 @@ export function FileCard({ item, onOpen }: { item: UIMediaAttachment; onOpen: (e
       return <iframe title={`预览：${title}`} src={`${item.url}#toolbar=0&navpanes=0&scrollbar=0&view=FitH`} loading="lazy" className="pointer-events-none h-full w-full border-0 bg-white" />;
     }
     if (!read || text === "") return null;
-    if (text === null) return <div className="h-full w-full animate-pulse" style={{ background: "var(--c-fill)" }} />;
+    if (text === null) return <div className="h-full w-full animate-pulse motion-reduce:animate-none" style={{ background: "var(--c-fill)" }} />;
     return <TextPage name={name} title={title} text={text} />;
   })();
 

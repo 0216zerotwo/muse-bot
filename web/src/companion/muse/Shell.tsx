@@ -104,7 +104,7 @@ export function MuseTabBar({
               >
                 <span
                   className={cn(
-                    "relative flex h-[46px] w-full max-w-[60px] items-center justify-center rounded-full transition-colors duration-300",
+                    "relative flex h-[46px] w-full max-w-[60px] items-center justify-center rounded-full transition-colors duration-300 motion-reduce:transition-none",
                     active && "bg-om-ink",
                   )}
                 >
@@ -142,6 +142,7 @@ export function StatusSheet({
   onDecide,
   onTaught,
   identity,
+  initialPane,
 }: {
   open: boolean;
   onClose: () => void;
@@ -160,20 +161,22 @@ export function StatusSheet({
   onTaught: (steps: TaughtStep[]) => void;
   /** 名字与形象, at the top of 身份与记忆. */
   identity?: ReactNode;
+  /** Opens directly on a specific pane (e.g. 3 = 身份与记忆 from a chat memory pill). */
+  initialPane?: Pane;
 }) {
   const { token } = useClient();
   const pending = approvals.filter((a) => a.status === "pending");
-  const [pane, setPane] = useState<Pane>(0);
+  const [pane, setPane] = useState<Pane>(initialPane ?? 0);
   // Open full screen: "watch" keeps the companion in control, "take" (去接手) gives it to the user.
   const [browserOpen, setBrowserOpen] = useState<false | "watch" | "take">(false);
   const [jobs, setJobs] = useState<SessionAutomationJob[]>([]);
 
   useEffect(() => {
     if (!open) return;
-    setPane(computer?.handoff ? 2 : pending.length > 0 ? 1 : 0);
+    setPane(initialPane ?? (computer?.handoff ? 2 : pending.length > 0 ? 1 : 0));
     fetchAutomations(token).then((payload) => setJobs(payload.jobs)).catch(() => setJobs([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, initialPane]);
 
   const log = useMemo(() => (open ? activityLog(approvals, jobs, history) : []), [open, approvals, jobs, history]);
 
@@ -190,7 +193,7 @@ export function StatusSheet({
         {face}
         <div className="mt-2.5 text-[21px] font-semibold leading-[26px]">{name}</div>
         <div className={cn("mt-0.5 flex items-center gap-1.5 text-[14px]", working || pending.length > 0 ? "text-om-fg" : "text-om-muted")}>
-          {working && <Loader2 size={13} className="animate-spin text-om-accent" />}
+          {working && <Loader2 size={13} className="animate-spin text-om-accent motion-reduce:animate-none" />}
           <span className="line-clamp-2">{statusLine}</span>
         </div>
         {working && (
@@ -274,7 +277,7 @@ function HandoffCard({ reason, onOpen }: { reason: string; onOpen: () => void })
   return (
     <div className="overflow-hidden rounded-2xl bg-[#1e1e1e] text-[#f1efe8]">
       <div className="flex items-center gap-2 px-3.5 pt-3 text-[11.5px] font-semibold text-rose-300">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-400" /> 浏览器 · 等你接手
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-400 motion-reduce:animate-none" /> 浏览器 · 等你接手
       </div>
       <div className="px-3.5 pb-3 pt-1.5 text-[15px] leading-snug">{reason}</div>
       <button type="button" onClick={onOpen} className="flex w-full items-center justify-center gap-1.5 bg-om-accent py-2.5 text-[14px] font-semibold text-om-accent-fg">

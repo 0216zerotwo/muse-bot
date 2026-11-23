@@ -8,6 +8,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { androidShell } from "./android-shell";
 import { spokenText } from "./fileKinds";
+import { dayLabel } from "./presentation";
 
 export type MessageAction = "quote" | "copy" | "delete" | "speak" | "regenerate";
 
@@ -18,12 +19,15 @@ export function Pressable({
   align,
   onAction,
   extra = [],
+  timestamp,
 }: {
   children: ReactNode;
   /** Which side the message sits on (the bar lines up with it). */
   align: "start" | "end";
   /** A reply's own: 朗读, and 重新生成 on the newest one. */
   extra?: MessageAction[];
+  /** Epoch ms when the message was sent, shown softly in the floating bar. */
+  timestamp?: number;
   onAction?: (action: MessageAction) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -97,10 +101,20 @@ export function Pressable({
       {children}
       {open && (
         <div
-          className={`c-float c-rise flex items-center gap-0.5 rounded-full p-1 ${align === "end" ? "self-end" : "self-start"}`}
+          className={`c-float c-rise flex flex-wrap items-center gap-0.5 rounded-full p-1 ${align === "end" ? "self-end" : "self-start"}`}
           role="menu"
           aria-label="这条消息"
         >
+          {timestamp !== undefined && timestamp > 0 && (
+            <time
+              dateTime={new Date(timestamp).toISOString()}
+              data-testid="message-timestamp"
+              className="c-muted mr-0.5 select-none border-r px-2.5 py-1 text-[12px] tabular-nums"
+              style={{ borderColor: "var(--c-hairline)" }}
+            >
+              {dayLabel(timestamp)}
+            </time>
+          )}
           <ActionButton icon={<Quote className="h-4 w-4" />} label="引用" onClick={() => choose("quote")} />
           <ActionButton icon={<Copy className="h-4 w-4" />} label="复制" onClick={() => choose("copy")} />
           {extra.includes("speak") && <ActionButton icon={<Volume2 className="h-4 w-4" />} label="朗读" onClick={() => choose("speak")} />}
@@ -159,7 +173,7 @@ function ActionButton({ icon, label, danger, onClick }: { icon: ReactNode; label
       type="button"
       role="menuitem"
       onClick={onClick}
-      className={`c-pressable flex min-h-9 items-center gap-1.5 rounded-full px-3 text-[13.5px] ${danger ? "c-danger" : ""}`}
+      className={`c-pressable flex min-h-9 items-center gap-1.5 rounded-full px-3 text-[13.5px] transition-transform active:scale-95 motion-reduce:transition-none ${danger ? "c-danger" : ""}`}
     >
       {icon}
       {label}
