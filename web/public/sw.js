@@ -81,10 +81,70 @@ async function cacheFirstPublicIcon(request) {
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE))
+    caches.open(CACHE_NAME).then(async (cache) => {
+      await cache.addAll(PRECACHE);
+      await warmCompanionChunks(cache);
+    })
   );
   self.skipWaiting();
 });
+
+const DEFERRED_HEAVY_CHUNK_RE = /(?:^|\/)assets\/(?:katex-|markdown-|streamdown-|syntax-highlight-|ViewportCodeRows-)/;
+
+// Pre-warm Companion's code-split screen/sheet chunks, default locales, and web
+// workers in the background so switching tabs or opening Settings works offline
+// right after the first visit without inflating the entry bundle.
+async function warmCompanionChunks(cache) {
+  const response = await cache.match(ASSET_MANIFEST_PATH);
+  if (!response) return;
+  let manifest;
+  try {
+    manifest = await response.json();
+  } catch {
+    return;
+  }
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return;
+
+  const visited = new Set();
+  const urls = new Set();
+  const visit = (key) => {
+    if (!key || visited.has(key)) return;
+    visited.add(key);
+    const entry = manifest[key];
+    if (!entry || typeof entry !== "object") return;
+    for (const file of [entry.file, ...(entry.css ?? [])]) {
+      if (typeof file !== "string" || DEFERRED_HEAVY_CHUNK_RE.test(file)) continue;
+      const url = new URL(file, self.location.origin);
+      if (url.origin === self.location.origin) urls.add(url.pathname + url.search);
+    }
+    for (const dep of entry.imports ?? []) {
+      visit(dep);
+    }
+  };
+
+  for (const key of Object.keys(manifest)) {
+    if (
+      key === "companion.html"
+      || key.startsWith("src/companion/")
+      || key.startsWith("_worker_")
+      || key === "src/i18n/locales/zh-CN/common.json"
+      || key === "src/i18n/locales/en/common.json"
+    ) {
+      visit(key);
+    }
+  }
+
+  await Promise.allSettled(
+    Array.from(urls).map(async (assetPath) => {
+      const existing = await cache.match(assetPath);
+      if (existing) return;
+      const res = await fetch(assetPath);
+      if (responseMayBeCached(res)) {
+        await cache.put(assetPath, res);
+      }
+    })
+  );
+}
 
 // Collect same-origin paths referenced by the given HTML document.
 function referencedAssetPaths(html) {
@@ -142,9 +202,18 @@ async function refreshAssetManifest(cache) {
 // the offline shell consistent with the last loaded build.
 async function pruneStaleEntries() {
   const cache = await caches.open(CACHE_NAME);
-  const cachedIndex = await cache.match("/");
-  if (!cachedIndex) return;
-  const refs = referencedAssetPaths(await cachedIndex.text());
+  const [cachedIndex, cachedCompanion] = await Promise.all([
+    cache.match("/"),
+    cache.match(COMPANION_SHELL),
+  ]);
+  if (!cachedIndex && !cachedCompanion) return;
+  const refs = new Set();
+  if (cachedIndex) {
+    for (const path of referencedAssetPaths(await cachedIndex.text())) refs.add(path);
+  }
+  if (cachedCompanion) {
+    for (const path of referencedAssetPaths(await cachedCompanion.text())) refs.add(path);
+  }
   for (const path of await manifestedAssetPaths(cache)) refs.add(path);
   const keys = await cache.keys();
   await Promise.all(
@@ -154,7 +223,9 @@ async function pruneStaleEntries() {
         url.pathname === "/"
         || url.pathname === COMPANION_SHELL
         || url.pathname === "/manifest.json"
+        || url.pathname === "/companion-manifest.json"
         || url.pathname === ASSET_MANIFEST_PATH
+        || NETWORK_FIRST_STATIC_PATHS.has(url.pathname)
       ) return;
       if (refs.has(url.pathname + url.search)) return;
       await cache.delete(request);
@@ -240,8 +311,11 @@ self.addEventListener("fetch", (event) => {
         // Refresh the complete build graph before pruning. A deployment can
         // change index.html without changing sw.js, so this cannot rely only
         // on the manifest cached when the worker was installed.
-        if (isNavigation || path === "/") {
-          if (await refreshAssetManifest(cache)) await pruneStaleEntries();
+        if (isNavigation || path === "/" || path === COMPANION_SHELL) {
+          if (await refreshAssetManifest(cache)) {
+            await warmCompanionChunks(cache);
+            await pruneStaleEntries();
+          }
         }
       })
       .catch(() => undefined)

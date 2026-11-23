@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SkillsPayload } from "@/companion/companion-api";
@@ -44,6 +44,7 @@ describe("SkillsPanel", () => {
   it("opens teaching from the top", async () => {
     const onTeach = vi.fn();
     render(<SkillsPanel onDraft={vi.fn()} onTeach={onTeach} />);
+    await screen.findByText("market data comparison");
     fireEvent.click(screen.getByRole("button", { name: /教它一个新技能/ }));
     expect(onTeach).toHaveBeenCalled();
   });
@@ -84,15 +85,17 @@ describe("Composer / presets", () => {
     return onChange;
   };
 
-  it("lists ways of working after a leading /, and fills the picked one in", () => {
+  it("lists ways of working after a leading /, and fills the picked one in", async () => {
     const onChange = composer("/");
+    await screen.findByRole("button", { name: /market-data-comparison/ });
     expect(screen.getByRole("button", { name: /长任务/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /整理上下文/ }));
     expect(onChange).toHaveBeenCalledWith("/compact");
   });
 
-  it("narrows by what was typed", () => {
+  it("narrows by what was typed", async () => {
     const onChange = composer("/go");
+    await act(async () => {});
     expect(screen.queryByRole("button", { name: /整理上下文/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /长任务/ }));
     expect(onChange).toHaveBeenCalledWith("/goal ");

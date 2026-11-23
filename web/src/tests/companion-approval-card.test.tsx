@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApprovalCard } from "@/companion/ApprovalCard";
@@ -22,7 +22,7 @@ function record(partial: Partial<ApprovalRecord>): ApprovalRecord {
 }
 
 describe("ApprovalCard", () => {
-  it("offers this once, each standing yes for its target, and no, as stacked buttons", () => {
+  it("offers this once, each standing yes for its target, and no, as stacked buttons", async () => {
     const onDecide = vi.fn(async () => {});
     render(
       <ApprovalCard
@@ -30,10 +30,14 @@ describe("ApprovalCard", () => {
         onDecide={onDecide}
       />,
     );
+    const twentyFourBtn = screen.getByRole("button", { name: "24 小时内「发给 a@x.com」都允许" });
     expect(screen.getByRole("button", { name: "发送，仅这次" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "「发给 a@x.com」一直允许" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "24 小时内「发给 a@x.com」都允许" }));
-    expect(onDecide).toHaveBeenCalledWith(expect.objectContaining({ id: "apv" }), "approve", "24h");
+    fireEvent.click(twentyFourBtn);
+    await waitFor(() => {
+      expect(onDecide).toHaveBeenCalledWith(expect.objectContaining({ id: "apv" }), "approve", "24h");
+      expect(twentyFourBtn).not.toBeDisabled();
+    });
   });
 
   it("says a step in the browser in words, without the script or the address", () => {

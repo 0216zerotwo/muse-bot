@@ -12,7 +12,7 @@ import { ModelPanel } from "@/companion/ModelPanel";
 import { NotificationsRow, notificationsNote, useNotifications } from "@/companion/NotificationsAction";
 import { Onboarding } from "@/companion/Onboarding";
 import { PermissionLevels } from "@/companion/PermissionLevels";
-import { PageSheet } from "@/companion/Screen";
+import { LazyBoundary, lazyScreen, PageSheet } from "@/companion/Screen";
 import { IdeasView } from "@/companion/TabViews";
 import { Viewer } from "@/companion/Viewer";
 import type { ApprovalRecord, CompanionState, Goal, ModelsPayload } from "@/companion/companion-api";
@@ -774,5 +774,35 @@ describe("ModelPanel, ApprovalCard, Composer, Onboarding, Viewer, StatusSheet & 
     );
     expect(await screen.findByRole("button", { name: /报销贴票/ })).toBeInTheDocument();
     expect(fetchSkillsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("isolates rejected lazy chunk loads inside LazyBoundary without crashing sibling UI and retries cleanly", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let shouldFail = true;
+    const FlakyPanel = lazyScreen(async () => {
+      if (shouldFail) throw new Error("Failed to fetch dynamically imported module");
+      return { default: () => <p>动态页面加载成功</p> };
+    });
+
+    try {
+      render(
+        <div>
+          <p>主聊天保持正常</p>
+          <LazyBoundary>
+            <FlakyPanel />
+          </LazyBoundary>
+        </div>,
+      );
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("这一页没加载出来");
+      expect(screen.getByText("主聊天保持正常")).toBeInTheDocument();
+
+      shouldFail = false;
+      fireEvent.click(screen.getByRole("button", { name: "重试" }));
+      expect(await screen.findByText("动态页面加载成功")).toBeInTheDocument();
+      expect(screen.getByText("主聊天保持正常")).toBeInTheDocument();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

@@ -14,19 +14,21 @@ import {
   type UsagePayload,
 } from "./companion-api";
 import { isConnected } from "./ConnectSheet";
-import { DevicesPanel } from "./DevicesPanel";
-import { PermissionLevels } from "./PermissionLevels";
-import { VaultPanel } from "./VaultPanel";
 import { MenuGroup, MenuRow, Switch } from "./Menu";
 import { readsAfterVoice, setReadsAfterVoice } from "./MessageActions";
 import { usePetSize, useThemeMode } from "./appearance";
 import { MODE_LABEL, SIZE_LABEL } from "./AppearanceDock";
-import { ModelDetail, ModelPanel } from "./ModelPanel";
 import { NotificationsRow, notificationsNote, useNotifications } from "./NotificationsAction";
-import { SkillsPanel } from "./SkillsPanel";
-import { PageSheet } from "./Screen";
+import { LazyBoundary, lazyScreen, PageSheet } from "./Screen";
 import { ConnectionsView } from "./TabViews";
 import { formatCost, formatTokens, UsagePanel } from "./UsagePanel";
+
+const ModelPanel = lazyScreen(() => import("./ModelPanel").then((m) => ({ default: m.ModelPanel })));
+const ModelDetail = lazyScreen(() => import("./ModelPanel").then((m) => ({ default: m.ModelDetail })));
+const SkillsPanel = lazyScreen(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })));
+const PermissionLevels = lazyScreen(() => import("./PermissionLevels").then((m) => ({ default: m.PermissionLevels })));
+const VaultPanel = lazyScreen(() => import("./VaultPanel").then((m) => ({ default: m.VaultPanel })));
+const DevicesPanel = lazyScreen(() => import("./DevicesPanel").then((m) => ({ default: m.DevicesPanel })));
 
 export type SettingsPage = "root" | "models" | "model" | "usage" | "skills" | "connections" | "permissions" | "vault" | "devices";
 
@@ -221,22 +223,26 @@ export function SettingsScreen({
       flush={page === "connections"}
     >
       {page === "root" && <SettingsRoot onOpen={push} onAppearance={onAppearance} />}
-      {page === "models" && (
-        <ModelPanel
-          active
-          onOpenModel={(name) => {
-            setModelName(name);
-            push("model");
-          }}
-        />
+      {page !== "root" && (
+        <LazyBoundary key={page}>
+          {page === "models" && (
+            <ModelPanel
+              active
+              onOpenModel={(name) => {
+                setModelName(name);
+                push("model");
+              }}
+            />
+          )}
+          {page === "model" && modelName && <ModelDetail name={modelName} />}
+          {page === "usage" && <UsagePanel active />}
+          {page === "skills" && <SkillsPanel onDraft={onDraft} onTeach={onTeach} />}
+          {page === "connections" && <ConnectionsView active />}
+          {page === "permissions" && <PermissionLevels />}
+          {page === "vault" && <VaultPanel />}
+          {page === "devices" && <DevicesPanel onDisconnect={onLogout} />}
+        </LazyBoundary>
       )}
-      {page === "model" && modelName && <ModelDetail name={modelName} />}
-      {page === "usage" && <UsagePanel active />}
-      {page === "skills" && <SkillsPanel onDraft={onDraft} onTeach={onTeach} />}
-      {page === "connections" && <ConnectionsView active />}
-      {page === "permissions" && <PermissionLevels />}
-      {page === "vault" && <VaultPanel />}
-      {page === "devices" && <DevicesPanel onDisconnect={onLogout} />}
     </PageSheet>
   );
 }

@@ -1,12 +1,12 @@
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 
 const GZIP_MIN_BYTES = 4 * 1024;
 const GZIP_ASSET_PATTERN = /\.(?:css|html|js|json|mjs|svg)$/i;
-const LAZY_FEATURE_CHUNK_PREFIXES = ["markdown-vendor-", "syntax-highlight-", "katex-"];
+const LAZY_FEATURE_CHUNK_PREFIXES = ["markdown-vendor-", "streamdown-vendor-", "syntax-highlight-", "katex-"];
 
 export function entryLazyFeatureImports(imports: string[]): string[] {
   return imports.filter((fileName) =>
@@ -44,6 +44,33 @@ export function writeCompressedWebuiAssets(outputDir: string, fileNames: string[
   }
 }
 
+export function syncWorkerAssetsToManifest(outputDir: string): string[] {
+  const assetsDir = path.resolve(outputDir, "assets");
+  const manifestPath = path.resolve(outputDir, "asset-manifest.json");
+  if (!existsSync(assetsDir) || !existsSync(manifestPath)) return [];
+  const workerFiles = readdirSync(assetsDir)
+    .filter((name) => /\.worker-[^/]+\.js$/i.test(name))
+    .map((name) => `assets/${name}`);
+  if (workerFiles.length === 0) return [];
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, { file?: string }>;
+    const known = new Set(Object.values(manifest).map((entry) => entry?.file).filter(Boolean));
+    let changed = false;
+    for (const rel of workerFiles) {
+      if (!known.has(rel)) {
+        manifest[`_worker_${path.basename(rel)}`] = { file: rel };
+        changed = true;
+      }
+    }
+    if (changed) {
+      writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    }
+  } catch {
+    // Non-JSON manifest in custom builds: leave untouched.
+  }
+  return workerFiles;
+}
+
 export function gzipWebuiAssets(): Plugin {
   return {
     name: "gzip-assets",
@@ -53,12 +80,15 @@ export function gzipWebuiAssets(): Plugin {
       if (!outputDir) {
         throw new Error("WebUI gzip build requires a Rollup output directory");
       }
-      writeCompressedWebuiAssets(outputDir, Object.keys(bundle));
+      const workerFiles = syncWorkerAssetsToManifest(outputDir);
+      const allFiles = Array.from(new Set([...Object.keys(bundle), ...workerFiles]));
+      writeCompressedWebuiAssets(outputDir, allFiles);
     },
   };
 }
 
-export function webuiManualChunk(id: string): string | undefined {
+export function webuiManualChunk(rawId: string): string | undefined {
+  const id = rawId.replaceAll("\\", "/");
   const locale = /\/webui\/locales\/([^/]+)\.json$/.exec(id)?.[1]
     ?? /\/src\/i18n\/locales\/([^/]+)\/common\.json$/.exec(id)?.[1];
   if (locale) return `locale-${locale}`;
@@ -79,6 +109,22 @@ export function webuiManualChunk(id: string): string | undefined {
   ) {
     return "react-vendor";
   }
+  if (id.includes("node_modules/lucide-react/")) {
+    return "icons-vendor";
+  }
+  if (
+    id.includes("node_modules/@radix-ui/")
+    || id.includes("node_modules/tailwind-merge/")
+    || id.includes("node_modules/class-variance-authority/")
+  ) {
+    return "ui-vendor";
+  }
+  if (
+    id.includes("node_modules/i18next/")
+    || id.includes("node_modules/react-i18next/")
+  ) {
+    return "i18n-vendor";
+  }
   if (id.includes("node_modules/refractor/lang/")) {
     return;
   }
@@ -98,7 +144,11 @@ export function webuiManualChunk(id: string): string | undefined {
   if (
     id.includes("node_modules/streamdown")
     || id.includes("node_modules/remend")
-    || id.includes("node_modules/remark-")
+  ) {
+    return "streamdown-vendor";
+  }
+  if (
+    id.includes("node_modules/remark-")
     || id.includes("node_modules/rehype-")
     || id.includes("node_modules/unified")
     || id.includes("node_modules/mdast-")
