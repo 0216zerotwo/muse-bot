@@ -12,7 +12,12 @@ import android.webkit.MimeTypeMap;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * The app's own files, lent to other apps one at a time: the camera writes a photo into
@@ -25,6 +30,95 @@ public class FilesProvider extends ContentProvider {
     static final String SHARED = "shared";
     /** Older files are cleared whenever a new one is made. */
     private static final long KEEP_MS = 24L * 60 * 60 * 1000;
+
+    private static final Map<String, String> EXTRA_EXT_TO_MIME;
+    private static final Map<String, String> EXTRA_MIME_TO_EXT;
+
+    static {
+        Map<String, String> extToMime = new HashMap<>();
+        extToMime.put("md", "text/markdown");
+        extToMime.put("markdown", "text/markdown");
+        extToMime.put("txt", "text/plain");
+        extToMime.put("log", "text/plain");
+        extToMime.put("csv", "text/csv");
+        extToMime.put("tsv", "text/tab-separated-values");
+        extToMime.put("json", "application/json");
+        extToMime.put("jsonl", "application/json");
+        extToMime.put("yaml", "text/yaml");
+        extToMime.put("yml", "text/yaml");
+        extToMime.put("toml", "text/plain");
+        extToMime.put("py", "text/x-python");
+        extToMime.put("js", "text/javascript");
+        extToMime.put("mjs", "text/javascript");
+        extToMime.put("ts", "text/plain");
+        extToMime.put("tsx", "text/plain");
+        extToMime.put("jsx", "text/plain");
+        extToMime.put("sh", "text/x-shellscript");
+        extToMime.put("html", "text/html");
+        extToMime.put("htm", "text/html");
+        extToMime.put("pdf", "application/pdf");
+        extToMime.put("zip", "application/zip");
+        extToMime.put("webp", "image/webp");
+        extToMime.put("heic", "image/heic");
+        extToMime.put("heif", "image/heif");
+        extToMime.put("avif", "image/avif");
+        extToMime.put("svg", "image/svg+xml");
+        extToMime.put("png", "image/png");
+        extToMime.put("jpg", "image/jpeg");
+        extToMime.put("jpeg", "image/jpeg");
+        extToMime.put("gif", "image/gif");
+        extToMime.put("mp4", "video/mp4");
+        extToMime.put("mov", "video/quicktime");
+        extToMime.put("webm", "video/webm");
+        extToMime.put("mkv", "video/x-matroska");
+        extToMime.put("m4a", "audio/mp4");
+        extToMime.put("mp3", "audio/mpeg");
+        extToMime.put("wav", "audio/wav");
+        extToMime.put("ogg", "audio/ogg");
+        extToMime.put("opus", "audio/opus");
+        extToMime.put("flac", "audio/flac");
+        extToMime.put("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        extToMime.put("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        extToMime.put("pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+        EXTRA_EXT_TO_MIME = Collections.unmodifiableMap(extToMime);
+
+        Map<String, String> mimeToExt = new HashMap<>();
+        mimeToExt.put("application/pdf", "pdf");
+        mimeToExt.put("application/json", "json");
+        mimeToExt.put("application/zip", "zip");
+        mimeToExt.put("text/markdown", "md");
+        mimeToExt.put("text/x-markdown", "md");
+        mimeToExt.put("text/plain", "txt");
+        mimeToExt.put("text/html", "html");
+        mimeToExt.put("text/csv", "csv");
+        mimeToExt.put("text/tab-separated-values", "tsv");
+        mimeToExt.put("text/yaml", "yaml");
+        mimeToExt.put("application/x-yaml", "yaml");
+        mimeToExt.put("image/jpeg", "jpg");
+        mimeToExt.put("image/png", "png");
+        mimeToExt.put("image/gif", "gif");
+        mimeToExt.put("image/webp", "webp");
+        mimeToExt.put("image/heic", "heic");
+        mimeToExt.put("image/heif", "heif");
+        mimeToExt.put("image/avif", "avif");
+        mimeToExt.put("image/svg+xml", "svg");
+        mimeToExt.put("video/mp4", "mp4");
+        mimeToExt.put("video/quicktime", "mov");
+        mimeToExt.put("video/webm", "webm");
+        mimeToExt.put("video/x-matroska", "mkv");
+        mimeToExt.put("audio/mpeg", "mp3");
+        mimeToExt.put("audio/mp4", "m4a");
+        mimeToExt.put("audio/x-m4a", "m4a");
+        mimeToExt.put("audio/wav", "wav");
+        mimeToExt.put("audio/x-wav", "wav");
+        mimeToExt.put("audio/ogg", "ogg");
+        mimeToExt.put("audio/opus", "opus");
+        mimeToExt.put("audio/flac", "flac");
+        mimeToExt.put("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx");
+        mimeToExt.put("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx");
+        mimeToExt.put("application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx");
+        EXTRA_MIME_TO_EXT = Collections.unmodifiableMap(mimeToExt);
+    }
 
     static File folder(Context context, String name) {
         File folder = new File(context.getCacheDir(), name);
@@ -49,14 +143,71 @@ public class FilesProvider extends ContentProvider {
         return new Uri.Builder().scheme("content").authority(AUTHORITY).appendPath(folder).appendPath(file.getName()).build();
     }
 
-    /** A file name without folders or a leading dot ("报告.pdf" stays, "../x" doesn't). */
+    /** A file name without folders, illegal characters, or a leading dot ("报告.pdf" stays, "../x" doesn't). */
     static String safeName(String name) {
-        String clean = name == null ? "" : name.replace('/', '_').replace('\\', '_').trim();
-        while (clean.startsWith(".")) clean = clean.substring(1);
-        return clean.isEmpty() ? "文件" : clean;
+        if (name == null) return "文件";
+        StringBuilder cleaned = new StringBuilder(name.length());
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (c < 0x20 || c == 0x7f) continue;
+            if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
+                cleaned.append('_');
+            } else {
+                cleaned.append(c);
+            }
+        }
+        String clean = cleaned.toString().trim();
+        while (clean.startsWith(".")) clean = clean.substring(1).trim();
+        while (clean.endsWith(".")) clean = clean.substring(0, clean.length() - 1).trim();
+        if (clean.isEmpty()) return "文件";
+        if (clean.getBytes(StandardCharsets.UTF_8).length <= 180) return clean;
+        int dot = clean.lastIndexOf('.');
+        String ext = dot > 0 && clean.length() - dot <= 12 ? clean.substring(dot) : "";
+        String stem = ext.isEmpty() ? clean : clean.substring(0, dot);
+        while (!stem.isEmpty() && (stem + ext).getBytes(StandardCharsets.UTF_8).length > 180) {
+            stem = stem.substring(0, stem.length() - 1);
+        }
+        return stem.isEmpty() ? "文件" + ext : stem + ext;
+    }
+
+    static String cleanMime(String mimeType) {
+        if (mimeType == null) return null;
+        int semi = mimeType.indexOf(';');
+        String clean = (semi >= 0 ? mimeType.substring(0, semi) : mimeType).trim().toLowerCase(Locale.ROOT);
+        return clean.isEmpty() ? null : clean;
+    }
+
+    static String extensionFromMime(String mimeType) {
+        String clean = cleanMime(mimeType);
+        if (clean == null || "application/octet-stream".equals(clean)) return null;
+        String mapped = EXTRA_MIME_TO_EXT.get(clean);
+        if (mapped != null) return mapped;
+        return MimeTypeMap.getSingleton().getExtensionFromMimeType(clean);
+    }
+
+    static boolean hasKnownExtension(String name) {
+        if (name == null) return false;
+        int dot = name.lastIndexOf('.');
+        if (dot <= 0 || dot == name.length() - 1 || name.length() - dot - 1 > 10) return false;
+        String ext = name.substring(dot + 1).toLowerCase(Locale.ROOT);
+        for (int i = 0; i < ext.length(); i++) {
+            char c = ext.charAt(i);
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) return false;
+        }
+        return EXTRA_EXT_TO_MIME.containsKey(ext) || MimeTypeMap.getSingleton().hasExtension(ext);
+    }
+
+    static String ensureExtension(String name, String mimeType) {
+        String safe = safeName(name);
+        if (hasKnownExtension(safe)) return safe;
+        String ext = extensionFromMime(mimeType);
+        if (ext == null || ext.isEmpty()) return safe;
+        if (safe.toLowerCase(Locale.ROOT).endsWith("." + ext.toLowerCase(Locale.ROOT))) return safe;
+        return safeName(safe + "." + ext);
     }
 
     static File fileFor(Context context, Uri uri) throws FileNotFoundException {
+        if (context == null || uri == null) throw new FileNotFoundException("null context or uri");
         List<String> parts = uri.getPathSegments();
         if (!AUTHORITY.equals(uri.getAuthority()) || parts.size() != 2
                 || !(CAPTURES.equals(parts.get(0)) || SHARED.equals(parts.get(0)))
@@ -67,8 +218,12 @@ public class FilesProvider extends ContentProvider {
     }
 
     static String typeOf(String name) {
+        if (name == null) return "application/octet-stream";
         int dot = name.lastIndexOf('.');
-        String type = dot < 0 ? null : MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substring(dot + 1).toLowerCase());
+        if (dot < 0 || dot == name.length() - 1) return "application/octet-stream";
+        String ext = name.substring(dot + 1).toLowerCase(Locale.ROOT);
+        String type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+        if (type == null) type = EXTRA_EXT_TO_MIME.get(ext);
         return type == null ? "application/octet-stream" : type;
     }
 
@@ -80,7 +235,7 @@ public class FilesProvider extends ContentProvider {
     @Override
     public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
         File file = fileFor(getContext(), uri);
-        int flags = mode.contains("w")
+        int flags = mode != null && mode.contains("w")
                 ? ParcelFileDescriptor.MODE_READ_WRITE | ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE
                 : ParcelFileDescriptor.MODE_READ_ONLY;
         return ParcelFileDescriptor.open(file, flags);
@@ -107,7 +262,8 @@ public class FilesProvider extends ContentProvider {
 
     @Override
     public String getType(Uri uri) {
-        return typeOf(uri.getLastPathSegment() == null ? "" : uri.getLastPathSegment());
+        String last = uri == null ? null : uri.getLastPathSegment();
+        return typeOf(last == null ? "" : last);
     }
 
     @Override

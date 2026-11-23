@@ -2,6 +2,7 @@ package com.personalbot.companion;
 
 import android.app.Activity;
 import android.app.Dialog;
+import android.content.Context;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -10,10 +11,12 @@ import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.WindowInsets;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
@@ -54,7 +57,7 @@ final class AttachSheet {
     private LinearLayout strip;
     private boolean dark;
     /** Thumbnails still loading for an older strip are dropped. */
-    private int generation;
+    private volatile int generation;
 
     AttachSheet(Activity activity, Listener listener) {
         this.activity = activity;
@@ -67,11 +70,14 @@ final class AttachSheet {
     }
 
     void show(boolean canRead) {
+        if (activity.isFinishing() || activity.isDestroyed()) return;
+        dismiss();
         dark = (activity.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
                 == Configuration.UI_MODE_NIGHT_YES;
         dialog = new Dialog(activity);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        dialog.setContentView(content());
+        View rootView = content();
+        dialog.setContentView(rootView);
         Window window = dialog.getWindow();
         if (window != null) {
             window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -80,16 +86,26 @@ final class AttachSheet {
             window.setWindowAnimations(android.R.style.Animation_InputMethod);
         }
         dialog.show();
+        if (window != null) window.getDecorView().requestApplyInsets();
         fill(canRead);
     }
 
     /** After the photo permission was answered. */
     void refresh(boolean canRead) {
-        if (showing()) fill(canRead);
+        if (!activity.isFinishing() && !activity.isDestroyed() && showing()) fill(canRead);
     }
 
     void dismiss() {
-        if (showing()) dialog.dismiss();
+        generation++;
+        Dialog current = dialog;
+        dialog = null;
+        if (current != null) {
+            try {
+                if (current.isShowing()) current.dismiss();
+            } catch (RuntimeException ignored) {
+                // Window token may already be gone during activity teardown.
+            }
+        }
     }
 
     private int dp(float value) {
@@ -110,10 +126,18 @@ final class AttachSheet {
 
     private static final int ACCENT = 0xFFBD5A02;  // the companion's --c-primary
 
+    @SuppressWarnings("deprecation")
     private View content() {
         LinearLayout root = new LinearLayout(activity);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(0, dp(10), 0, dp(16));
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int bottom = Build.VERSION.SDK_INT >= 30
+                    ? insets.getInsets(WindowInsets.Type.systemBars()).bottom
+                    : insets.getSystemWindowInsetBottom();
+            view.setPadding(0, dp(10), 0, dp(16) + Math.max(0, bottom));
+            return insets;
+        });
         GradientDrawable sheet = new GradientDrawable();
         float r = dp(28);
         sheet.setCornerRadii(new float[] {r, r, r, r, 0, 0, 0, 0});
@@ -235,6 +259,7 @@ final class AttachSheet {
 
     /** The camera, then either the latest photos or a tile asking to allow them. */
     private void fill(boolean canRead) {
+        if (strip == null) return;
         final int run = ++generation;
         strip.removeAllViews();
         strip.addView(iconTile(R.drawable.ic_camera, "拍照", () -> listener.onCamera(false)), tileAt(dp(TILE_DP)));
@@ -249,13 +274,17 @@ final class AttachSheet {
             return;
         }
         final int px = dp(TILE_DP);
+        final Context app = activity.getApplicationContext();
         new Thread(() -> {
-            List<MediaLibrary.Recent> items = MediaLibrary.recent(activity, RECENT);
+            List<MediaLibrary.Recent> items = MediaLibrary.recent(app, RECENT);
             for (MediaLibrary.Recent item : items) {
                 if (run != generation) return;
-                item.thumbnail = MediaLibrary.thumbnail(activity, item, px);
+                item.thumbnail = MediaLibrary.thumbnail(app, item, px);
+                if (run != generation) return;
                 activity.runOnUiThread(() -> {
-                    if (run == generation && showing()) strip.addView(recentTile(item), tileAt(px));
+                    if (run == generation && !activity.isFinishing() && !activity.isDestroyed() && showing() && strip != null) {
+                        strip.addView(recentTile(item), tileAt(px));
+                    }
                 });
             }
         }, "attach-recent").start();
