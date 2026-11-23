@@ -77,10 +77,21 @@ const STEP_NEXT: Record<GoalStep["status"], GoalStep["status"]> = {
 function useGoals() {
   const { token } = useClient();
   const [goals, setGoals] = useState<Goal[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const refresh = useCallback(() => {
-    fetchGoals(token).then(setGoals).catch(() => undefined);
+    setLoadError(null);
+    fetchGoals(token)
+      .then((next) => {
+        setGoals(next);
+        setLoaded(true);
+        setLoadError(null);
+      })
+      .catch((e: unknown) => {
+        setLoadError(e instanceof Error ? e.message : String(e));
+      });
   }, [token]);
-  return { goals, setGoals, refresh };
+  return { goals, setGoals, loaded, loadError, refresh };
 }
 
 export function GoalsScreen({
@@ -108,7 +119,7 @@ export function GoalsScreen({
   onSend: (text: string) => void;
 }) {
   const { client, token } = useClient();
-  const { goals, setGoals, refresh } = useGoals();
+  const { goals, setGoals, loaded, loadError, refresh } = useGoals();
   const [jobs, setJobs] = useState<SessionAutomationJob[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -172,9 +183,13 @@ export function GoalsScreen({
         </MuseRoundButton>
       </div>
       {error && (
-        <p className="px-5 pb-2 text-[13px] text-om-danger" role="alert">
-          {error}
-        </p>
+        <div className="mx-4 mb-2 flex items-center gap-2.5 rounded-2xl border border-om-border bg-om-surface-2 px-3.5 py-2.5 text-[13px]" role="alert">
+          <AlertCircle size={16} className="shrink-0 text-om-danger" aria-hidden="true" />
+          <span className="min-w-0 flex-1 text-om-danger">{error}</span>
+          <button type="button" onClick={() => setError(null)} className="shrink-0 rounded-full px-2.5 py-1 text-[12px] font-medium text-om-muted">
+            知道了
+          </button>
+        </div>
       )}
 
       {proposals.length > 0 && (
@@ -189,10 +204,45 @@ export function GoalsScreen({
       )}
 
       <SectionHeader label="在跟进" dot />
-      {tracked.length === 0 ? (
-        <p className="px-5 pb-3 text-[13px] text-om-muted">还没有在跟进的目标</p>
+      {loadError && !loaded ? (
+        <div className="mx-4 mb-3 flex items-center gap-3 rounded-3xl border border-om-border bg-om-surface-2 px-4 py-3.5" role="alert">
+          <AlertCircle size={18} className="shrink-0 text-om-danger" aria-hidden="true" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[14px] font-semibold">目标列表没加载出来</p>
+            <p className="truncate text-[12.5px] text-om-muted">{loadError}</p>
+          </div>
+          <button
+            type="button"
+            onClick={refresh}
+            className="shrink-0 rounded-full bg-om-accent px-3.5 py-1.5 text-[13px] font-semibold text-om-accent-fg"
+          >
+            重试
+          </button>
+        </div>
+      ) : tracked.length === 0 ? (
+        <div className="mx-4 mb-3 rounded-3xl border border-om-border bg-om-surface-2 px-5 py-5 text-center">
+          <p className="text-[15px] font-semibold">还没有在跟进的目标</p>
+          <p className="mt-1 text-[13px] leading-relaxed text-om-muted">
+            把想坚持的习惯或要推进的计划交给我，拆成小步骤按时问你进展。
+          </p>
+          <button
+            type="button"
+            onClick={() => setCreating(true)}
+            className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-om-accent px-4 py-2 text-[13.5px] font-semibold text-om-accent-fg"
+          >
+            <Plus size={16} aria-hidden="true" /> 定个目标
+          </button>
+        </div>
       ) : (
-        tracked.map((g) => <GoalRow key={g.id} goal={g} onOpen={() => setSelected(g.id)} onToggle={() => void change(g, { done: !g.done })} />)
+        tracked.map((g) => (
+          <GoalRow
+            key={g.id}
+            goal={g}
+            live={Boolean(working && working.asked.includes(g.title))}
+            onOpen={() => setSelected(g.id)}
+            onToggle={() => void change(g, { done: !g.done })}
+          />
+        ))
       )}
 
       {finished.length > 0 && (
@@ -371,7 +421,17 @@ function progress(goal: Goal): { done: number; total: number } {
 }
 
 /** One goal the way Muse lists it: a checkbox, the title, a two-line status, the cadence and progress. */
-function GoalRow({ goal, onOpen, onToggle }: { goal: Goal; onOpen: () => void; onToggle: () => void }) {
+function GoalRow({
+  goal,
+  live = false,
+  onOpen,
+  onToggle,
+}: {
+  goal: Goal;
+  live?: boolean;
+  onOpen: () => void;
+  onToggle: () => void;
+}) {
   const { done: doneSteps, total } = progress(goal);
   const pct = total ? Math.round((doneSteps / total) * 100) : 0;
   const due = dueLabel(goal.due);
@@ -392,12 +452,25 @@ function GoalRow({ goal, onOpen, onToggle }: { goal: Goal; onOpen: () => void; o
         <span className={cn("line-clamp-2 block text-[15px] font-semibold leading-snug", goal.done && "text-om-muted")}>{goal.title}</span>
         {subtitle && !goal.done && <span className="mt-0.5 line-clamp-2 block text-[13px] leading-[18px] text-om-muted">{subtitle}</span>}
         <span className="mt-0.5 flex items-center gap-2 text-[12px] text-om-muted">
+          {live && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-om-accent-soft px-2 py-0.5 text-[11px] font-semibold text-om-accent">
+              <Loader2 size={11} className="animate-spin" aria-hidden="true" /> 推进中
+            </span>
+          )}
           <span className="truncate">
             {cadence}
             {due && !goal.done && !goal.paused ? ` · ${due}` : ""}
           </span>
           {pct > 0 && !goal.done && <span className="shrink-0 font-medium text-emerald-600 dark:text-emerald-400">{pct}%</span>}
         </span>
+        {total > 0 && !goal.done && (
+          <span className="mt-1.5 block h-1.5 w-full max-w-[180px] overflow-hidden rounded-full bg-om-surface-2" aria-hidden="true">
+            <span
+              className={cn("block h-full rounded-full transition-[width] duration-300", live ? "bg-om-accent" : "bg-emerald-500")}
+              style={{ width: `${Math.max(pct, live ? 12 : 0)}%` }}
+            />
+          </span>
+        )}
       </button>
       <button type="button" onClick={onOpen} aria-label={`「${goal.title}」详情`} className="flex h-10 w-10 shrink-0 items-center justify-center text-om-muted">
         <MoreVertical size={20} />

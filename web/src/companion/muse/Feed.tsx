@@ -4,7 +4,7 @@
  * short read with its sources linked, maybe a picture, and ❤ · 讨论 · time · ⓘ. Ported in shape
  * from nanoMuse (vendor/nanomuse-web/web/src/screens/FeedScreen.tsx, GPL-3.0-or-later).
  */
-import { Heart, Info, Loader2, MessageCircle, PenLine } from "lucide-react";
+import { AlertCircle, Heart, Info, Loader2, MessageCircle, PenLine } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { MarkdownText } from "@/components/MarkdownText";
@@ -201,20 +201,38 @@ export function FeedScreen({
 }) {
   const { client } = useClient();
   const [info, setInfo] = useState<FeedPost | null>(null);
+  const [actionError, setActionError] = useState<{ message: string; retry: () => void } | null>(null);
   // ❤ is kept on the server: the next run writes more of what was liked.
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const liked = (id: string) => pending[id] ?? (data?.liked ?? []).includes(id);
-  const toggleLike = (id: string) => {
-    const on = !liked(id);
+  const toggleLike = (id: string, desired?: boolean) => {
+    const on = desired ?? !liked(id);
+    setActionError(null);
     setPending((current) => ({ ...current, [id]: on }));
     changeFeed(client, "like", { id, on })
       .then(onChange)
-      .catch(() => undefined)
+      .catch((e: unknown) =>
+        setActionError({
+          message: e instanceof Error ? e.message : "操作没保存成功，请稍后再试",
+          retry: () => toggleLike(id, on),
+        }),
+      )
       .finally(() =>
         setPending((current) => {
           const rest = { ...current };
           delete rest[id];
           return rest;
+        }),
+      );
+  };
+  const removePost = (id: string) => {
+    setActionError(null);
+    void changeFeed(client, "delete", { id })
+      .then(onChange)
+      .catch((e: unknown) =>
+        setActionError({
+          message: e instanceof Error ? e.message : "删除失败，请稍后再试",
+          retry: () => removePost(id),
         }),
       );
   };
@@ -226,16 +244,35 @@ export function FeedScreen({
         <button
           type="button"
           onClick={onEditInstructions}
-          className="c-pressable mt-3 block w-full truncate rounded-full border px-5 py-3 text-left text-[16px] c-divider c-muted"
+          className="c-pressable c-divider c-muted mt-3 block w-full truncate rounded-full border px-5 py-3 text-left text-[16px]"
         >
           {data?.instructions ?? "…"}
         </button>
       </div>
 
+      {actionError && (
+        <div className="c-card mx-4 my-2 flex items-center gap-3 rounded-2xl px-4 py-3" role="alert">
+          <AlertCircle className="c-danger h-4 w-4 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 flex-1 truncate text-[13.5px]">{actionError.message}</span>
+          <button
+            type="button"
+            onClick={actionError.retry}
+            className="c-pressable shrink-0 rounded-full px-3 py-1 text-[13px] font-semibold"
+            style={{ background: "var(--c-fill)" }}
+          >
+            重试
+          </button>
+        </div>
+      )}
+
       {writing && (
-        <p className="c-muted flex items-center gap-2 px-5 py-4 text-[14px]">
-          <Loader2 className="h-4 w-4 animate-spin" /> 正在写…
-        </p>
+        <div className="c-card mx-4 my-2 flex items-center gap-3 rounded-2xl px-4 py-3" role="status">
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin" style={{ color: "var(--c-primary)" }} aria-hidden="true" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[14px] font-medium">正在写新一期动态…</p>
+            <p className="c-muted text-[12px]">根据你的兴趣与最近聊过的话题整理中</p>
+          </div>
+        </div>
       )}
 
       {data && data.posts.length === 0 && !writing ? (
@@ -244,7 +281,9 @@ export function FeedScreen({
             <EmojiIcon emoji="🗞️" size={72} />
           </span>
           <p className="mt-3 text-[16px] font-semibold">还没有动态</p>
-          <p className="c-muted mt-1 text-[14px] leading-relaxed">每天 {data.time} 更新</p>
+          <p className="c-muted mt-1 max-w-xs text-[14px] leading-relaxed">
+            {data.daily ? `每天 ${data.time} 自动更新，也可以现在先写一期看看` : "自动更新已关闭，随时可以手动让它写一期"}
+          </p>
           <button type="button" onClick={onWriteNow} className="c-primary mt-4 min-h-11 rounded-full px-6 text-[15px] font-semibold">
             现在就写一期
           </button>
@@ -284,7 +323,7 @@ export function FeedScreen({
               onClick={() => {
                 const id = info.id;
                 setInfo(null);
-                void changeFeed(client, "delete", { id }).then(onChange).catch(() => undefined);
+                removePost(id);
               }}
               className="c-danger c-pressable min-h-11 rounded-full text-[15px]"
               style={{ background: "var(--c-fill)" }}

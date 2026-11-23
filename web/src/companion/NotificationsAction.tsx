@@ -105,24 +105,46 @@ export function useNotifications() {
 }
 
 /** Why the switch cannot be used right now, shown under the settings group. */
-export function notificationsNote(status: PushStatus): string | null {
+export function notificationsNote(status: PushStatus, serverPush?: boolean): string | null {
   if (androidShell()?.remindersEnabled && (status.kind === "on" || status.kind === "off")) {
     return "提醒到点时，手机会通知你。别的消息（回复、主动找你）要打开 App 才看得到。";
   }
+  if (serverPush === false && !androidShell()?.remindersEnabled) {
+    return "服务器当前未启用 Web Push 推送服务，配置 VAPID 密钥后即可开启跨设备通知。";
+  }
   if (status.kind === "unsupported") return status.reason;
-  if (status.kind === "denied") return "通知权限被拒绝了，到手机的系统设置里打开";
+  if (status.kind === "denied") return "通知权限被拒绝了，到手机或浏览器的系统设置里打开";
   if (status.kind === "error") return `通知出错了：${status.message}`;
   return null;
 }
 
 /** 通知 row: a switch, or a short word when it cannot be switched here. */
-export function NotificationsRow({ status, onToggle }: { status: PushStatus; onToggle: () => void }) {
-  const usable = status.kind === "on" || status.kind === "off" || status.kind === "busy";
+export function NotificationsRow({
+  status,
+  onToggle,
+  serverPush,
+}: {
+  status: PushStatus;
+  onToggle: () => void;
+  serverPush?: boolean;
+}) {
+  const blockedByServer = serverPush === false && !androidShell()?.remindersEnabled;
+  const usable = !blockedByServer && (status.kind === "on" || status.kind === "off" || status.kind === "busy");
   return (
     <MenuRow
-      icon={status.kind === "on" ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}
+      icon={status.kind === "on" && !blockedByServer ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}
       label="通知"
-      value={status.kind === "busy" ? status.label : usable ? undefined : status.kind === "checking" ? "检查中" : "不可用"}
+      value={
+        blockedByServer
+          ? "未启用"
+          : status.kind === "busy"
+            ? status.label
+            : usable
+              ? undefined
+              : status.kind === "checking"
+                ? "检查中"
+                : "不可用"
+      }
       trailing={
         usable ? (
           <Switch checked={status.kind === "on"} disabled={status.kind === "busy"} label="通知" onChange={onToggle} />

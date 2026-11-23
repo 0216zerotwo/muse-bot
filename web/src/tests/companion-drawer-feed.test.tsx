@@ -11,6 +11,7 @@ vi.mock("@/providers/ClientProvider", () => ({ useClient: () => ({ client: { req
 
 afterEach(() => {
   cleanup();
+  localStorage.clear();
   vi.useRealTimers();
 });
 

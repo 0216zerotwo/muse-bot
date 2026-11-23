@@ -3,8 +3,8 @@
  * 旁聊 (side chats on a topic of their own, kept apart from the main chat); and at the bottom
  * settings, search and a new side chat.
  */
-import { MoreHorizontal, Search, Settings, SquarePen } from "lucide-react";
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Clock, Loader2, MoreHorizontal, Search, Settings, SquarePen, X } from "lucide-react";
+import { Fragment, useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import type { ChatSummary } from "@/lib/types";
 
@@ -319,18 +319,46 @@ export function MuseDrawer({
   onOpenHit?: (hit: ChatSearchHit) => void;
 }) {
   const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
   const [found, setFound] = useState<{ words: string; hits: ChatSearchHit[] } | null>(null);
+  const [recentSearches, setRecentSearches] = useState<string[]>(() => readRecentSearches());
+
+  const rememberSearch = useCallback((raw: string) => {
+    const clean = tokenizeSearchQuery(raw).join(" ");
+    if (!clean) return;
+    setRecentSearches((prev) => {
+      const lower = clean.toLowerCase();
+      const next = [clean, ...prev.filter((item) => item.toLowerCase() !== lower)].slice(0, MAX_RECENT_SEARCHES);
+      writeRecentSearches(next);
+      return next;
+    });
+  }, []);
+
+  const clearRecentSearches = useCallback(() => {
+    setRecentSearches([]);
+    writeRecentSearches([]);
+  }, []);
+
   useEffect(() => {
     const words = query.trim();
     if (!words || !search) {
       setFound(null);
+      setSearching(false);
       return;
     }
     let alive = true;
+    setSearching(true);
     const timer = window.setTimeout(() => {
       search(words)
-        .then((hits) => alive && setFound({ words, hits }))
-        .catch(() => alive && setFound({ words, hits: [] }));
+        .then((hits) => {
+          if (alive) setFound({ words, hits });
+        })
+        .catch(() => {
+          if (alive) setFound({ words, hits: [] });
+        })
+        .finally(() => {
+          if (alive) setSearching(false);
+        });
     }, 350);
     return () => {
       alive = false;
@@ -349,14 +377,20 @@ export function MuseDrawer({
     if (!open) {
       setQuery("");
       setSwiped(null);
+    } else {
+      setRecentSearches(readRecentSearches());
     }
   }, [open]);
   useBackKey(onClose, open);
 
-  const needle = query.trim().toLowerCase();
-  const chats = needle
-    ? sideChats.filter((chat) => `${chat.title ?? ""} ${chat.preview}`.toLowerCase().includes(needle))
-    : sideChats;
+  const tokens = tokenizeSearchQuery(query).map((t) => t.toLowerCase());
+  const chats =
+    tokens.length > 0
+      ? sideChats.filter((chat) => {
+          const haystack = `${chat.title ?? ""} ${chat.preview}`.toLowerCase();
+          return tokens.every((t) => haystack.includes(t));
+        })
+      : sideChats;
   const label = (chat: ChatSummary) => chat.title || chat.preview.slice(0, 16) || "新的旁聊";
 
   return (
@@ -391,7 +425,7 @@ export function MuseDrawer({
           <p className="c-muted px-3 pb-2 text-[13px] font-medium">旁聊</p>
           {chats.length === 0 ? (
             <p className="c-muted px-3 py-2 text-[14px] leading-relaxed">
-              {needle ? "没有找到" : "还没有旁聊"}
+              {tokens.length > 0 ? "没有找到匹配的旁聊" : "还没有旁聊"}
             </p>
           ) : (
             <ul className="flex flex-col gap-0.5">
@@ -402,6 +436,7 @@ export function MuseDrawer({
                   swiped={swiped === chat.chatId}
                   onSwipe={(open) => setSwiped(open ? chat.chatId : null)}
                   onOpen={() => {
+                    if (query.trim()) rememberSearch(query);
                     onOpenChat(chat.chatId);
                     onClose();
                   }}
@@ -419,50 +454,121 @@ export function MuseDrawer({
           {found && (
             <>
               <div className="c-divider mx-3 my-4 border-t" />
-              <p className="c-muted px-3 pb-2 text-[13px] font-medium">聊天记录</p>
+              <div className="flex items-center justify-between px-3 pb-2">
+                <p className="c-muted text-[13px] font-medium">聊天记录</p>
+                {found.hits.length > 0 && <span className="c-muted text-[12px]">{found.hits.length} 条相关</span>}
+              </div>
               {found.hits.length === 0 ? (
                 <p className="c-muted px-3 py-2 text-[14px] leading-relaxed">聊天记录里没有「{found.words}」</p>
               ) : (
-                <ul className="flex flex-col gap-0.5">
-                  {found.hits.map((hit, index) => (
-                    <li key={`${hit.chat_id}-${hit.at_ms}-${index}`}>
-                      <button
-                        type="button"
-                        className="c-pressable w-full rounded-2xl px-3 py-2 text-left"
-                        onClick={() => {
-                          onOpenHit?.(hit);
-                          onClose();
-                        }}
-                      >
-                        <span className="c-muted flex justify-between gap-2 text-[12px]">
-                          <span className="truncate">
-                            {hit.role === "user" ? "我" : name} · {hit.chat_title}
+                <ul className="flex flex-col gap-1">
+                  {found.hits.map((hit, index) => {
+                    const isUser = hit.role === "user";
+                    return (
+                      <li key={`${hit.chat_id}-${hit.at_ms}-${index}`}>
+                        <button
+                          type="button"
+                          className="c-pressable w-full rounded-2xl px-3 py-2.5 text-left"
+                          onClick={() => {
+                            rememberSearch(found.words);
+                            onOpenHit?.(hit);
+                            onClose();
+                          }}
+                        >
+                          <span className="mb-1 flex items-center gap-1.5 text-[12px]">
+                            <span
+                              className="shrink-0 rounded-full px-1.5 py-0.5 text-[11px] font-semibold leading-none"
+                              style={
+                                isUser
+                                  ? {
+                                      color: "var(--c-primary)",
+                                      background: "color-mix(in srgb, var(--c-primary) 12%, transparent)",
+                                    }
+                                  : { background: "var(--c-fill)" }
+                              }
+                            >
+                              {isUser ? "我" : name}
+                            </span>
+                            <span
+                              className="c-muted max-w-[140px] truncate rounded-full px-2 py-0.5 text-[11px] leading-none"
+                              style={{ background: "var(--c-fill)" }}
+                            >
+                              {hit.chat_title}
+                            </span>
+                            <span className="c-muted ml-auto shrink-0">{hitTime(hit.at_ms)}</span>
                           </span>
-                          <span className="shrink-0">{hitTime(hit.at_ms)}</span>
-                        </span>
-                        <span className="line-clamp-3 block text-[15px] leading-snug">{marked(hit.text, found.words)}</span>
-                      </button>
-                    </li>
-                  ))}
+                          <span className="line-clamp-3 block text-[14.5px] leading-snug">{marked(hit.text, found.words)}</span>
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </>
           )}
         </div>
 
+        {!query.trim() && recentSearches.length > 0 && (
+          <div className="px-3 pt-1.5">
+            <div className="mb-1 flex items-center justify-between px-1">
+              <span className="c-muted flex items-center gap-1 text-[11.5px] font-medium">
+                <Clock className="h-3 w-3" aria-hidden="true" /> 最近搜索
+              </span>
+              <button
+                type="button"
+                aria-label="清空最近搜索"
+                onClick={clearRecentSearches}
+                className="c-muted c-pressable rounded-full px-1.5 py-0.5 text-[11.5px]"
+              >
+                清空
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {recentSearches.map((term) => (
+                <button
+                  key={term}
+                  type="button"
+                  onClick={() => setQuery(term)}
+                  className="c-pressable max-w-[160px] truncate rounded-full px-2.5 py-1 text-[12.5px]"
+                  style={{ background: "var(--c-fill)" }}
+                >
+                  {term}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="flex items-center gap-2 px-3 pt-2" style={{ paddingBottom: "max(env(safe-area-inset-bottom), 14px)" }}>
           <button type="button" onClick={onOpenSettings} aria-label="设置" className="c-float c-pressable grid h-12 w-12 shrink-0 place-items-center rounded-full">
             <Settings className="h-6 w-6" />
           </button>
-          <label className="c-float flex h-12 min-w-0 flex-1 items-center gap-2 rounded-full px-4">
-            <Search className="c-muted h-4 w-4 shrink-0" />
+          <label className="c-float flex h-12 min-w-0 flex-1 items-center gap-2 rounded-full pl-4 pr-2.5">
+            {searching ? (
+              <Loader2 className="c-muted h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />
+            ) : (
+              <Search className="c-muted h-4 w-4 shrink-0" aria-hidden="true" />
+            )}
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索"
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && query.trim()) rememberSearch(query);
+              }}
+              placeholder="搜索（空格分隔多词）"
               aria-label="搜索旁聊和聊天记录"
               className="min-w-0 flex-1 bg-transparent text-[16px] outline-none"
             />
+            {query && (
+              <button
+                type="button"
+                aria-label="清空搜索"
+                onClick={() => setQuery("")}
+                className="c-muted c-pressable grid h-7 w-7 shrink-0 place-items-center rounded-full"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            )}
           </label>
           <button
             type="button"
@@ -482,15 +588,132 @@ export function MuseDrawer({
   );
 }
 
-/** The words searched for, in the accent colour. */
+export const RECENT_SEARCHES_KEY = "companion.recent-searches";
+const MAX_RECENT_SEARCHES = 6;
+
+function readRecentSearches(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_SEARCHES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, MAX_RECENT_SEARCHES);
+  } catch {
+    return [];
+  }
+}
+
+function writeRecentSearches(items: string[]): void {
+  try {
+    if (items.length === 0) localStorage.removeItem(RECENT_SEARCHES_KEY);
+    else localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(items));
+  } catch {
+    // Ignore storage quota or private-mode errors.
+  }
+}
+
+/** Splits whitespace-separated search terms and removes case-insensitive duplicates. */
+export function tokenizeSearchQuery(words: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of words.trim().split(/\s+/)) {
+    if (!part) continue;
+    const key = part.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(part);
+  }
+  return out;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+export interface SearchSnippet {
+  prefixEllipsis: boolean;
+  suffixEllipsis: boolean;
+  segments: { text: string; match: boolean }[];
+}
+
+/** Centers a snippet window around the earliest keyword match and splits matched keywords. */
+export function buildSearchSnippet(text: string, words: string, maxLen = 96): SearchSnippet {
+  const normalized = text.replace(/\s+/g, " ").trim() || text;
+  const tokens = tokenizeSearchQuery(words);
+  if (tokens.length === 0) {
+    const clipped = normalized.slice(0, maxLen);
+    return {
+      prefixEllipsis: false,
+      suffixEllipsis: normalized.length > clipped.length,
+      segments: clipped ? [{ text: clipped, match: false }] : [],
+    };
+  }
+
+  const ordered = [...tokens].sort((a, b) => b.length - a.length);
+  const pattern = new RegExp(`(${ordered.map(escapeRegExp).join("|")})`, "gi");
+  const firstMatch = pattern.exec(normalized);
+  const firstAt = firstMatch ? firstMatch.index : -1;
+  const firstLen = firstMatch ? firstMatch[0].length : 0;
+
+  let start = 0;
+  let end = normalized.length;
+  if (normalized.length > maxLen) {
+    if (firstAt < 0) {
+      end = maxLen;
+    } else {
+      start = Math.max(0, Math.min(normalized.length - maxLen, firstAt - Math.floor((maxLen - firstLen) / 2)));
+      end = Math.min(normalized.length, start + maxLen);
+    }
+    if (start > 0 && isLowSurrogate(normalized.charCodeAt(start))) start -= 1;
+    if (end < normalized.length && isHighSurrogate(normalized.charCodeAt(end - 1))) end += 1;
+  }
+
+  const slice = normalized.slice(start, end);
+  const tokenSet = new Set(ordered.map((t) => t.toLowerCase()));
+  const segments: { text: string; match: boolean }[] = [];
+  for (const part of slice.split(pattern)) {
+    if (!part) continue;
+    segments.push({ text: part, match: tokenSet.has(part.toLowerCase()) });
+  }
+
+  return {
+    prefixEllipsis: start > 0,
+    suffixEllipsis: end < normalized.length,
+    segments,
+  };
+}
+
+/** The words searched for, highlighted in the accent colour inside a centered window. */
 function marked(text: string, words: string): ReactNode {
-  const at = text.toLowerCase().indexOf(words.toLowerCase());
-  if (at < 0) return text;
+  const snippet = buildSearchSnippet(text, words);
   return (
     <>
-      {text.slice(0, at)}
-      <b style={{ color: "var(--c-primary)" }}>{text.slice(at, at + words.length)}</b>
-      {text.slice(at + words.length)}
+      {snippet.prefixEllipsis && <span className="c-muted">…</span>}
+      {snippet.segments.map((seg, index) =>
+        seg.match ? (
+          <b
+            key={index}
+            className="rounded px-0.5 font-semibold"
+            style={{
+              color: "var(--c-primary)",
+              background: "color-mix(in srgb, var(--c-primary) 14%, transparent)",
+            }}
+          >
+            {seg.text}
+          </b>
+        ) : (
+          <Fragment key={index}>{seg.text}</Fragment>
+        ),
+      )}
+      {snippet.suffixEllipsis && <span className="c-muted">…</span>}
     </>
   );
 }

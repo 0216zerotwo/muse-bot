@@ -764,9 +764,18 @@ export function HelpersScreen({ active, onOpenChat }: { active: boolean; onOpenC
   const [editingGroup, setEditingGroup] = useState<HelperGroup | null>(null);
   const [menu, setMenu] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    fetchHelpers(token).then(setData).catch(() => undefined);
+    setLoadError(null);
+    fetchHelpers(token)
+      .then((next) => {
+        setData(next);
+        setLoadError(null);
+      })
+      .catch((e: unknown) => {
+        setLoadError(e instanceof Error ? e.message : String(e));
+      });
   }, [token]);
   useEffect(() => {
     if (active) load();
@@ -847,10 +856,62 @@ export function HelpersScreen({ active, onOpenChat }: { active: boolean; onOpenC
           </div>
         }
       />
-      {error && <p className="c-danger px-5 pb-2 text-[14px]">{error}</p>}
+      {error && (
+        <div className="c-card mx-4 mb-2 flex items-center gap-2.5 rounded-2xl px-4 py-2.5 text-[13.5px]" role="alert">
+          <span className="c-danger min-w-0 flex-1">{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            className="c-muted c-pressable shrink-0 rounded-full px-2.5 py-1 text-[12px]"
+          >
+            关闭
+          </button>
+        </div>
+      )}
+
+      {loadError && !data && (
+        <div className="c-card mx-4 mt-2 flex items-center gap-3 rounded-2xl px-4 py-3.5" role="alert">
+          <div className="min-w-0 flex-1">
+            <p className="text-[14.5px] font-semibold">帮手列表没加载出来</p>
+            <p className="c-muted truncate text-[12.5px]">{loadError}</p>
+          </div>
+          <button
+            type="button"
+            onClick={load}
+            className="c-primary shrink-0 rounded-full px-4 py-1.5 text-[13px] font-semibold"
+          >
+            重试
+          </button>
+        </div>
+      )}
+
+      {busy && (
+        <div
+          className="c-card mx-4 mb-2 flex items-center gap-2.5 rounded-2xl px-4 py-2.5 text-[13px]"
+          role="status"
+        >
+          <span className="h-2 w-2 shrink-0 animate-pulse rounded-full" style={{ background: "var(--c-primary)" }} aria-hidden="true" />
+          <span style={{ color: "var(--c-primary)" }} className="font-medium">
+            {helpers.filter((h) => h.working).length} 位帮手正在后台处理任务
+          </span>
+        </div>
+      )}
 
       {data && conversations.length === 0 && (
-        <p className="c-muted px-5 text-[15px] leading-relaxed">点右上角的 + 建一个帮手：跟它聊几句，它就知道自己该干什么。</p>
+        <div className="c-card mx-5 mt-3 flex flex-col items-center rounded-3xl px-6 py-7 text-center">
+          <span className="text-[36px] leading-none" aria-hidden="true">🧑‍💼</span>
+          <p className="mt-3 text-[16px] font-semibold">还没有帮手</p>
+          <p className="c-muted mt-1 max-w-xs text-[13.5px] leading-relaxed">
+            建一个专门管记账、比价、盯快递或整理笔记的帮手；跟它聊几句，它就知道自己该干什么。
+          </p>
+          <button
+            type="button"
+            onClick={() => setPicking(true)}
+            className="c-primary mt-4 inline-flex min-h-10 items-center gap-1.5 rounded-full px-5 text-[14px] font-semibold"
+          >
+            <UserPlus className="h-4 w-4" aria-hidden="true" /> 创建第一个帮手
+          </button>
+        </div>
       )}
       <ul className="c-divider divide-y">
         {conversations.map((row) => {

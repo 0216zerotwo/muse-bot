@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
-import { BarChart3, Cpu, GraduationCap, KeyRound, Palette, PlugZap, Server, ShieldCheck, Smartphone, Volume2 } from "lucide-react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { BarChart3, Bell, Cpu, Globe, GraduationCap, KeyRound, Mic, Palette, PlugZap, Server, ShieldCheck, Smartphone, Volume2 } from "lucide-react";
 
 import { fetchMcpPresets } from "@/lib/api";
 import { useClient } from "@/providers/ClientProvider";
 
 import { androidShell } from "./android-shell";
 import {
+  fetchCompanionState,
   fetchModels,
   fetchSkills,
   fetchUsage,
+  type CompanionState,
   type ModelsPayload,
   type Routines,
   type UsagePayload,
@@ -18,7 +20,7 @@ import { MenuGroup, MenuRow, Switch } from "./Menu";
 import { readsAfterVoice, setReadsAfterVoice } from "./MessageActions";
 import { usePetSize, useThemeMode } from "./appearance";
 import { MODE_LABEL, SIZE_LABEL } from "./AppearanceDock";
-import { NotificationsRow, notificationsNote, useNotifications } from "./NotificationsAction";
+import { NotificationsRow, notificationsNote, useNotifications, type PushStatus } from "./NotificationsAction";
 import { LazyBoundary, lazyScreen, PageSheet } from "./Screen";
 import { ConnectionsView } from "./TabViews";
 import { formatCost, formatTokens, UsagePanel } from "./UsagePanel";
@@ -68,7 +70,177 @@ function usageShort(usage: UsagePayload | null): string | undefined {
   return cost ? `今天${cost}` : `今天 ${formatTokens(total)} token`;
 }
 
-/** The settings list: 通用 / 模型 / 连接 / 高级, like Muse's settings (who it is lives on its face). */
+export type CapabilityTone = "ok" | "warn" | "bad" | "off" | "neutral";
+
+export interface CapabilityDiagnostic {
+  key: "stt" | "push" | "browser";
+  label: string;
+  status: string;
+  tone: CapabilityTone;
+  guidance: string;
+}
+
+export function describeCapabilities(
+  companion: CompanionState | null,
+  pushStatus: PushStatus,
+  hasAndroidReminders = false,
+): CapabilityDiagnostic[] {
+  const caps = companion?.capabilities;
+
+  const stt: CapabilityDiagnostic =
+    caps?.stt === true
+      ? {
+          key: "stt",
+          label: "语音识别",
+          status: "已就绪",
+          tone: "ok",
+          guidance: "长按聊天输入框右侧麦克风即可语音转文字。",
+        }
+      : caps?.stt === false
+        ? {
+            key: "stt",
+            label: "语音识别",
+            status: "未就绪",
+            tone: "off",
+            guidance: "需在服务器安装 ffmpeg，并配置语音识别模型或本地 SenseVoice 引擎。",
+          }
+        : {
+            key: "stt",
+            label: "语音识别",
+            status: companion === null ? "检测中" : "默认可用",
+            tone: "neutral",
+            guidance:
+              companion === null
+                ? "正在读取服务端语音识别运行状态…"
+                : "按住聊天输入框右侧麦克风即可说话；若转写失败请检查服务器 ffmpeg 与语音模型。",
+          };
+
+  const note = notificationsNote(pushStatus, caps?.push);
+  const push: CapabilityDiagnostic =
+    caps?.push === false && !hasAndroidReminders
+      ? {
+          key: "push",
+          label: "消息推送",
+          status: "服务端未启用",
+          tone: "off",
+          guidance: "服务器尚未配置 Web Push 密钥（VAPID），启用后可向锁屏和后台发送提醒。",
+        }
+      : pushStatus.kind === "on"
+        ? {
+            key: "push",
+            label: "消息推送",
+            status: "已开启",
+            tone: "ok",
+            guidance: note ?? "锁屏与后台均可接收早报、定时提醒和主动关心通知。",
+          }
+        : pushStatus.kind === "denied"
+          ? {
+              key: "push",
+              label: "消息推送",
+              status: "权限已拒",
+              tone: "bad",
+              guidance: note ?? "请在手机或浏览器的系统通知设置中允许通知权限。",
+            }
+          : pushStatus.kind === "unsupported"
+            ? {
+                key: "push",
+                label: "消息推送",
+                status: "当前受限",
+                tone: "off",
+                guidance: pushStatus.reason,
+              }
+            : pushStatus.kind === "error"
+              ? {
+                  key: "push",
+                  label: "消息推送",
+                  status: "连接异常",
+                  tone: "bad",
+                  guidance: note ?? pushStatus.message,
+                }
+              : pushStatus.kind === "off"
+                ? {
+                    key: "push",
+                    label: "消息推送",
+                    status: "待开启",
+                    tone: "warn",
+                    guidance:
+                      caps?.push === true
+                        ? "服务端推送已就绪，在上方「通用 → 通知」打开开关即可接收提醒。"
+                        : (note ?? "在上方「通用 → 通知」打开开关即可接收早报与提醒。"),
+                  }
+                : {
+                    key: "push",
+                    label: "消息推送",
+                    status: "检查中",
+                    tone: "neutral",
+                    guidance: "正在检查当前设备的通知权限与后台推送服务…",
+                  };
+
+  const browser: CapabilityDiagnostic =
+    caps?.browser === true
+      ? {
+          key: "browser",
+          label: "共享浏览器",
+          status: "已就绪",
+          tone: "ok",
+          guidance: "伙伴可自主打开网页查资料，遇到登录或验证码时可随时交给你接手。",
+        }
+      : caps?.browser === false
+        ? {
+            key: "browser",
+            label: "共享浏览器",
+            status: "未就绪",
+            tone: "off",
+            guidance: "服务器未检测到可用浏览器环境，需安装 Playwright 与 Chromium（playwright install chromium）。",
+          }
+        : {
+            key: "browser",
+            label: "共享浏览器",
+            status: companion === null ? "检测中" : "按需启动",
+            tone: "neutral",
+            guidance:
+              companion === null
+                ? "正在读取服务端共享浏览器运行状态…"
+                : "伙伴需要上网操作时会自动启动无头浏览器。",
+          };
+
+  return [stt, push, browser];
+}
+
+const CAPABILITY_ICONS: Record<CapabilityDiagnostic["key"], ReactNode> = {
+  stt: <Mic className="h-4 w-4" />,
+  push: <Bell className="h-4 w-4" />,
+  browser: <Globe className="h-4 w-4" />,
+};
+
+function CapabilityBadge({ tone, label }: { tone: CapabilityTone; label: string }) {
+  const dotStyle: React.CSSProperties =
+    tone === "ok"
+      ? { background: "var(--c-online)" }
+      : tone === "bad"
+        ? { background: "var(--c-danger)" }
+        : tone === "warn"
+          ? { background: "var(--c-primary)" }
+          : { background: "var(--c-text-muted)" };
+  const textStyle: React.CSSProperties | undefined =
+    tone === "ok"
+      ? { color: "var(--c-online)" }
+      : tone === "bad"
+        ? { color: "var(--c-danger)" }
+        : tone === "warn"
+          ? { color: "var(--c-primary)" }
+          : undefined;
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5 text-[12.5px] font-medium">
+      <span className="h-2 w-2 rounded-full" style={dotStyle} aria-hidden="true" />
+      <span className={textStyle ? undefined : "c-muted"} style={textStyle}>
+        {label}
+      </span>
+    </span>
+  );
+}
+
+/** The settings list: 通用 / 模型 / 能力 / 能力与诊断 / 连接 / 安全, like Muse's settings. */
 function SettingsRoot({ onOpen, onAppearance }: { onOpen: (page: SettingsPage) => void; onAppearance: () => void }) {
   const { token } = useClient();
   const mode = useThemeMode();
@@ -76,26 +248,46 @@ function SettingsRoot({ onOpen, onAppearance }: { onOpen: (page: SettingsPage) =
   const notifications = useNotifications();
   const android = androidShell();
   const [readAfterVoice, setReadAfterVoice] = useState(readsAfterVoice);
+  const [companion, setCompanion] = useState<CompanionState | null>(null);
   const [models, setModels] = useState<ModelsPayload | null>(null);
   const [usage, setUsage] = useState<UsagePayload | null>(null);
   const [connected, setConnected] = useState<number | null>(null);
   const [skills, setSkills] = useState<number | null>(null);
 
   useEffect(() => {
-    fetchModels(token).then(setModels).catch(() => setModels(null));
-    fetchUsage(token).then(setUsage).catch(() => setUsage(null));
-    fetchSkills(token).then((s) => setSkills(s.learned.length)).catch(() => setSkills(null));
+    let cancelled = false;
+    fetchCompanionState(token)
+      .then((state) => !cancelled && setCompanion(state))
+      .catch(() => !cancelled && setCompanion(null));
+    fetchModels(token)
+      .then((payload) => !cancelled && setModels(payload))
+      .catch(() => !cancelled && setModels(null));
+    fetchUsage(token)
+      .then((payload) => !cancelled && setUsage(payload))
+      .catch(() => !cancelled && setUsage(null));
+    fetchSkills(token)
+      .then((s) => !cancelled && setSkills(s.learned.length))
+      .catch(() => !cancelled && setSkills(null));
     fetchMcpPresets(token)
-      .then((payload) => setConnected(payload.presets.filter(isConnected).length))
-      .catch(() => setConnected(null));
+      .then((payload) => !cancelled && setConnected(payload.presets.filter(isConnected).length))
+      .catch(() => !cancelled && setConnected(null));
+    return () => {
+      cancelled = true;
+    };
   }, [token]);
+
+  const diagnostics = describeCapabilities(companion, notifications.status, Boolean(android?.remindersEnabled));
 
   return (
     <div className="flex flex-col gap-6">
       <section className="flex flex-col gap-1.5">
         <h2 className="c-muted px-3.5 text-[13px]">通用</h2>
-        <MenuGroup footnote={notificationsNote(notifications.status)}>
-          <NotificationsRow status={notifications.status} onToggle={() => void notifications.toggle()} />
+        <MenuGroup footnote={notificationsNote(notifications.status, companion?.capabilities?.push)}>
+          <NotificationsRow
+            status={notifications.status}
+            serverPush={companion?.capabilities?.push}
+            onToggle={() => void notifications.toggle()}
+          />
           <MenuRow
             icon={<Palette className="h-4 w-4" />}
             label="外观"
@@ -138,6 +330,30 @@ function SettingsRoot({ onOpen, onAppearance }: { onOpen: (page: SettingsPage) =
             value={skills === null ? undefined : skills ? `学会了 ${skills} 个` : "还没有"}
             onSelect={() => onOpen("skills")}
           />
+        </MenuGroup>
+      </section>
+
+      <section className="flex flex-col gap-1.5" aria-label="能力与诊断">
+        <h2 className="c-muted px-3.5 text-[13px]">能力与诊断</h2>
+        <MenuGroup>
+          {diagnostics.map((item) => (
+            <div key={item.key} className="flex items-start gap-3 px-3.5 py-3">
+              <span
+                className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg"
+                style={{ background: "var(--c-fill)" }}
+                aria-hidden="true"
+              >
+                {CAPABILITY_ICONS[item.key]}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[15px] font-medium leading-snug">{item.label}</span>
+                  <CapabilityBadge tone={item.tone} label={item.status} />
+                </div>
+                <p className="c-muted mt-0.5 text-[12px] leading-relaxed">{item.guidance}</p>
+              </div>
+            </div>
+          ))}
         </MenuGroup>
       </section>
 
