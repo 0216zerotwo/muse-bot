@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useClient } from "@/providers/ClientProvider";
 
 import { fetchUsage, type UsagePayload, type UsagePeriod } from "./companion-api";
+import { Skeleton } from "./Skeleton";
 
 /** Usage sources in plain words; anything else counts as 其他. */
 const SOURCES: { key: string; label: string }[] = [
@@ -114,17 +115,39 @@ export function UsagePanel({ active }: { /** Loads when shown. */ active: boolea
             role="radio"
             aria-checked={range === key}
             onClick={() => setRange(key)}
-            className="min-h-8 rounded-[10px] text-[13px]"
-            style={range === key ? { background: "var(--c-segment-on)", boxShadow: "0 1px 3px rgba(0,0,0,.15)" } : undefined}
+            className="min-h-9 rounded-[10px] text-[13px] transition-colors"
+            style={range === key ? { background: "var(--c-segment-on)", fontWeight: 600, boxShadow: "0 1px 3px rgba(0,0,0,.15)" } : undefined}
           >
             {key === "today" ? "今天" : "近 7 天"}
           </button>
         ))}
       </div>
       {!period ? (
-        !error && <p className="c-muted text-sm">正在读取…</p>
+        !error && (
+          <div role="status" aria-busy="true" aria-label="正在读取用量" className="flex flex-col gap-4">
+            <div className="c-card rounded-[22px] p-4">
+              <Skeleton className="h-7 w-36" />
+              <Skeleton className="mt-2.5 h-3.5 w-48" />
+              <Skeleton className="mt-4 h-2.5 w-full rounded-full" />
+            </div>
+            <div className="c-card divide-y overflow-hidden rounded-[22px] c-divider">
+              {[0, 1].map((index) => (
+                <div key={index} className="flex items-center justify-between gap-3 px-4 py-3.5">
+                  <div className="min-w-0 flex-1 space-y-1.5">
+                    <Skeleton className={index === 0 ? "h-3.5 w-32" : "h-3.5 w-24"} />
+                    <Skeleton className="h-2.5 w-44" />
+                  </div>
+                  <Skeleton className="h-3.5 w-14 shrink-0" />
+                </div>
+              ))}
+            </div>
+          </div>
+        )
       ) : periodTotal(period) === 0 && (period.media ?? []).length === 0 ? (
-        <p className="c-muted text-sm">这段时间还没有用量。</p>
+        <div className="c-card rounded-[22px] px-5 py-7 text-center">
+          <p className="text-[15px] font-medium">这段时间还没有用量。</p>
+          <p className="c-muted mt-1 text-[13px]">开始聊天、画图或做视频后，用量和缓存命中率会统计在这里。</p>
+        </div>
       ) : (
         <div className="flex flex-col gap-4">
           <section className="c-card rounded-[22px] p-4">

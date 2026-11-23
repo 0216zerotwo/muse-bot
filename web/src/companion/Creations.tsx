@@ -11,6 +11,7 @@ import {
   type CreationsPayload,
 } from "./companion-api";
 import { CompanionPet } from "./Pet";
+import { SkeletonGrid } from "./Skeleton";
 import { PageTitle } from "./TabViews";
 import { Viewer, type ViewerItem } from "./Viewer";
 
@@ -142,7 +143,7 @@ export function CreationsView({ active }: { active: boolean }) {
               role="tab"
               aria-selected={selected}
               onClick={() => setFilter(key)}
-              className="c-pressable min-h-9 shrink-0 rounded-full px-3.5 text-[14px]"
+              className="c-pressable min-h-11 shrink-0 rounded-full px-4 text-[14px]"
               style={
                 selected
                   ? { background: "var(--c-text)", color: "var(--c-bg)" }
@@ -161,7 +162,7 @@ export function CreationsView({ active }: { active: boolean }) {
           没能读取：{error}
         </p>
       ) : !payload ? (
-        <p className="c-muted px-5 text-sm">正在读取…</p>
+        <SkeletonGrid count={6} variant="media" label="正在读取作品" className="px-4" />
       ) : shown.length === 0 ? (
         <div className="flex flex-col items-center px-8 pt-10 text-center">
           <CompanionPet size={64} />

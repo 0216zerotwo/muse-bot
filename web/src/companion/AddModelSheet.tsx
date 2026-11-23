@@ -32,6 +32,7 @@ import {
 } from "./companion-api";
 import { MuseSheet } from "./muse/Sheet";
 import { priceSummary, priceUnitHint } from "./pricing";
+import { SkeletonGrid, SkeletonRows } from "./Skeleton";
 
 export const KIND_LABELS: Record<ModelKind, string> = {
   text: "对话",
@@ -553,9 +554,7 @@ export function AddModelSheet({
                 : "伙伴做视频时会用它。"}
           </p>
           {vendors === null ? (
-            <p className="c-muted flex items-center gap-2 text-[14px]">
-              <Loader2 className="h-4 w-4 animate-spin" /> 正在读取…
-            </p>
+            <SkeletonGrid count={6} variant="vendor" label="正在读取服务商" />
           ) : (
             <div className="flex flex-col gap-4">
               {(Object.keys(GROUP_LABELS) as ModelVendor["group"][]).map(
@@ -707,9 +706,7 @@ export function AddModelSheet({
                 </p>
               )}
               {models === null ? (
-                <p className="c-muted flex items-center gap-2 py-3 text-[14px]">
-                  <Loader2 className="h-4 w-4 animate-spin" /> 正在读取模型…
-                </p>
+                <SkeletonRows rows={4} withIcon={false} label="正在读取模型" />
               ) : (
                 <div className="c-card divide-y divide-[color:var(--c-border)] overflow-hidden rounded-2xl">
                   {recommended.length > 0 && (

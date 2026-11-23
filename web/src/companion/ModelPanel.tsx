@@ -26,6 +26,7 @@ import { MenuGroup, MenuRow, Segmented, SelectRow, Switch } from "./Menu";
 import { priceLine } from "./pricing";
 import { dayLabel } from "./presentation";
 import { Sheet } from "./Sheet";
+import { SkeletonRows } from "./Skeleton";
 
 const TIERS: { value: ModelTier; label: string }[] = [
   { value: "cheap", label: "便宜快速" },
@@ -258,7 +259,7 @@ export function ModelPanel({ active, onOpenModel }: { active: boolean; onOpenMod
   const [kind, setKind] = useState<ModelKind>("text");
   const [sheet, setSheet] = useState<"fallbacks" | "add" | null>(null);
 
-  if (!data) return error ? <Errors error={error} /> : <p className="c-muted text-sm">正在读取…</p>;
+  if (!data) return error ? <Errors error={error} /> : <SkeletonRows rows={4} label="正在读取模型" />;
   const settings = data.settings;
   const names = data.presets.map((preset) => preset.name);
   const enough = names.length >= 2;
@@ -454,7 +455,7 @@ export function ModelDetail({ name }: { name: string }) {
   const savedInfo = data?.settings.models[name];
   useEffect(() => setInfo(savedInfo ?? EMPTY), [savedInfo]);
 
-  if (!data) return error ? <Errors error={error} /> : <p className="c-muted text-sm">正在读取…</p>;
+  if (!data) return error ? <Errors error={error} /> : <SkeletonRows rows={4} label="正在读取模型" />;
   if (!preset) return <p className="c-muted text-sm">这个模型已经不在了。</p>;
 
   const limits = (changes: ModelLimits) => void save({ presets: { [name]: changes } });

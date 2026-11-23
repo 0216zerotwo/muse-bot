@@ -90,7 +90,7 @@ export function RecommendedServices({
                 <button
                   type="button"
                   onClick={() => onConnect(preset)}
-                  className="c-primary min-h-9 shrink-0 rounded-full px-4 text-[14px] font-semibold"
+                  className="c-primary min-h-11 shrink-0 rounded-full px-4 text-[14px] font-semibold"
                   aria-label={connectTitle(preset)}
                 >
                   连接

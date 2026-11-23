@@ -121,7 +121,7 @@ export function Switch({
       aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className="relative h-8 w-[52px] shrink-0 rounded-full transition-colors disabled:opacity-50"
+      className="relative h-8 w-[52px] shrink-0 rounded-full transition-colors after:absolute after:inset-x-0 after:-inset-y-1.5 after:content-[''] disabled:opacity-50"
       style={{ background: checked ? "var(--c-primary)" : "var(--c-border)" }}
     >
       <span
@@ -151,7 +151,7 @@ export function SelectRow<T extends string>({
 }) {
   const current = options.find((option) => option.value === value)?.label ?? value;
   return (
-    <label className="c-pressable relative flex min-h-12 items-center gap-3 px-3.5">
+    <label className="c-pressable relative flex min-h-12 items-center gap-3 px-3.5 has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-[color:var(--c-primary)]">
       {icon && (
         <span
           className="grid h-7 w-7 shrink-0 place-items-center rounded-lg"
@@ -213,7 +213,7 @@ export function Segmented<T extends string>({
             aria-checked={selected}
             disabled={disabled}
             onClick={() => onChange(option.value)}
-            className="min-h-8 flex-1 rounded-[10px] px-1 text-[13px] transition-colors disabled:opacity-50"
+            className="min-h-9 flex-1 rounded-[10px] px-1.5 text-[13px] transition-colors disabled:opacity-50"
             style={selected ? { background: "var(--c-segment-on)", fontWeight: 600, boxShadow: "var(--c-shadow)" } : undefined}
           >
             {option.label}
