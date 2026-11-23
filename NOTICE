@@ -10,7 +10,8 @@ This project includes or builds on the following third-party software:
   MIT License. Copyright (c) 2025-present Xubin Ren and the nanobot contributors.
 
 - The server runs on Hermes Agent (https://github.com/NousResearch/hermes-agent), downloaded at a
-  fixed version by tools/fetch-hermes.sh (not included in this repository).
+  fixed commit by tools/fetch-hermes.sh (not committed to this Git repository; bundled alongside
+  LICENSE and NOTICE in GitHub Release server archives).
   MIT License. Copyright (c) 2025 Nous Research.
 
 - Chart.js (https://www.chartjs.org), MIT License, and Leaflet (https://leafletjs.com), BSD 2-Clause
@@ -22,6 +23,11 @@ This project includes or builds on the following third-party software:
 
 - MarkdownUI (https://github.com/gonzalezreal/swift-markdown-ui), MIT License, used by the iPhone
   app as a Swift package.
+
+- Optional local speech-to-text (companion/modules/stt_sensevoice.py) integrates with
+  SenseVoice-Small (https://github.com/FunAudioLLM/SenseVoice, MIT License) and sherpa-onnx
+  (https://github.com/k2-fsa/sherpa-onnx, Apache License 2.0) when installed by the user on the
+  server (neither is included in this repository or release bundles).
 
 - The web app's npm dependencies (web/package.json) and the server's Python dependencies are
   installed from their registries under their own licenses.
