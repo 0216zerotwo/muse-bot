@@ -415,6 +415,8 @@ export function LiveScreen({
   const [atBottom, setAtBottom] = useState(true);
   const [unreadReplies, setUnreadReplies] = useState(0);
   const seenReplyIdsRef = useRef<Set<string>>(new Set());
+  // Protects an active smooth search-jump from being re-pinned during its first frames near the bottom.
+  const jumpGuardUntilRef = useRef(0);
   // Where it last put the thread: only a move up from there is the user scrolling back to read
   // (content growing under it also fires scroll events, which must not unpin it).
   const pinnedTop = useRef(0);
@@ -432,6 +434,7 @@ export function LiveScreen({
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (distanceFromBottom < STICKY_BOTTOM_PX) {
+      if (Date.now() < jumpGuardUntilRef.current) return;
       pinnedTop.current = el.scrollTop;
       if (!stickToBottom.current) setPinned(true);
     } else if (el.scrollTop < pinnedTop.current - 4 || (pinnedTop.current === 0 && distanceFromBottom >= STICKY_BOTTOM_PX)) {
@@ -439,6 +442,7 @@ export function LiveScreen({
     }
   };
   const scrollToLatest = useCallback(() => {
+    jumpGuardUntilRef.current = 0;
     setPinned(true);
     const el = chatScrollRef.current;
     if (!el) return;
@@ -482,6 +486,7 @@ export function LiveScreen({
     if (jumpRequest && handledJumpAtRef.current !== jumpRequest.at) return;
     if (el && stickToBottom.current) toBottom(el);
   }, [items, typing, insets.bottom, tab, jumpRequest]);
+  const initialCount = initial?.length ?? 0;
   useEffect(() => {
     if (!jumpRequest || !ready || tab !== "chat" || handledJumpAtRef.current === jumpRequest.at) return;
     const container = chatScrollRef.current;
@@ -489,21 +494,35 @@ export function LiveScreen({
     const target = Array.from(container.querySelectorAll<HTMLElement>("[data-turn-id]")).find(
       (node) => node.dataset.turnId === jumpRequest.turnId,
     );
-    if (!target) return;
+    if (!target) {
+      // Once persisted history has hydrated into messages, consume an absent/deleted turnId so
+      // auto-scroll-to-bottom isn't permanently blocked for the rest of this chat session.
+      if (historyVersion > 0 && messages.length >= initialCount) {
+        handledJumpAtRef.current = jumpRequest.at;
+        if (stickToBottom.current) toBottom(container);
+      }
+      return;
+    }
     handledJumpAtRef.current = jumpRequest.at;
-    stickToBottom.current = false;
+    const targetBottom = target.offsetTop + target.offsetHeight;
+    const awayFromBottom =
+      container.scrollHeight - targetBottom >= STICKY_BOTTOM_PX ||
+      container.scrollHeight - container.scrollTop - container.clientHeight >= STICKY_BOTTOM_PX;
+    if (awayFromBottom) {
+      jumpGuardUntilRef.current = Date.now() + 700;
+      setPinned(false);
+    } else {
+      jumpGuardUntilRef.current = 0;
+    }
     const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     target.scrollIntoView?.({ behavior: reduced ? "auto" : "smooth", block: "center" });
-    if (container.scrollHeight - container.scrollTop - container.clientHeight >= STICKY_BOTTOM_PX) {
-      setAtBottom(false);
-    }
     setHighlightedTurnId(jumpRequest.turnId);
     if (highlightTimerRef.current !== null) window.clearTimeout(highlightTimerRef.current);
     highlightTimerRef.current = window.setTimeout(() => {
       setHighlightedTurnId(null);
       highlightTimerRef.current = null;
     }, 1200);
-  }, [jumpRequest, ready, items, tab]);
+  }, [jumpRequest, ready, historyVersion, initialCount, messages.length, items, tab, setPinned]);
   // Pictures, cards and tables grow the thread after it is shown: stay at the bottom while they do.
   useEffect(() => {
     const el = chatScrollRef.current;
@@ -522,6 +541,7 @@ export function LiveScreen({
   const petPx = usePetScale();
   const submit = useCallback(
     (text: string, images: SendAttachment[] = [], spoken = false) => {
+      jumpGuardUntilRef.current = 0;
       setPinned(true);
       if (send(text, images.length ? images : undefined, quote ? { quotedContext: quote } : undefined)) {
         // Asked by voice in the Android app: the answer is read out when it is done (as on iPhone).

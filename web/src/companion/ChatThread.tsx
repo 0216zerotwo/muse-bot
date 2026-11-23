@@ -305,7 +305,7 @@ function ReplyTurn({
             key={key}
             className={`c-bubble-agent c-bubble-text max-w-[85%] rounded-[20px] px-4 py-2.5 ${corners} ${
               streaming
-                ? "[&>div:first-child:not(:has(*))]:inline [&>div:first-child:has(>p:last-child)]:contents [&>div:first-child>p:last-child]:inline"
+                ? "[&>div:first-child:not(:has(*))]:inline [&>div:first-child:has(>p:last-child)]:contents [&>div:first-child>p:has(+p:last-child)]:mb-[0.5em] [&>div:first-child>p:last-child]:inline"
                 : ""
             }`}
           >

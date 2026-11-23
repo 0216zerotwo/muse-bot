@@ -206,6 +206,7 @@ describe("ChatThread streaming cursor & screen-reader completion announcement", 
     const cursor = container.querySelector("[data-streaming-cursor]");
     expect(cursor).not.toBeNull();
     expect(cursor?.className).toContain("motion-reduce:animate-none");
+    expect(cursor?.parentElement?.className).toContain("[&>div:first-child>p:has(+p:last-child)]:mb-[0.5em]");
     expect(screen.getByRole("status")).toHaveTextContent("");
 
     // Streaming completes: cursor disappears and screen reader announces the completed reply once
@@ -528,6 +529,171 @@ describe("Scroll-to-latest pill & jump-to-message from search hits", () => {
 
     expect(scrollIntoViewSpy).toHaveBeenCalledWith({ behavior: "smooth", block: "center" });
     expect(shellContainer.querySelector('[data-turn-id="turn-westlake"][data-highlighted="true"]')).not.toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(1250);
+    });
+  });
+
+  it("guards smooth search-jump from re-pinning at bottom and consumes absent turnId so auto-scroll stays active", async () => {
+    vi.useFakeTimers();
+    const scrollIntoViewSpy = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scrollIntoViewSpy;
+
+    const msgs: UIMessage[] = [
+      { id: "u1", role: "user", content: "早上的安排", turnId: "turn-top", createdAt: 1_700_000_000_000 },
+      { id: "a1", role: "assistant", content: "先去晨跑。", turnId: "turn-top", createdAt: 1_700_000_001_000 },
+      { id: "u2", role: "user", content: "晚上吃什么", turnId: "turn-bottom", createdAt: 1_700_000_002_000 },
+      { id: "a2", role: "assistant", content: "番茄牛腩饭。", turnId: "turn-bottom", createdAt: 1_700_000_003_000 },
+    ];
+    streamState.messages = msgs;
+
+    const { container, rerender } = render(
+      <LiveScreen
+        ready
+        historyVersion={1}
+        chatId="main"
+        sessionKey="websocket:main"
+        initial={msgs}
+        pending={false}
+        companion={baseCompanion}
+        tab="chat"
+        onTab={vi.fn()}
+        order={["chat", "feed", "ideas", "goals", "helpers", "creations"]}
+        side={null}
+        onEditSide={vi.fn()}
+        onOpenChat={vi.fn()}
+        teachRequest={0}
+        jumpRequest={null}
+        draft=""
+        onDraft={vi.fn()}
+        onOpenMenu={vi.fn()}
+        onUpdateCompanion={vi.fn(async () => undefined)}
+        onChangeLook={vi.fn()}
+        onTurnEnd={vi.fn()}
+        onReload={vi.fn()}
+      />,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const scrollBox = container.querySelector(".overflow-y-auto") as HTMLDivElement;
+    const scrollToSpy = vi.fn();
+    scrollBox.scrollTo = scrollToSpy;
+    Object.defineProperty(scrollBox, "scrollHeight", { value: 1200, configurable: true });
+    Object.defineProperty(scrollBox, "clientHeight", { value: 400, configurable: true });
+    Object.defineProperty(scrollBox, "scrollTop", { value: 800, writable: true, configurable: true });
+
+    const topTurn = container.querySelector('[data-turn-id="turn-top"]') as HTMLElement;
+    Object.defineProperty(topTurn, "offsetTop", { value: 80, configurable: true });
+    Object.defineProperty(topTurn, "offsetHeight", { value: 60, configurable: true });
+
+    // Trigger jump while currently at the very bottom (distanceFromBottom === 0)
+    rerender(
+      <LiveScreen
+        ready
+        historyVersion={1}
+        chatId="main"
+        sessionKey="websocket:main"
+        initial={msgs}
+        pending={false}
+        companion={baseCompanion}
+        tab="chat"
+        onTab={vi.fn()}
+        order={["chat", "feed", "ideas", "goals", "helpers", "creations"]}
+        side={null}
+        onEditSide={vi.fn()}
+        onOpenChat={vi.fn()}
+        teachRequest={0}
+        jumpRequest={{ turnId: "turn-top", at: 101 }}
+        draft=""
+        onDraft={vi.fn()}
+        onOpenMenu={vi.fn()}
+        onUpdateCompanion={vi.fn(async () => undefined)}
+        onChangeLook={vi.fn()}
+        onTurnEnd={vi.fn()}
+        onReload={vi.fn()}
+      />,
+    );
+
+    // Synchronously unpinned before smooth animation finishes -> scroll-to-latest pill appears
+    expect(screen.getByRole("button", { name: "回到最新" })).toBeInTheDocument();
+
+    // Early animation frames still within STICKY_BOTTOM_PX must NOT re-pin to bottom
+    scrollBox.scrollTop = 760;
+    fireEvent.scroll(scrollBox);
+    expect(screen.getByRole("button", { name: "回到最新" })).toBeInTheDocument();
+
+    // Clicking "回到最新" clears the guard immediately and scrolls to bottom
+    fireEvent.click(screen.getByRole("button", { name: "回到最新" }));
+    expect(scrollToSpy).toHaveBeenCalledWith({ top: 1200, behavior: "smooth" });
+    expect(screen.queryByRole("button", { name: /回到最新/ })).not.toBeInTheDocument();
+
+    // Absent/deleted turnId must be consumed once history is hydrated so auto-scroll stays active
+    scrollBox.scrollTop = 0;
+    Object.defineProperty(scrollBox, "scrollHeight", { value: 1500, configurable: true });
+    rerender(
+      <LiveScreen
+        ready
+        historyVersion={1}
+        chatId="main"
+        sessionKey="websocket:main"
+        initial={msgs}
+        pending={false}
+        companion={baseCompanion}
+        tab="chat"
+        onTab={vi.fn()}
+        order={["chat", "feed", "ideas", "goals", "helpers", "creations"]}
+        side={null}
+        onEditSide={vi.fn()}
+        onOpenChat={vi.fn()}
+        teachRequest={0}
+        jumpRequest={{ turnId: "turn-deleted", at: 202 }}
+        draft=""
+        onDraft={vi.fn()}
+        onOpenMenu={vi.fn()}
+        onUpdateCompanion={vi.fn(async () => undefined)}
+        onChangeLook={vi.fn()}
+        onTurnEnd={vi.fn()}
+        onReload={vi.fn()}
+      />,
+    );
+    expect(scrollBox.scrollTop).toBe(1500);
+
+    // Subsequent incoming reply continues auto-scrolling to bottom
+    Object.defineProperty(scrollBox, "scrollHeight", { value: 1800, configurable: true });
+    streamState.messages = [
+      ...msgs,
+      { id: "a3", role: "assistant", content: "新消息到达", turnId: "turn-new", createdAt: 1_700_000_004_000 },
+    ];
+    rerender(
+      <LiveScreen
+        ready
+        historyVersion={1}
+        chatId="main"
+        sessionKey="websocket:main"
+        initial={msgs}
+        pending={false}
+        companion={baseCompanion}
+        tab="chat"
+        onTab={vi.fn()}
+        order={["chat", "feed", "ideas", "goals", "helpers", "creations"]}
+        side={null}
+        onEditSide={vi.fn()}
+        onOpenChat={vi.fn()}
+        teachRequest={0}
+        jumpRequest={{ turnId: "turn-deleted", at: 202 }}
+        draft=""
+        onDraft={vi.fn()}
+        onOpenMenu={vi.fn()}
+        onUpdateCompanion={vi.fn(async () => undefined)}
+        onChangeLook={vi.fn()}
+        onTurnEnd={vi.fn()}
+        onReload={vi.fn()}
+      />,
+    );
+    expect(scrollBox.scrollTop).toBe(1800);
     act(() => {
       vi.advanceTimersByTime(1250);
     });
