@@ -1,5 +1,5 @@
-import { memo, useState, type MouseEvent, type ReactNode } from "react";
-import { BellRing, ChevronDown, ListChecks, Target } from "lucide-react";
+import { memo, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { BellRing, Brain, ChevronDown, ChevronRight, ListChecks, Target } from "lucide-react";
 
 import { MarkdownText } from "@/components/MarkdownText";
 import { parseQuotedUserMessage } from "@/lib/user-message-quote";
@@ -8,7 +8,7 @@ import type { UIMediaAttachment, UIMessage } from "@/lib/types";
 import { ApprovalCard } from "./ApprovalCard";
 import { EmojiIcon } from "./EmojiIcon";
 import { DraftCard, FileCard } from "./FileCard";
-import type { FileDraft } from "./fileKinds";
+import { spokenText, type FileDraft } from "./fileKinds";
 import { Pressable, type MessageAction } from "./MessageActions";
 import { usePetScale } from "./appearance";
 import { CardPlaceholder, CardView } from "./Cards";
@@ -297,15 +297,27 @@ function ReplyTurn({
         if (block.type === "pending") return <CardPlaceholder key={key} kind={block.kind} />;
         // Consecutive bubbles read as one message: tight corners where they meet, a tail on the last.
         const joined = index > 0 && visible[index - 1].type === "bubble";
-        const streaming = message.isStreaming && index === visible.length - 1;
+        const streaming = Boolean(message.isStreaming && index === visible.length - 1);
         // Chat-app style the tail is at the top, by the face.
         const corners = speaker ? "rounded-tl-[6px]" : `rounded-bl-[6px] ${joined ? "rounded-tl-[6px]" : ""}`;
         return (
           <div
             key={key}
-            className={`c-bubble-agent c-bubble-text max-w-[85%] rounded-[20px] px-4 py-2.5 ${corners}`}
+            className={`c-bubble-agent c-bubble-text max-w-[85%] rounded-[20px] px-4 py-2.5 ${corners} ${
+              streaming
+                ? "[&>div:first-child:not(:has(*))]:inline [&>div:first-child:has(>p:last-child)]:contents [&>div:first-child>p:last-child]:inline"
+                : ""
+            }`}
           >
             <MarkdownText streaming={streaming}>{block.text}</MarkdownText>
+            {streaming && (
+              <span
+                aria-hidden="true"
+                data-streaming-cursor="true"
+                className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse rounded-full align-baseline motion-reduce:animate-none"
+                style={{ background: "var(--c-primary)" }}
+              />
+            )}
           </div>
         );
       })}
@@ -364,6 +376,8 @@ export const ChatThread = memo(function ChatThread({
   onMessageAction,
   companionName,
   draft,
+  highlightedTurnId,
+  onOpenMemory,
 }: {
   items: ChatItem[];
   typing: boolean;
@@ -385,8 +399,38 @@ export const ChatThread = memo(function ChatThread({
   messenger?: { speaker: (message: UIMessage) => Speaker; me: ReactNode; relay?: Speaker };
   /** Long-press a message: 引用 / 复制 / 删除 (``reply`` is the companion's whole reply). */
   onMessageAction?: (action: MessageAction, message: UIMessage, role: "user" | "reply") => void;
+  /** Temporary turn highlight pulse when jumping from a search result. */
+  highlightedTurnId?: string | null;
+  /** Opens StatusSheet's 身份与记忆 pane when a memory pill is tapped. */
+  onOpenMemory?: () => void;
 }) {
   const indent = messenger ? "pl-11" : "";
+  // Screen-reader completion announcement: announce once when streaming finishes rather than on every delta.
+  let latestReplyItem: Extract<ChatItem, { type: "reply" }> | undefined;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const candidate = items[i];
+    if (candidate.type === "reply") {
+      latestReplyItem = candidate;
+      break;
+    }
+  }
+  const replyBusy = typing || Boolean(latestReplyItem?.message.isStreaming);
+  const wasReplyBusyRef = useRef(replyBusy);
+  const [srAnnouncement, setSrAnnouncement] = useState("");
+  useEffect(() => {
+    if (replyBusy) {
+      wasReplyBusyRef.current = true;
+      return;
+    }
+    if (!wasReplyBusyRef.current) return;
+    wasReplyBusyRef.current = false;
+    if (!latestReplyItem) return;
+    const plain = spokenText(latestReplyItem.message.content).trim();
+    if (!plain) return;
+    const speakerPrefix = companionName ? `${companionName}回复：` : "新回复：";
+    setSrAnnouncement(`${speakerPrefix}${plain.slice(0, 200)}`);
+  }, [replyBusy, latestReplyItem, companionName]);
+
   // Only the latest reply's cards still take answers; once the user moves on, older ones just show.
   // A message it sent on its own (a reminder, 主动关心) landing after a card doesn't count: the
   // card's question is still open.
@@ -414,7 +458,10 @@ export const ChatThread = memo(function ChatThread({
     }
   }
   return (
-    <div className="flex flex-col gap-3 px-4" aria-live="polite" aria-relevant="additions">
+    <div className="flex flex-col gap-3 px-4">
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {srAnnouncement}
+      </div>
       {items.map((item, itemIndex) => {
         if (item.type === "day") {
           return (
@@ -424,6 +471,32 @@ export const ChatThread = memo(function ChatThread({
           );
         }
         if (item.type === "notice") {
+          if (item.kind === "memory") {
+            if (onOpenMemory) {
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={onOpenMemory}
+                  aria-label={`${item.text}，查看记忆`}
+                  className="c-card c-pressable c-rise mx-auto inline-flex max-w-[88%] items-center gap-1.5 self-center rounded-full px-3 py-1.5 text-left text-[12.5px] leading-snug transition-transform active:scale-[0.98] motion-reduce:transition-none"
+                >
+                  <Brain className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--c-primary)" }} aria-hidden="true" />
+                  <span className="c-muted truncate">{item.text}</span>
+                  <ChevronRight className="c-muted h-3.5 w-3.5 shrink-0 opacity-70" aria-hidden="true" />
+                </button>
+              );
+            }
+            return (
+              <div
+                key={item.id}
+                className="c-card c-rise mx-auto inline-flex max-w-[88%] items-center gap-1.5 self-center rounded-full px-3 py-1 text-[12.5px] leading-snug"
+              >
+                <Brain className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--c-primary)" }} aria-hidden="true" />
+                <span className="c-muted truncate">{item.text}</span>
+              </div>
+            );
+          }
           return (
             <p key={item.id} className="c-muted c-rise mx-auto max-w-[85%] text-center text-[12.5px] leading-snug">
               {item.text}
@@ -431,10 +504,26 @@ export const ChatThread = memo(function ChatThread({
           );
         }
         if (item.type === "user") {
+          const isHighlighted = Boolean(highlightedTurnId && item.message.turnId === highlightedTurnId);
           return (
-            <Pressable key={item.id} align="end" onAction={onMessageAction && ((action) => onMessageAction(action, item.message, "user"))}>
-              <UserTurn message={item.message} me={messenger?.me} relay={messenger?.relay} />
-            </Pressable>
+            <div
+              key={item.id}
+              data-turn-id={item.message.turnId || undefined}
+              data-highlighted={isHighlighted ? "true" : undefined}
+              className={
+                isHighlighted
+                  ? "rounded-[22px] ring-2 ring-[var(--c-primary)] ring-offset-2 ring-offset-[var(--c-bg)] transition-shadow duration-500 motion-reduce:transition-none"
+                  : undefined
+              }
+            >
+              <Pressable
+                align="end"
+                timestamp={item.message.createdAt}
+                onAction={onMessageAction && ((action) => onMessageAction(action, item.message, "user"))}
+              >
+                <UserTurn message={item.message} me={messenger?.me} relay={messenger?.relay} />
+              </Pressable>
+            </div>
           );
         }
         if (item.type === "approval")
@@ -443,31 +532,43 @@ export const ChatThread = memo(function ChatThread({
               <ApprovalCard approval={item.approval} onDecide={onDecide} />
             </div>
           );
+        const isHighlighted = Boolean(highlightedTurnId && item.message.turnId === highlightedTurnId);
         return (
-          <Pressable
+          <div
             key={item.id}
-            align="start"
-            extra={itemIndex === regenerable ? ["speak", "regenerate"] : ["speak"]}
-            onAction={onMessageAction && ((action) => onMessageAction(action, item.message, "reply"))}
-          >
-          <ReplyTurn
-            message={item.message}
-            blocks={item.blocks}
-            linked={item.media}
-            route={replyRoute(item.message, routes)}
-            send={itemIndex === answerable && !typing ? onSend : undefined}
-            task={typing && itemIndex > askedAt ? undefined : item.task}
-            speaker={messenger?.speaker(item.message)}
-            byline={
-              !item.message.source && (() => {
-                const before = items[itemIndex - 1];
-                return before?.type === "reply" && before.message.source?.kind === "helper";
-              })()
-                ? companionName
+            data-turn-id={item.message.turnId || undefined}
+            data-highlighted={isHighlighted ? "true" : undefined}
+            className={
+              isHighlighted
+                ? "rounded-[22px] ring-2 ring-[var(--c-primary)] ring-offset-2 ring-offset-[var(--c-bg)] transition-shadow duration-500 motion-reduce:transition-none"
                 : undefined
             }
-          />
-          </Pressable>
+          >
+            <Pressable
+              align="start"
+              timestamp={item.message.createdAt}
+              extra={itemIndex === regenerable ? ["speak", "regenerate"] : ["speak"]}
+              onAction={onMessageAction && ((action) => onMessageAction(action, item.message, "reply"))}
+            >
+              <ReplyTurn
+                message={item.message}
+                blocks={item.blocks}
+                linked={item.media}
+                route={replyRoute(item.message, routes)}
+                send={itemIndex === answerable && !typing ? onSend : undefined}
+                task={typing && itemIndex > askedAt ? undefined : item.task}
+                speaker={messenger?.speaker(item.message)}
+                byline={
+                  !item.message.source && (() => {
+                    const before = items[itemIndex - 1];
+                    return before?.type === "reply" && before.message.source?.kind === "helper";
+                  })()
+                    ? companionName
+                    : undefined
+                }
+              />
+            </Pressable>
+          </div>
         );
       })}
       {typing && draft && <DraftCard key={draft.id} draft={draft} />}

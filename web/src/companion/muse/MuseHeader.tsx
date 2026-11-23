@@ -111,7 +111,9 @@ export function MuseNamePill({
           )}
           aria-live="polite"
         >
-          {spinning && <span className="h-2.5 w-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-current border-t-transparent" />}
+          {spinning && (
+            <span className="h-2.5 w-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-current border-t-transparent motion-reduce:animate-none" />
+          )}
           <span className="truncate">{statusLine}</span>
         </span>
       )}
@@ -154,7 +156,7 @@ export function MuseRoundButton({
       aria-haspopup={expanded === undefined ? undefined : "menu"}
       aria-expanded={expanded}
       className={cn(
-        "relative flex h-11 w-11 items-center justify-center rounded-full bg-om-surface text-om-fg shadow-[0_1px_4px_rgba(0,0,0,0.14)] active:bg-om-surface-2 dark:border dark:border-om-border dark:shadow-none",
+        "relative flex h-11 w-11 items-center justify-center rounded-full bg-om-surface text-om-fg shadow-[0_1px_4px_rgba(0,0,0,0.14)] transition-transform active:scale-95 active:bg-om-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--c-primary)] motion-reduce:transition-none dark:border dark:border-om-border dark:shadow-none",
         className,
       )}
     >

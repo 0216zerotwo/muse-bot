@@ -974,20 +974,20 @@ export function CardPlaceholder({ kind }: { kind?: "ui" }) {
     return (
       <div className="c-card w-full max-w-[94%] rounded-[20px] p-3.5" aria-label="正在生成界面">
         <p className="c-muted flex items-center gap-2 text-[13px]">
-          <span className="c-dot h-1.5 w-1.5 rounded-full" style={{ background: "var(--c-accent)" }} aria-hidden="true" />
+          <span className="c-dot h-1.5 w-1.5 rounded-full motion-reduce:animate-none" style={{ background: "var(--c-accent)" }} aria-hidden="true" />
           正在做一个可以直接操作的界面…
         </p>
-        <div className="mt-3 h-24 animate-pulse rounded-2xl" style={{ background: "var(--c-fill)" }} />
+        <div className="mt-3 h-24 animate-pulse rounded-2xl motion-reduce:animate-none" style={{ background: "var(--c-fill)" }} />
         <div className="mt-2 grid grid-cols-3 gap-2">
           {[0, 1, 2].map((i) => (
-            <div key={i} className="h-10 animate-pulse rounded-xl" style={{ background: "var(--c-fill)" }} />
+            <div key={i} className="h-10 animate-pulse rounded-xl motion-reduce:animate-none" style={{ background: "var(--c-fill)" }} />
           ))}
         </div>
       </div>
     );
   }
   return (
-    <div className="c-card w-full max-w-[85%] animate-pulse rounded-[20px] p-3.5" aria-label="正在准备卡片">
+    <div className="c-card w-full max-w-[85%] animate-pulse rounded-[20px] p-3.5 motion-reduce:animate-none" aria-label="正在准备卡片">
       <div className="h-3 w-1/3 rounded-full" style={{ background: "var(--c-fill)" }} />
       <div className="mt-3 h-3 w-2/3 rounded-full" style={{ background: "var(--c-fill)" }} />
       <div className="mt-2 h-3 w-1/2 rounded-full" style={{ background: "var(--c-fill)" }} />

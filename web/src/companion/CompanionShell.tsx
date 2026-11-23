@@ -67,6 +67,7 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
   const [editingGroup, setEditingGroup] = useState(false);
   // From settings: a message to start in the main chat, and 教它做 (the browser, recording).
   const [draftRequest, setDraftRequest] = useState<{ text: string; at: number } | null>(null);
+  const [jumpRequest, setJumpRequest] = useState<{ chatId: string; turnId: string; at: number } | null>(null);
   const [teachRequest, setTeachRequest] = useState(0);
   const [order, setOrder] = useTabOrder();
   const [appearance, setAppearance] = useState(false);
@@ -259,6 +260,7 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
             loadHelpers();
           }}
           draftRequest={sideChatId ? null : draftRequest}
+          jumpRequest={jumpRequest && jumpRequest.chatId === session.chatId ? { turnId: jumpRequest.turnId, at: jumpRequest.at } : null}
           teachRequest={teachRequest}
           onOpenMenu={() => setDrawerOpen(true)}
           onUpdateCompanion={saveIdentity}
@@ -302,7 +304,12 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
           }}
           onEditChat={setEditingChat}
           search={searchHistory}
-          onOpenHit={(hit) => (hit.chat_id === chatId ? openTab("chat") : setSideChatId(hit.chat_id))}
+          onOpenHit={(hit) => {
+            if (hit.chat_id === chatId) openTab("chat");
+            else setSideChatId(hit.chat_id);
+            if (hit.turn_id) setJumpRequest({ chatId: hit.chat_id, turnId: hit.turn_id, at: Date.now() });
+            else setJumpRequest(null);
+          }}
           onDeleteChat={(id) => {
             if (id === sideChatId) setSideChatId(null);
             void changeChat(client, id, "delete").then(() => refresh());

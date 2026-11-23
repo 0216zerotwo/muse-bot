@@ -361,8 +361,8 @@ export function approvalCallIds(messages: UIMessage[]): string[] {
 
 export type ChatItem =
   | { type: "day"; id: string; label: string }
-  /** A small grey line, not a message (a helper learned one of the user's habits). */
-  | { type: "notice"; id: string; text: string }
+  /** A small grey line, not a message (a helper learned one of the user's habits, or a memory was saved). */
+  | { type: "notice"; id: string; text: string; kind?: "memory"; note?: string }
   | { type: "user"; id: string; message: UIMessage }
   | {
       type: "reply";
@@ -533,7 +533,17 @@ export function chatItems(messages: UIMessage[], now = Date.now(), approvals: Ap
   // Last first, so the places of the earlier ones don't move.
   for (const [turn, index] of [...lastReplyOf].sort((a, b) => b[1] - a[1])) {
     const notes = remembered.get(turn) ?? [];
-    items.splice(index + 1, 0, ...notes.map((note, n) => ({ type: "notice" as const, id: `remembered-${turn}-${n}`, text: `✓ 已记住：${note}` })));
+    items.splice(
+      index + 1,
+      0,
+      ...notes.map((note, n) => ({
+        type: "notice" as const,
+        kind: "memory" as const,
+        id: `remembered-${turn}-${n}`,
+        text: `✓ 已记住：${note}`,
+        note,
+      })),
+    );
   }
   // A card whose request is not in the loaded history still shows at the end
   // while it needs an answer, and briefly after, so the outcome stays visible.

@@ -52,7 +52,7 @@ export function GoalBanner({
           <span className="flex w-full items-center gap-1 text-[14px] font-semibold">
             <span className="truncate">{objective}</span>
             <ChevronDown
-              className={`h-3.5 w-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
+              className={`h-3.5 w-3.5 shrink-0 transition-transform motion-reduce:transition-none ${open ? "rotate-180" : ""}`}
               aria-hidden="true"
             />
           </span>
@@ -64,7 +64,7 @@ export function GoalBanner({
           type="button"
           onClick={onStop}
           aria-label="停止这个目标"
-          className="c-pressable grid h-11 w-11 shrink-0 place-items-center rounded-full"
+          className="c-pressable grid h-11 w-11 shrink-0 place-items-center rounded-full transition-transform active:scale-95 motion-reduce:transition-none"
         >
           <Square className="h-3.5 w-3.5" style={{ fill: "currentColor" }} aria-hidden="true" />
         </button>

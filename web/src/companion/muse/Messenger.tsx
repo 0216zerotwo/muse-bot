@@ -63,16 +63,31 @@ export function MessengerBar({
       }}
     >
       <div className="mx-auto flex h-14 max-w-2xl items-center px-1">
-        <button type="button" onClick={onBack} aria-label="返回帮手列表" className="c-pressable grid h-11 w-11 place-items-center rounded-full">
+        <button
+          type="button"
+          onClick={onBack}
+          aria-label="返回帮手列表"
+          className="c-pressable grid h-11 w-11 place-items-center rounded-full transition-transform active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--c-primary)] motion-reduce:transition-none"
+        >
           <ChevronLeft className="h-6 w-6" />
         </button>
-        <button type="button" onClick={onProfile} className="min-w-0 flex-1 px-2 text-center" aria-label={`${title}的资料`}>
+        <button
+          type="button"
+          onClick={onProfile}
+          className="min-w-0 flex-1 rounded-xl px-2 py-1 text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--c-primary)]"
+          aria-label={`${title}的资料`}
+        >
           <span className="block truncate text-[16.5px] font-semibold leading-tight">{title}</span>
           <span className="block truncate text-[12px] leading-tight" style={{ color: busy ? "var(--c-primary)" : "var(--c-text-muted)" }}>
             {subtitle}
           </span>
         </button>
-        <button type="button" onClick={onProfile} aria-label="资料与设置" className="c-pressable grid h-11 w-11 place-items-center rounded-full">
+        <button
+          type="button"
+          onClick={onProfile}
+          aria-label="资料与设置"
+          className="c-pressable grid h-11 w-11 place-items-center rounded-full transition-transform active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--c-primary)] motion-reduce:transition-none"
+        >
           <MoreHorizontal className="h-6 w-6" />
         </button>
       </div>
@@ -109,7 +124,7 @@ export function MessengerEmpty({ face, title, hint, starters, onSend }: {
               key={text}
               type="button"
               onClick={() => onSend(text)}
-              className="c-pressable c-float rounded-2xl px-4 py-2.5 text-left text-[14.5px]"
+              className="c-pressable c-float rounded-2xl px-4 py-2.5 text-left text-[14.5px] transition-transform active:scale-[0.98] motion-reduce:transition-none"
             >
               {text}
             </button>

@@ -51,6 +51,14 @@ const BLUR_SETTLE_MS = 180;
 /** Keep focus (and the iOS keyboard) in the field when tapping composer buttons. */
 const keepFocus = (event: { preventDefault: () => void }) => event.preventDefault();
 
+function tapHaptic(ms = 8): void {
+  try {
+    navigator.vibrate?.(ms);
+  } catch {
+    // Ignore environments where vibration is unsupported or blocked.
+  }
+}
+
 export function Composer({
   value,
   onChange,
@@ -192,6 +200,7 @@ export function Composer({
 
   const submit = useCallback(() => {
     if (!canSend) return;
+    tapHaptic(8);
     onSend(value.trim(), images, dictated.current);
     setImages([]);
     setNotice(null);
@@ -332,7 +341,7 @@ export function Composer({
         {images.length > 0 && (
           <div className="flex gap-2 overflow-x-auto px-3 pt-3">
             {images.map((image, index) => (
-              <div key={index} className="relative shrink-0">
+              <div key={index} className="c-rise relative shrink-0 motion-reduce:animate-none">
                 {image.preview.kind === "image" ? (
                   <img src={image.preview.url} alt={image.preview.name ?? "图片"} className="h-16 w-16 rounded-2xl object-cover" />
                 ) : (
@@ -344,8 +353,9 @@ export function Composer({
                 <button
                   type="button"
                   aria-label="移除"
+                  title={image.preview.name ? `移除 ${image.preview.name}` : "移除"}
                   onClick={() => setImages((current) => current.filter((_, i) => i !== index))}
-                  className="c-float absolute -right-1.5 -top-1.5 grid h-6 w-6 place-items-center rounded-full"
+                  className="c-float absolute -right-1.5 -top-1.5 grid h-6 w-6 place-items-center rounded-full transition-transform active:scale-90 after:absolute after:-inset-2 after:content-[''] motion-reduce:transition-none"
                 >
                   <X className="h-3.5 w-3.5" aria-hidden="true" />
                 </button>
@@ -359,7 +369,7 @@ export function Composer({
             aria-label="添加文件"
             onClick={pickFiles}
             disabled={!connected}
-            className="c-pressable grid h-11 w-11 shrink-0 place-items-center rounded-full disabled:opacity-40"
+            className="c-pressable grid h-11 w-11 shrink-0 place-items-center rounded-full transition-transform active:scale-95 disabled:opacity-40 motion-reduce:transition-none"
           >
             <Plus className="h-5 w-5" aria-hidden="true" />
           </button>
@@ -405,10 +415,16 @@ export function Composer({
               type="button"
               aria-label="停止"
               onPointerDown={keepFocus}
-              onClick={onStop}
-              className="c-pressable grid h-11 w-11 shrink-0 place-items-center rounded-full"
+              onClick={() => {
+                tapHaptic(10);
+                onStop();
+              }}
+              className="c-pressable group grid h-11 w-11 shrink-0 place-items-center rounded-full"
             >
-              <span className="grid h-8 w-8 place-items-center rounded-full" style={{ background: "var(--c-danger-fill)" }}>
+              <span
+                className="grid h-8 w-8 place-items-center rounded-full transition-transform duration-150 group-active:scale-90 motion-reduce:transition-none"
+                style={{ background: "var(--c-danger-fill)" }}
+              >
                 <Square className="h-3 w-3 text-white" style={{ fill: "currentColor" }} aria-hidden="true" />
               </span>
             </button>
@@ -418,9 +434,9 @@ export function Composer({
               aria-label="发送"
               onPointerDown={keepFocus}
               onClick={submit}
-              className="grid h-11 w-11 shrink-0 place-items-center rounded-full"
+              className="c-pressable group grid h-11 w-11 shrink-0 place-items-center rounded-full"
             >
-              <span className="c-primary grid h-8 w-8 place-items-center rounded-full">
+              <span className="c-primary grid h-8 w-8 place-items-center rounded-full shadow-sm transition-transform duration-150 group-active:scale-90 motion-reduce:transition-none">
                 <ArrowUp className="h-[18px] w-[18px]" aria-hidden="true" />
               </span>
             </button>
@@ -432,10 +448,10 @@ export function Composer({
               aria-pressed={recording}
               onClick={voice.handleClick}
               disabled={voice.buttonDisabled}
-              className={`c-pressable grid h-11 w-11 shrink-0 place-items-center rounded-full disabled:opacity-40 ${recording ? "c-danger" : ""}`}
+              className={`c-pressable grid h-11 w-11 shrink-0 place-items-center rounded-full transition-transform active:scale-95 disabled:opacity-40 motion-reduce:transition-none ${recording ? "c-danger" : ""}`}
             >
               {transcribing ? (
-                <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
+                <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
               ) : (
                 <Mic className="h-5 w-5" aria-hidden="true" />
               )}

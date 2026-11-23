@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Menu, Settings2, SlidersHorizontal, X } from "lucide-react";
+import { ArrowDown, Menu, Settings2, SlidersHorizontal, X } from "lucide-react";
 
 import { useNanobotStream, type SendAttachment } from "@/hooks/useNanobotStream";
 import { useSessionHistory } from "@/hooks/useSessions";
@@ -109,6 +109,7 @@ export function CompanionScreen({
   chatApp,
   onOpenChat,
   draftRequest,
+  jumpRequest,
   teachRequest,
   onOpenMenu,
   onUpdateCompanion,
@@ -132,6 +133,8 @@ export function CompanionScreen({
   onOpenChat: (chatId: string) => void;
   /** A message to start in the box (a skill's 用一次 / 定时做 from settings). */
   draftRequest: { text: string; at: number } | null;
+  /** Jump to and briefly highlight a turn in this chat (from 查找聊天记录). */
+  jumpRequest?: { turnId: string; at: number } | null;
   /** Changes when 教它做 was asked for: open the browser, recording. */
   teachRequest: number;
   onOpenMenu: () => void;
@@ -181,6 +184,7 @@ export function CompanionScreen({
       chatApp={chatApp}
       onOpenChat={onOpenChat}
       teachRequest={teachRequest}
+      jumpRequest={jumpRequest}
       draft={draft}
       focusRequest={draftRequest?.at}
       onDraft={setDraft}
@@ -210,6 +214,7 @@ export function LiveScreen({
   chatApp,
   onOpenChat,
   teachRequest,
+  jumpRequest,
   draft,
   focusRequest,
   onDraft,
@@ -237,6 +242,7 @@ export function LiveScreen({
   chatApp?: ChatApp;
   onOpenChat: (chatId: string) => void;
   teachRequest: number;
+  jumpRequest?: { turnId: string; at: number } | null;
   draft: string;
   focusRequest?: number;
   onDraft: (draft: string) => void;
@@ -356,6 +362,11 @@ export function LiveScreen({
   const writing = useMemo(() => (typing ? fileDraft(messages) : null), [typing, messages]);
   const [composerFocused, setComposerFocused] = useState(false);
   const [statusOpen, setStatusOpen] = useState(false);
+  const [statusInitialPane, setStatusInitialPane] = useState<0 | 1 | 2 | 3 | undefined>(undefined);
+  const openMemoryPane = useCallback(() => {
+    setStatusInitialPane(3);
+    setStatusOpen(true);
+  }, []);
   const [visitedTabs, setVisitedTabs] = useState<ReadonlySet<MuseTab>>(() => new Set([tab]));
   useEffect(() => {
     setVisitedTabs((prev) => (prev.has(tab) ? prev : new Set(prev).add(tab)));
@@ -401,9 +412,17 @@ export function LiveScreen({
   /* Keep the newest message in view unless the user scrolled up to read. */
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
+  const [unreadReplies, setUnreadReplies] = useState(0);
+  const seenReplyIdsRef = useRef<Set<string>>(new Set());
   // Where it last put the thread: only a move up from there is the user scrolling back to read
   // (content growing under it also fires scroll events, which must not unpin it).
   const pinnedTop = useRef(0);
+  const setPinned = useCallback((pinned: boolean) => {
+    stickToBottom.current = pinned;
+    setAtBottom(pinned);
+    if (pinned) setUnreadReplies(0);
+  }, []);
   const toBottom = (el: HTMLDivElement) => {
     el.scrollTop = el.scrollHeight;
     pinnedTop.current = el.scrollTop;
@@ -411,13 +430,80 @@ export function LiveScreen({
   const onChatScroll = () => {
     const el = chatScrollRef.current;
     if (!el) return;
-    if (el.scrollHeight - el.scrollTop - el.clientHeight < STICKY_BOTTOM_PX) stickToBottom.current = true;
-    else if (el.scrollTop < pinnedTop.current - 4) stickToBottom.current = false;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < STICKY_BOTTOM_PX) {
+      pinnedTop.current = el.scrollTop;
+      if (!stickToBottom.current) setPinned(true);
+    } else if (el.scrollTop < pinnedTop.current - 4 || (pinnedTop.current === 0 && distanceFromBottom >= STICKY_BOTTOM_PX)) {
+      if (stickToBottom.current) setPinned(false);
+    }
   };
+  const scrollToLatest = useCallback(() => {
+    setPinned(true);
+    const el = chatScrollRef.current;
+    if (!el) return;
+    pinnedTop.current = el.scrollHeight;
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (typeof el.scrollTo === "function") {
+      el.scrollTo({ top: el.scrollHeight, behavior: reduced ? "auto" : "smooth" });
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [setPinned]);
+  useEffect(() => {
+    if (atBottom) {
+      const nextSeen = new Set<string>();
+      for (const item of items) {
+        if (item.type === "reply") nextSeen.add(item.id);
+      }
+      seenReplyIdsRef.current = nextSeen;
+      setUnreadReplies(0);
+      return;
+    }
+    let unseen = 0;
+    for (const item of items) {
+      if (item.type === "reply" && !seenReplyIdsRef.current.has(item.id)) unseen += 1;
+    }
+    setUnreadReplies(unseen);
+  }, [atBottom, items]);
+
+  /* Jump to a specific turn from search results and highlight it briefly. */
+  const [highlightedTurnId, setHighlightedTurnId] = useState<string | null>(null);
+  const handledJumpAtRef = useRef<number | null>(null);
+  const highlightTimerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (highlightTimerRef.current !== null) window.clearTimeout(highlightTimerRef.current);
+    },
+    [],
+  );
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
+    if (jumpRequest && handledJumpAtRef.current !== jumpRequest.at) return;
     if (el && stickToBottom.current) toBottom(el);
-  }, [items, typing, insets.bottom, tab]);
+  }, [items, typing, insets.bottom, tab, jumpRequest]);
+  useEffect(() => {
+    if (!jumpRequest || !ready || tab !== "chat" || handledJumpAtRef.current === jumpRequest.at) return;
+    const container = chatScrollRef.current;
+    if (!container) return;
+    const target = Array.from(container.querySelectorAll<HTMLElement>("[data-turn-id]")).find(
+      (node) => node.dataset.turnId === jumpRequest.turnId,
+    );
+    if (!target) return;
+    handledJumpAtRef.current = jumpRequest.at;
+    stickToBottom.current = false;
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    target.scrollIntoView?.({ behavior: reduced ? "auto" : "smooth", block: "center" });
+    if (container.scrollHeight - container.scrollTop - container.clientHeight >= STICKY_BOTTOM_PX) {
+      setAtBottom(false);
+    }
+    setHighlightedTurnId(jumpRequest.turnId);
+    if (highlightTimerRef.current !== null) window.clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = window.setTimeout(() => {
+      setHighlightedTurnId(null);
+      highlightTimerRef.current = null;
+    }, 1200);
+  }, [jumpRequest, ready, items, tab]);
   // Pictures, cards and tables grow the thread after it is shown: stay at the bottom while they do.
   useEffect(() => {
     const el = chatScrollRef.current;
@@ -436,7 +522,7 @@ export function LiveScreen({
   const petPx = usePetScale();
   const submit = useCallback(
     (text: string, images: SendAttachment[] = [], spoken = false) => {
-      stickToBottom.current = true;
+      setPinned(true);
       if (send(text, images.length ? images : undefined, quote ? { quotedContext: quote } : undefined)) {
         // Asked by voice in the Android app: the answer is read out when it is done (as on iPhone).
         readNext.current = spoken && !!androidShell()?.speak && readsAfterVoice();
@@ -444,7 +530,7 @@ export function LiveScreen({
         setQuote(null);
       }
     },
-    [onDraft, send, quote],
+    [onDraft, send, quote, setPinned],
   );
   const onMessageAction = useCallback(
     (action: MessageAction, message: UIMessage, role: "user" | "reply") => {
@@ -598,6 +684,8 @@ export function LiveScreen({
               onDecide={decide}
               onSend={(text) => submit(text)}
               onMessageAction={onMessageAction}
+              highlightedTurnId={highlightedTurnId}
+              onOpenMemory={openMemoryPane}
               draft={writing}
               companionName={chatApp ? undefined : companion.name}
               working={{
@@ -683,7 +771,14 @@ export function LiveScreen({
         spinning={connected && !!activity && !pendingApprovals}
         badge={pendingApprovals + (handoff ? 1 : 0)}
         // A helper's or a group's chat: its face opens its profile (the companion's status is the companion's).
-        onAvatar={() => (sideName ? onEditSide() : setStatusOpen(true))}
+        onAvatar={() => {
+          if (sideName) {
+            onEditSide();
+          } else {
+            setStatusInitialPane(undefined);
+            setStatusOpen(true);
+          }
+        }}
         leading={
           <MuseRoundButton onClick={onOpenMenu} label="菜单">
             <Menu size={22} />
@@ -711,6 +806,21 @@ export function LiveScreen({
         style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
       >
         <div className="mx-auto flex max-w-2xl flex-col gap-2">
+          {tab === "chat" && !atBottom && items.length > 0 && (
+            <div className="pointer-events-none flex justify-center">
+              <button
+                type="button"
+                onClick={scrollToLatest}
+                aria-label={unreadReplies > 0 ? `回到最新，${unreadReplies} 条新回复` : "回到最新"}
+                className="c-float c-pressable c-rise pointer-events-auto inline-flex min-h-9 items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[13px] font-medium shadow-sm transition-transform active:scale-95 motion-reduce:transition-none"
+              >
+                <ArrowDown className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--c-primary)" }} aria-hidden="true" />
+                <span style={unreadReplies > 0 ? { color: "var(--c-primary)" } : undefined}>
+                  {unreadReplies > 0 ? `${unreadReplies} 条新回复` : "回到最新"}
+                </span>
+              </button>
+            </div>
+          )}
           {streamError && tab === "chat" && (
             <div className="c-float flex items-center gap-2 rounded-2xl py-1 pl-4 pr-1 text-[14px]" role="alert">
               <span className="flex-1">{streamErrorText(streamError)}</span>
@@ -785,7 +895,11 @@ export function LiveScreen({
 
       <StatusSheet
         open={statusOpen}
-        onClose={() => setStatusOpen(false)}
+        initialPane={statusInitialPane}
+        onClose={() => {
+          setStatusOpen(false);
+          setStatusInitialPane(undefined);
+        }}
         face={<PetView value={companion.avatar} animation={pet.animation} loop={pet.loop} onDone={pet.onDone} size={72} />}
         name={companion.name}
         statusLine={status}
@@ -793,6 +907,7 @@ export function LiveScreen({
         onStop={() => {
           stop();
           setStatusOpen(false);
+          setStatusInitialPane(undefined);
         }}
         approvals={mergedApprovals}
         sessionKey={sessionKey}
