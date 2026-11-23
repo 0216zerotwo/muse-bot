@@ -102,6 +102,9 @@ class _TaskVideo(VideoGenProvider):
         """(state: "running" | "done" | "failed", the video's address when done, why it failed)."""
         raise NotImplementedError
 
+    def _cleanup(self, task: str) -> None:
+        pass
+
     def generate(self, prompt: str, *, model: Optional[str] = None, image_url: Optional[str] = None,
                  reference_image_urls: Optional[list[str]] = None, duration: Optional[int] = None,
                  aspect_ratio: str = "16:9", resolution: str = "720p", negative_prompt: Optional[str] = None,
@@ -113,6 +116,7 @@ class _TaskVideo(VideoGenProvider):
         if not key:
             return failed(f"{self.label} 还没有 API key，在「模型」里添加时填上", "auth_required")
         seconds = max(3, min(15, int(duration or 5)))
+        task: Optional[str] = None
         try:
             with httpx.Client(base_url=self._base(), timeout=60,
                               headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}) as client:
@@ -131,6 +135,9 @@ class _TaskVideo(VideoGenProvider):
             return failed(f"{self.label} 返回 {exc.response.status_code}：{exc.response.text[:300]}")
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             return failed(f"{self.label} 调用失败：{exc}")
+        finally:
+            if task:
+                self._cleanup(task)
         if not net_safety.is_safe_url(url):
             return failed("返回的视频地址不安全，已拦截")
         try:
@@ -168,6 +175,13 @@ class MiniMaxVideo(_TaskVideo):
               {"id": "MiniMax-Hailuo-02", "display": "海螺 02"}]
 
     _v2_tasks: set[str] = set()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._v2_tasks = set()
+
+    def _cleanup(self, task: str) -> None:
+        self._v2_tasks.discard(task)
 
     def _v2(self, path: str) -> str:
         """An address of the newer interface (the service's address ends in /v1)."""

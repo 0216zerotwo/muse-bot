@@ -79,6 +79,32 @@ class ReopenTest(unittest.TestCase):
         self.assertIsNone(c.held())
         self.assertIsNone(c.release())  # the request went with it
 
+    def test_viewer_owned_hold_and_finite_coordinate_clamping(self):
+        c = self.computer
+        c.take(101)
+        c.take(202)
+        self.assertEqual(c.held(), "user")
+        # Viewer 202 leaves while viewer 101 still holds control -> hold stays "user".
+        c.let_go(202)
+        self.assertEqual(c.held(), "user")
+        c.let_go(101)
+        self.assertIsNone(c.held())
+
+        sent_cdp = []
+
+        class _RecPage(_Page):
+            async def send(self, method, params=None):
+                sent_cdp.append((method, params))
+                return 0
+
+        viewer = _Viewer()
+        page = _RecPage(False)
+        asyncio.run(c._input(page, {"w": 1000.0, "h": 500.0}, {"type": "click", "x": float("nan"), "y": 9.5}, viewer))
+        asyncio.run(c._input(page, {"w": 1000.0, "h": 500.0}, {"type": "scroll", "dy": float("inf")}, viewer))
+        self.assertEqual(sent_cdp[0][1]["x"], 0.0)
+        self.assertEqual(sent_cdp[0][1]["y"], 500.0)
+        self.assertEqual(sent_cdp[-1][1]["deltaY"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

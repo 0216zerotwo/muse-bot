@@ -1315,3 +1315,9 @@ async def _handle_mutation(adapter: "CompanionAdapter", socket: WebSocket, frame
             "event": "webui_response", "request_id": request_id, "ok": False,
             "error": {"status": exc.status, "message": exc.message},
         })
+    except Exception as exc:
+        logger.error("companion: mutation %s failed (%s)", frame.get("action"), type(exc).__name__, exc_info=True)
+        await socket.send_json({
+            "event": "webui_response", "request_id": request_id, "ok": False,
+            "error": {"status": 500, "message": "服务器处理请求时出错了，请稍后再试"},
+        })

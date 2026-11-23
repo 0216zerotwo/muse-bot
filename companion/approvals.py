@@ -509,6 +509,24 @@ class Approvals:
         self.adapter = adapter
         self.store = ApprovalStore(root)
         self.grants = GrantStore(root)
+        with contextlib.suppress(Exception):
+            from .modules import computer
+
+            computer.set_pending_browser_check(self.has_pending_browser)
+
+    def has_pending_browser(self, chat_id: Optional[str] = None) -> bool:
+        """True when ``chat_id`` (or any chat, when ``chat_id`` is None) has a pending browser approval."""
+        from .modules import computer
+
+        records = (
+            self.store.list_for_session(f"websocket:{chat_id}")
+            if chat_id
+            else self.store.list_all()
+        )
+        return any(
+            r.status == PENDING and (r.action in _BROWSER_ACTIONS or computer.is_browser_tool(r.tool_name))
+            for r in records
+        )
 
     def granted(self, action: str, arguments: Any, host: Optional[str] = None) -> bool:
         """The user already said yes to this action and target for a while."""
@@ -624,6 +642,10 @@ class Approvals:
 
     def _run(self, record: ApprovalRecord) -> str:
         try:
+            from .modules import computer
+
+            if record.action in _BROWSER_ACTIONS or computer.is_browser_tool(record.tool_name):
+                computer.ensure_browser()
             from model_tools import handle_function_call
 
             result = handle_function_call(

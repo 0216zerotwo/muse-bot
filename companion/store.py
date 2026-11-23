@@ -8,7 +8,10 @@ exactly the shapes it receives live (nanobot's ``webui-thread`` projection).
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
+import os
 import threading
 import time
 import uuid
@@ -28,10 +31,44 @@ _ARGUMENT_CHARS = 400
 _RESULT_CHARS = 300
 
 
-def _revision(events: list[dict[str, Any]]) -> str:
-    """Which copy of the chat this is: its length and its newest event (a message removed and
-    another added keeps the length, not the time)."""
-    return f"{len(events)}.{events[-1].get('created_at_ms', 0) if events else 0}"
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+
+
+def _revision(events: list[dict[str, Any]], seq: int = 0) -> str:
+    """Which copy of the chat this is: length, newest timestamp, mutation counter, and content digest."""
+    last_ms = events[-1].get("created_at_ms", 0) if events else 0
+    hasher = hashlib.blake2s(digest_size=4)
+    for event in events:
+        piece = f"{event.get('event')}|{event.get('turn_id')}|{event.get('created_at_ms')}|{event.get('text')}\n"
+        hasher.update(piece.encode("utf-8", errors="replace"))
+    return f"{len(events)}.{last_ms}.{seq}.{hasher.hexdigest()}"
+
+
+def _latest_preview(events: list[dict[str, Any]]) -> str:
+    for event in reversed(events):
+        if event.get("event") not in ("user_message", "message"):
+            continue
+        if (event.get("source") or {}).get("kind") == "notice":
+            continue
+        text = str(event.get("text") or "").strip()
+        if text:
+            return text.replace("\n", " ")[:120]
+    return ""
 
 
 def _brief(value: Any, limit: int) -> Any:
@@ -86,9 +123,7 @@ class ChatStore:
         return data if isinstance(data, dict) else {}
 
     def _write_index(self, data: dict[str, dict[str, Any]]) -> None:
-        tmp = self._index.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self._index)
+        _atomic_write_text(self._index, json.dumps(data, ensure_ascii=False, indent=2))
 
     def create(self) -> str:
         chat_id = str(uuid.uuid4())
@@ -128,10 +163,12 @@ class ChatStore:
         rows.sort(key=lambda row: row["updated_at"] or "", reverse=True)
         return rows
 
-    def _touch(self, chat_id: str, preview: str | None) -> None:
+    def _touch(self, chat_id: str, preview: str | None, *, bump_rev: bool = True) -> None:
         index = self._read_index()
         meta = index.setdefault(chat_id, {"created_at": _now_iso(), "title": ""})
         meta["updated_at"] = _now_iso()
+        if bump_rev:
+            meta["rev"] = int(meta.get("rev") or 0) + 1
         if preview:
             meta["preview"] = preview.strip().replace("\n", " ")[:120]
         self._write_index(index)
@@ -186,7 +223,13 @@ class ChatStore:
             with self._path(chat_id).open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(stamped, ensure_ascii=False) + "\n")
             if event.get("event") in ("user_message", "message"):
-                self._touch(chat_id, event.get("text"))
+                is_notice = (event.get("source") or {}).get("kind") == "notice"
+                self._touch(chat_id, None if is_notice else event.get("text"))
+            else:
+                index = self._read_index()
+                if chat_id in index:
+                    index[chat_id]["rev"] = int(index[chat_id].get("rev") or 0) + 1
+                    self._write_index(index)
         return stamped
 
     def remove_events(self, chat_id: str, gone: Any) -> int:
@@ -196,11 +239,28 @@ class ChatStore:
             path = self._path(chat_id)
             if not path.is_file():
                 return 0
-            events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            events: list[dict[str, Any]] = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except ValueError:
+                    continue
             keep = [e for e in events if not gone(e)]
-            if len(keep) != len(events):
-                path.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in keep), encoding="utf-8")
-            return len(events) - len(keep)
+            removed = len(events) - len(keep)
+            if removed:
+                _atomic_write_text(path, "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in keep))
+                index = self._read_index()
+                if chat_id in index:
+                    meta = index[chat_id]
+                    meta["updated_at"] = _now_iso()
+                    meta["preview"] = _latest_preview(keep)
+                    meta["rev"] = int(meta.get("rev") or 0) + 1
+                    max_ms = max((int(e.get("created_at_ms") or 0) for e in events), default=0)
+                    meta["removed_at_ms"] = max(int(time.time() * 1000), max_ms + 1)
+                    self._write_index(index)
+            return removed
 
     def events(self, chat_id: str) -> list[dict[str, Any]]:
         path = self._path(chat_id)
@@ -218,13 +278,23 @@ class ChatStore:
         """The chat's events. With ``known``/``last`` (how many events a phone already keeps, and the
         newest one's ``created_at_ms``): when its copy still matches, only the events after it
         (``incremental``); otherwise everything, so a deleted or changed message is never missed."""
+        meta = self._read_index().get(chat_id) or {}
+        seq = int(meta.get("rev") or 0)
+        removed_at_ms = int(meta.get("removed_at_ms") or 0)
         # Activity saved outside any turn (``turn_id: null``) fails the app's check for the whole thread.
         events = [e for e in self.events(chat_id) if e.get("event") in REPLAY_EVENTS and isinstance(e.get("chat_id"), str)
                   and ("turn_id" not in e or isinstance(e["turn_id"], str))]
         completed = [e["turn_id"] for e in events if e.get("event") == "turn_end" and e.get("turn_id")]
         newest = next((e.get("turn_id") for e in reversed(events) if e.get("turn_id")), None)
         events = [e if e.get("turn_id") == newest else _lean(e) for e in events]
-        if known is not None and last is not None and 0 < known <= len(events) and events[known - 1].get("created_at_ms") == last:
+        rev = _revision(events, seq)
+        if (
+            known is not None
+            and last is not None
+            and 0 < known <= len(events)
+            and events[known - 1].get("created_at_ms") == last
+            and last >= removed_at_ms
+        ):
             return {
                 "schemaVersion": TRANSCRIPT_SCHEMA_VERSION,
                 "sessionKey": session_key(chat_id),
@@ -232,7 +302,7 @@ class ChatStore:
                 "events": events[known:],
                 "incremental": True,
                 "completed_turn_ids": completed,
-                "revision": _revision(events),
+                "revision": rev,
             }
         return {
             "schemaVersion": TRANSCRIPT_SCHEMA_VERSION,
@@ -240,5 +310,5 @@ class ChatStore:
             "projection": "events",
             "events": events,
             "completed_turn_ids": completed,
-            "revision": _revision(events),
+            "revision": rev,
         }

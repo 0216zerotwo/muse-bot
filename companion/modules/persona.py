@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 
 from .companion_state import companion_identity_prompt
+from .fs_atomic import atomic_write_text
 
 _PRINCIPLES = """## 做事原则
 
@@ -141,7 +142,7 @@ def write_soul() -> bool:
             return False
     except OSError:
         pass
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text)
     return True
 
 
@@ -250,8 +251,7 @@ def write_locale_overlay(lang: str = "zh") -> bool:
             return False
     except OSError:
         pass
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text)
     reset = getattr(i18n, "reset_language_cache", None)
     if callable(reset):
         reset()

@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from .fs_atomic import atomic_write_json
 from .model_catalog import USD_TO_CNY, vendor
 from .paths import get_webui_dir
 
@@ -77,11 +78,7 @@ def _save(vendor_id: str, kind: str, entry: dict[str, Any]) -> None:
     with _LOCK:
         data = _read()
         data.setdefault(vendor_id, {})[kind] = entry
-        path = _cache_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        atomic_write_json(_cache_path(), data)
 
 
 # ---------- reading the pages ----------

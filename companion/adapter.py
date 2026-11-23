@@ -93,12 +93,16 @@ class CompanionAdapter(BasePlatformAdapter):
         self.media = MediaStore(get_webui_dir())
         # chat_id -> live WebSocket connections attached to it
         self._subs: dict[str, set[Any]] = {}
-        # chat_id -> the turn the agent is answering, and its open streamed draft
+        # chat_id -> the turn the agent is answering, and any queued follow-up turn ids behind it
         self._turns: dict[str, str] = {}
+        self._pending_turns: dict[str, list[str]] = {}
         # Helpers working on something another chat handed them: chat -> (turn id, the answer).
         self._helper_waits: dict[str, tuple[str, asyncio.Future]] = {}
         # One task at a time per helper; the rest wait in order.
         self._helper_locks: dict[str, asyncio.Lock] = {}
+        # Serialize internal system turns (approval outcomes, browser handoff resumes) per chat.
+        self._internal_locks: dict[str, asyncio.Lock] = {}
+        self._turn_idle: dict[str, asyncio.Event] = {}
         # Pictures uploaded for a message about to be sent: reference -> (file, type, name, when).
         self._attachments: dict[str, tuple[Path, str, str, float]] = {}
         # One browser: helpers' browser requests take turns.
@@ -106,11 +110,12 @@ class CompanionAdapter(BasePlatformAdapter):
         # Which chat a helper's current task came from (a group lets it pass work on to members).
         self._helper_origins: dict[str, str] = {}
         self._drafts: dict[str, _Draft] = {}
-        # chats whose current turn has shown something (a reply, a draft, tool activity)
-        self._turn_output: set[str] = set()
+        # (chat_id, turn_id) pairs whose turn has shown real output (a reply, a draft, tool activity)
+        self._turn_output: set[Any] = set()
         # chat_id -> the companion's latest reply text (titles files it sends right after)
         self._last_reply: dict[str, str] = {}
         self._server_task: Optional[asyncio.Task] = None
+        self._bg_tasks: set[asyncio.Task] = set()
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self._server: Any = None
 
@@ -123,14 +128,16 @@ class CompanionAdapter(BasePlatformAdapter):
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         import uvicorn
 
-        from .server import build_app
+        from .server import MAX_FRAME_BYTES, build_app
 
         started_ms = int(time.time() * 1000)
         app = build_app(self)
         helpers.bind(self, asyncio.get_running_loop())
         avatar_motion.bind(self, asyncio.get_running_loop())
         feed.bind(self, asyncio.get_running_loop())
-        config = uvicorn.Config(app, host=self.host, port=self.port, log_level="warning", ws="websockets")
+        config = uvicorn.Config(
+            app, host=self.host, port=self.port, log_level="warning", ws="websockets", ws_max_size=MAX_FRAME_BYTES
+        )
         self._server = uvicorn.Server(config)
         self._server.install_signal_handlers = lambda: None  # the gateway owns signals
         self._server_task = asyncio.create_task(self._server.serve())
@@ -145,16 +152,17 @@ class CompanionAdapter(BasePlatformAdapter):
         activity.bind(self, self.loop)
         self.sync_identity()
         triggers.set_base_url(self.host, self.port, _env("COMPANION_PUBLIC_URL"))
-        asyncio.ensure_future(self._time_models())
+        self._spawn_bg(asyncio.to_thread(self._prune_uploads))
+        self._spawn_bg(self._time_models())
         if not is_reconnect:
             # A task the last stop cut off (the window closed mid-task): the chat says so, with 接着做.
-            asyncio.ensure_future(interrupted.announce(self, started_ms))
+            self._spawn_bg(interrupted.announce(self, started_ms))
         with contextlib.suppress(Exception):
             feed.ensure_job()
         with contextlib.suppress(Exception):
             helpers.ensure_defaults(self.store)
-        asyncio.ensure_future(self._keep_signed_in())
-        asyncio.ensure_future(self._learn_memory())
+        self._spawn_bg(self._keep_signed_in())
+        self._spawn_bg(self._learn_memory())
         if not self.devices.any_paired():
             code = self.devices.new_code()["code"]
             logger.warning("Companion: no phone is connected yet. In the app, enter this server's address "
@@ -262,8 +270,56 @@ class CompanionAdapter(BasePlatformAdapter):
         self._set_fatal_error(code, message, retryable=True)
         return False
 
+    def _spawn_bg(self, coro: Any) -> asyncio.Task:
+        tasks = getattr(self, "_bg_tasks", None)
+        if tasks is None:
+            tasks = set()
+            self._bg_tasks = tasks
+        task = asyncio.create_task(coro)
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return task
+
+    def _set_active_turn(self, chat_id: str, turn_id: str) -> None:
+        self._turns[chat_id] = turn_id
+        idle = getattr(self, "_turn_idle", None)
+        if idle is not None and chat_id in idle:
+            idle[chat_id].clear()
+
+    def _clear_active_turn(self, chat_id: str) -> Optional[str]:
+        popped = self._turns.pop(chat_id, None)
+        idle = getattr(self, "_turn_idle", None)
+        if idle is not None and chat_id in idle:
+            idle[chat_id].set()
+        return popped
+
+    def _note_turn_output(self, chat_id: str, turn_id: Optional[str]) -> None:
+        if not turn_id:
+            return
+        if not hasattr(self, "_turn_output"):
+            self._turn_output = set()
+        self._turn_output.add((chat_id, str(turn_id)))
+
+    def _has_turn_output(self, chat_id: str, turn_id: Optional[str]) -> bool:
+        out = getattr(self, "_turn_output", ())
+        return bool((turn_id and (chat_id, str(turn_id)) in out) or chat_id in out)
+
+    def _discard_turn_output(self, chat_id: str, turn_id: Optional[str]) -> None:
+        out = getattr(self, "_turn_output", None)
+        if out is None:
+            return
+        if turn_id:
+            out.discard((chat_id, str(turn_id)))
+        out.discard(chat_id)
+
     async def disconnect(self) -> None:
         self._mark_disconnected()
+        bg = list(getattr(self, "_bg_tasks", ()))
+        for task in bg:
+            task.cancel()
+        if bg:
+            with contextlib.suppress(Exception):
+                await asyncio.gather(*bg, return_exceptions=True)
         if self._server is not None:
             self._server.should_exit = True
         if self._server_task is not None:
@@ -281,8 +337,8 @@ class CompanionAdapter(BasePlatformAdapter):
 
     async def _emit(self, chat_id: str, event: dict[str, Any], *, persist: bool = False) -> None:
         body = {**event, "chat_id": chat_id}
-        if event.get("event") in ("delta", "message"):
-            self._turn_output.add(chat_id)
+        if event.get("event") in ("delta", "message") and (event.get("source") or {}).get("kind") != "notice":
+            self._note_turn_output(chat_id, event.get("turn_id"))
         if persist:
             body = self.store.append(chat_id, body)
         if _DEBUG_FRAMES:
@@ -295,6 +351,27 @@ class CompanionAdapter(BasePlatformAdapter):
 
     # -- inbound (phone → agent) -----------------------------------------------------------------
 
+    def _prune_uploads(self, max_age_s: float = 3600.0) -> None:
+        now = time.time()
+        tracked: set[Path] = set()
+        for ref, (old, _, _, at) in list(getattr(self, "_attachments", {}).items()):
+            if now - at > max_age_s:
+                self._attachments.pop(ref, None)
+                with contextlib.suppress(OSError):
+                    old.unlink(missing_ok=True)
+            else:
+                tracked.add(old)
+        folder = get_webui_dir() / "uploads"
+        if not folder.is_dir():
+            return
+        with contextlib.suppress(OSError):
+            for entry in folder.iterdir():
+                if entry in tracked or not entry.is_file():
+                    continue
+                with contextlib.suppress(OSError):
+                    if now - entry.stat().st_mtime > max_age_s:
+                        entry.unlink(missing_ok=True)
+
     def keep_attachment(self, data: bytes, mime: str, name: str) -> str:
         """A picture the app uploaded for its next message; its reference (the message names it)."""
         import mimetypes
@@ -306,11 +383,8 @@ class CompanionAdapter(BasePlatformAdapter):
         path = folder / f"{reference}{Path(display).suffix or mimetypes.guess_extension(mime) or ''}"
         path.write_bytes(data)
         self._attachments[reference] = (path, mime, display, time.time())
-        # Uploaded but never sent (the app gave up): gone after an hour.
-        for ref, (old, _, _, at) in list(self._attachments.items()):
-            if time.time() - at > 3600:
-                self._attachments.pop(ref, None)
-                old.unlink(missing_ok=True)
+        # Uploaded but never sent (the app gave up, or left over from an earlier run): gone after an hour.
+        self._prune_uploads()
         return reference
 
     def take_attachment(self, reference: str) -> Optional[tuple[Path, str, str]]:
@@ -549,10 +623,39 @@ class CompanionAdapter(BasePlatformAdapter):
                             if e.get("event") == "message" and e.get("turn_phase") == "answer"
                             and e.get("turn_id") == turn_id and str(e.get("text") or "").strip())
 
-    async def submit_internal(self, chat_id: str, text: str) -> str:
-        """A turn the user didn't type (e.g. the outcome of an approval card): only the reply shows."""
-        self.store.ensure(chat_id)
-        return await self._start_turn(chat_id, text, uuid.uuid4().hex)
+    async def _wait_chat_idle(self, chat_id: str, timeout: float = 600.0) -> None:
+        if chat_id not in self._turns:
+            return
+        idle_map = getattr(self, "_turn_idle", None)
+        if idle_map is None:
+            idle_map = {}
+            self._turn_idle = idle_map
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while chat_id in self._turns:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            ev = idle_map.setdefault(chat_id, asyncio.Event())
+            ev.clear()
+            if chat_id not in self._turns:
+                ev.set()
+                break
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(ev.wait(), min(remaining, 2.0))
+
+    async def submit_internal(self, chat_id: str, text: str, *, timeout: float = 600.0) -> str:
+        """A turn the user didn't type (e.g. the outcome of an approval card): serialized behind any
+        active turn on ``chat_id`` so it never clobbers a running turn's state."""
+        locks = getattr(self, "_internal_locks", None)
+        if locks is None:
+            locks = {}
+            self._internal_locks = locks
+        lock = locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            await self._wait_chat_idle(chat_id, timeout=timeout)
+            self.store.ensure(chat_id)
+            return await self._start_turn(chat_id, text, uuid.uuid4().hex)
 
     async def stop(self, chat_id: str) -> str:
         """The app's stop button (it sends ``/stop``): not a chat message, so no bubble, and the
@@ -583,12 +686,22 @@ class CompanionAdapter(BasePlatformAdapter):
             raise ValueError("带图片或文件的消息暂时不能重新生成")  # /retry can't send them again
         await asyncio.to_thread(self.store.remove_events, chat_id,
                                 lambda e: e.get("turn_id") == turn_id and e.get("event") != "user_message")
-        self._turns[chat_id] = turn_id  # at work from now: a reload shows it so
+        self._set_active_turn(chat_id, turn_id)  # at work from now: a reload shows it so
         asyncio.ensure_future(self._start_turn(chat_id, RETRY_COMMAND, turn_id))
 
     async def _start_turn(self, chat_id: str, text: str, turn_id: str,
                           files: Optional[list[tuple[str, str]]] = None) -> str:
-        self._turns[chat_id] = turn_id
+        active = self._turns.get(chat_id)
+        if active is None or active == turn_id:
+            self._set_active_turn(chat_id, turn_id)
+        else:
+            pending_map = getattr(self, "_pending_turns", None)
+            if pending_map is None:
+                pending_map = {}
+                self._pending_turns = pending_map
+            queue = pending_map.setdefault(chat_id, [])
+            if turn_id not in queue:
+                queue.append(turn_id)
         event = self._event(chat_id, text, turn_id)
         if files:
             event.media_urls = [path for path, _ in files]
@@ -646,23 +759,53 @@ class CompanionAdapter(BasePlatformAdapter):
         }, persist=True)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """A turn the agent started on its own (a goal's next step): give it a turn id of its own."""
+        """A turn the agent started on its own (a goal's next step) or a queued follow-up now draining."""
         chat_id = event.source.chat_id if event.source else None
-        if chat_id and chat_id not in self._turns:
-            self._turns[chat_id] = uuid.uuid4().hex
+        if not chat_id:
+            return
+        msg_id = event.message_id or ""
+        pending_map = getattr(self, "_pending_turns", None) or {}
+        queue = pending_map.get(chat_id)
+        active = self._turns.get(chat_id)
+        if active is None:
+            if queue and msg_id in queue:
+                queue.remove(msg_id)
+                if not queue:
+                    pending_map.pop(chat_id, None)
+            self._set_active_turn(chat_id, msg_id or uuid.uuid4().hex)
+            return
+        # In-band queued follow-up (Hermes run_turn): close the finished active turn before starting msg_id.
+        if msg_id and msg_id != active and queue and msg_id in queue and self._has_turn_output(chat_id, active):
+            queue.remove(msg_id)
+            if not queue:
+                pending_map.pop(chat_id, None)
+            self._discard_turn_output(chat_id, active)
+            await self._close_draft(chat_id)
+            await self._emit(chat_id, {"event": "turn_end", "turn_id": active, "turn_phase": "complete"}, persist=True)
+            self._set_active_turn(chat_id, msg_id)
 
     async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
         chat_id = event.source.chat_id if event.source else None
         if not chat_id:
             return
+        active = self._turns.get(chat_id)
+        msg_id = event.message_id or ""
+        if active is None:
+            return
+        if msg_id and msg_id != active:
+            # A mid-turn steered or intake-queued message finished its outer hook while ``active`` is still running.
+            return
         succeeded = getattr(outcome, "value", outcome) == "success"
-        if succeeded and chat_id not in self._turn_output:
+        if succeeded and not self._has_turn_output(chat_id, active):
             # Queued (e.g. while the gateway was still starting) rather than answered: the turn
             # really completes when the queued message is processed.
             return
-        self._turn_output.discard(chat_id)
+        self._discard_turn_output(chat_id, active)
         await self._close_draft(chat_id)
-        turn_id = self._turns.pop(chat_id, None) or event.message_id
+        turn_id = self._clear_active_turn(chat_id) or msg_id
+        pending_map = getattr(self, "_pending_turns", None)
+        if pending_map and chat_id in pending_map and not pending_map[chat_id]:
+            pending_map.pop(chat_id, None)
         await self._emit(chat_id, {"event": "turn_end", "turn_id": turn_id, "turn_phase": "complete"}, persist=True)
         await self.push_goal_state(chat_id)
         # A helper finished work another chat handed it: its answer goes back there.
@@ -809,6 +952,7 @@ class CompanionAdapter(BasePlatformAdapter):
             push.schedule_push(self.companion_name(), push.preview(widgets.strip_cards(content)), tag=source["label"])
         if draft is not None and draft.text.strip() == content.strip():
             # Already shown live as a stream: only record it for replay.
+            self._note_turn_output(chat_id, turn_id)
             self.store.append(chat_id, {**body, "chat_id": chat_id})
         else:
             await self._emit(chat_id, body, persist=True)

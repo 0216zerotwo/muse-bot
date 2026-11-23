@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from pathlib import Path
 from typing import Any, Optional
@@ -11,12 +12,15 @@ def _session_id(chat_id: str) -> Optional[str]:
     from hermes_constants import get_hermes_home
 
     path = Path(get_hermes_home()) / "state.db"
+    if not path.is_file():
+        return None
     try:
-        with sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=5) as db:
+        uri = path.resolve().as_uri() + "?mode=ro"
+        with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=5)) as db:
             row = db.execute(
                 "SELECT id FROM sessions WHERE source = 'companion' AND chat_id = ? "
                 "ORDER BY started_at DESC LIMIT 1", (chat_id,)).fetchone()
-    except sqlite3.Error:
+    except (sqlite3.Error, OSError, ValueError):
         return None
     return row[0] if row else None
 

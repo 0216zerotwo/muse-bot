@@ -215,6 +215,7 @@ def animate_later(avatar_id: str) -> bool:
         _running.add(avatar_id)
 
     def run() -> None:
+        text = ""
         try:
             avatars.set_flag(avatar_id, "motion_pending", True)
             result = animate(avatar_id)
@@ -225,10 +226,14 @@ def animate_later(avatar_id: str) -> bool:
             logger.exception("companion: animating look %s failed", avatar_id)
             text = f"形象的动作没生成出来：{exc}"
         finally:
-            avatars.set_flag(avatar_id, "motion_pending", False)
             with _LOCK:
                 _running.discard(avatar_id)
-        _notice(text)
+            try:
+                avatars.set_flag(avatar_id, "motion_pending", False)
+            except Exception:
+                pass
+        if text:
+            _notice(text)
 
     threading.Thread(target=run, name=f"companion-motion-{avatar_id}", daemon=True).start()
     return True

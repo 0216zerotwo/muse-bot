@@ -25,6 +25,7 @@ from typing import Any
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .companion_state import DEFAULT_COMPANION_AVATAR, read_companion_state, update_companion_state
+from .fs_atomic import atomic_write_json
 from .paths import get_webui_dir
 
 CELL_WIDTH, CELL_HEIGHT, COLUMNS = 192, 208, 8
@@ -72,7 +73,7 @@ def _name(value: Any, fallback: str) -> str:
 
 
 def _save_meta(folder: Path, meta: dict[str, Any]) -> None:
-    (folder / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(folder / "meta.json", meta)
 
 
 def _new_folder() -> tuple[str, Path]:
