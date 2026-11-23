@@ -5,7 +5,17 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - "web/**"
+      - "tools/make_app_icons.py"
+      - "tools/draw_icons.py"
+      - ".github/workflows/web.yml"
   pull_request:
+    paths:
+      - "web/**"
+      - "tools/make_app_icons.py"
+      - "tools/draw_icons.py"
+      - ".github/workflows/web.yml"
 
 permissions:
   contents: read
