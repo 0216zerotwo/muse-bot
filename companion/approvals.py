@@ -17,6 +17,7 @@ answered through Hermes's approval queue instead (the agent is waiting on them).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -34,13 +35,31 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# MCP tools are ``mcp__<server>__<tool>``; any server exposing these tools is gated.
+# MCP tools are ``mcp__<server>__<tool>`` (or legacy ``mcp_<server>_<tool>``); any server exposing these tools is gated.
 _NAMED_ACTIONS = {
     "send_email": "发送邮件",
     "forward_email": "转发邮件",
     "delete_emails": "删除邮件",
     "email_command": "执行邮件协议命令",
     "delete_event": "删除日程",
+}
+_TOOL_ACTION_ALIASES = {
+    "send_email": "send_email",
+    "send_mail": "send_email",
+    "reply_email": "send_email",
+    "reply_to_email": "send_email",
+    "send_message": "send_email",
+    "forward_email": "forward_email",
+    "forward_mail": "forward_email",
+    "delete_emails": "delete_emails",
+    "delete_email": "delete_emails",
+    "trash_email": "delete_emails",
+    "trash_emails": "delete_emails",
+    "email_command": "email_command",
+    "delete_event": "delete_event",
+    "delete_events": "delete_event",
+    "remove_event": "delete_event",
+    "cancel_event": "delete_event",
 }
 APPROVAL_ACTIONS = {
     **_NAMED_ACTIONS,
@@ -56,8 +75,11 @@ APPROVAL_ACTIONS = {
     "connector_write": "在连接的服务里修改",
     "schedule": "设定时任务",
 }
-_NAMED_TOOL = re.compile(r"^mcp_.+_(" + "|".join(_NAMED_ACTIONS) + r")$")
-_MCP_TOOL = re.compile(r"^mcp_.+_(browser_click|browser_file_upload|browser_drop)$")
+_NAMED_TOOL = re.compile(
+    r"^mcp__?.+?__?(" + "|".join(sorted(_TOOL_ACTION_ALIASES, key=len, reverse=True)) + r")$",
+    re.IGNORECASE,
+)
+_MCP_TOOL = re.compile(r"^mcp__?.+?__?(browser_click|browser_file_upload|browser_drop)$", re.IGNORECASE)
 _CONSEQUENTIAL_CLICK = re.compile(
     r"提交|确认|确定|付款|支付|购买|下单|结算|预订|预约|订购|发送|发布|注册|删除|转账|捐|签署|订阅|退订"
     r"|\b(submit|confirm|pay|purchase|buy|checkout|check\s*out|place\s+order|order|book|reserve|send|post"
@@ -149,7 +171,7 @@ def approval_action(tool_name: str, arguments: Any = None) -> Optional[str]:
         return "goal_plan"
     named = _NAMED_TOOL.match(tool_name or "")
     if named:
-        return named.group(1)
+        return _TOOL_ACTION_ALIASES[named.group(1).lower()]
     if tool_name == "browser_exec":
         code = str((arguments if isinstance(arguments, dict) else {}).get("code") or "")
         if _EXEC_UPLOAD.search(code):
@@ -159,7 +181,7 @@ def approval_action(tool_name: str, arguments: Any = None) -> Optional[str]:
     if not browser:
         return None
     args = arguments if isinstance(arguments, dict) else {}
-    if browser.group(1) == "browser_click":
+    if browser.group(1).lower() == "browser_click":
         element = args.get("element")
         if isinstance(element, str) and _CONSEQUENTIAL_CLICK.search(element):
             return "browser_submit"
@@ -168,11 +190,48 @@ def approval_action(tool_name: str, arguments: Any = None) -> Optional[str]:
     return "browser_upload" if args.get("paths") else None
 
 
-def _recipients(args: dict[str, Any]) -> list[str]:
+def _recipients_list(args: dict[str, Any]) -> list[str]:
     raw = args.get("recipients", args.get("to"))
     items = raw if isinstance(raw, list) else [raw] if isinstance(raw, str) else []
-    return sorted({part.strip().lower() for item in items if isinstance(item, str)
-                   for part in item.split(",") if part.strip()})
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        for part in re.split(r"[,;]", item):
+            clean = part.strip()
+            key = clean.lower()
+            if clean and key not in seen:
+                seen.add(key)
+                out.append(clean)
+    return out
+
+
+def _recipients(args: dict[str, Any]) -> list[str]:
+    return sorted({part.lower() for part in _recipients_list(args)})
+
+
+def _email_ids(args: dict[str, Any]) -> list[str]:
+    for field_name in ("email_ids", "email_id", "message_ids", "message_id", "ids"):
+        if field_name in args and args[field_name] is not None:
+            raw = args[field_name]
+            break
+    else:
+        return []
+    if isinstance(raw, (list, tuple)):
+        items = raw
+    elif isinstance(raw, str):
+        items = [part.strip() for part in raw.split(",")]
+    else:
+        items = [raw]
+    out: list[str] = []
+    for item in items:
+        if isinstance(item, bool) or item is None:
+            continue
+        text = str(item).strip()
+        if text and text not in out:
+            out.append(text)
+    return out
 
 
 def grant_keys(action: str, args: dict[str, Any], host: Optional[str] = None) -> list[str]:
@@ -232,9 +291,17 @@ class GrantStore:
 
     def _write(self, grants: list[Grant]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps([asdict(g) for g in grants], ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+        tmp = self.path.parent / f".{self.path.name}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            tmp.write_text(json.dumps([asdict(g) for g in grants], ensure_ascii=False, indent=2), encoding="utf-8")
+            with contextlib.suppress(OSError):
+                os.chmod(tmp, 0o600)
+            os.replace(tmp, self.path)
+            with contextlib.suppress(OSError):
+                os.chmod(self.path, 0o600)
+        finally:
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
 
     def list(self) -> list[Grant]:
         with self._lock:
@@ -279,12 +346,24 @@ class ApprovalRecord:
     def public(self) -> dict[str, Any]:
         data = asdict(self)
         extra = data.pop("extra", None) or {}
+        args = dict(self.arguments) if isinstance(self.arguments, dict) else {}
+        action = self.action or approval_action(self.tool_name, args) or ""
+        if action in ("send_email", "forward_email"):
+            recipients = _recipients_list(args)
+            if recipients:
+                args["recipients"] = recipients
+        elif action == "delete_emails":
+            email_ids = _email_ids(args)
+            if email_ids:
+                args["email_ids"] = email_ids
+        data["arguments"] = args
+        data["expires_at_ms"] = extra.get("expires_at_ms")
         context = {key: extra[key] for key in ("goal", "egress", "browser") if extra.get(key)}
         if context:
             data["context"] = context
         # The card offers the standing scopes only when the call has a target to bind them to.
         # A standing yes on a card lasts a day at most; for good, the user sets 允许 in 设置 → 权限.
-        data["scopes"] = ["once", "24h"] if grant_keys(self.action, self.arguments, _host(self)) else ["once"]
+        data["scopes"] = ["once", "24h"] if grant_keys(action, args, _host(self)) else ["once"]
         return data
 
 
@@ -319,9 +398,17 @@ class ApprovalStore:
     def _write(self, record: ApprovalRecord) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         path = self._path(record.id)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(asdict(record), ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        tmp = path.parent / f".{path.name}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            tmp.write_text(json.dumps(asdict(record), ensure_ascii=False, indent=2), encoding="utf-8")
+            with contextlib.suppress(OSError):
+                os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+            with contextlib.suppress(OSError):
+                os.chmod(path, 0o600)
+        finally:
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
 
     def create(self, *, session_key: str, call_id: str, tool_name: str, arguments: dict[str, Any],
                action: str, extra: Optional[dict[str, Any]] = None) -> ApprovalRecord:
@@ -387,9 +474,9 @@ def describe_approval(record: ApprovalRecord) -> str:
     element = args.get("element")
     if action == "browser_submit" and isinstance(element, str) and element:
         parts.append(f"点击「{element}」")
-    recipients = args.get("recipients")
-    if isinstance(recipients, list) and recipients:
-        parts.append("收件人 " + "、".join(str(r) for r in recipients))
+    recipients = _recipients_list(args)
+    if recipients:
+        parts.append("收件人 " + "、".join(recipients))
     subject = args.get("subject")
     if isinstance(subject, str) and subject:
         parts.append(f"主题「{subject}」")
@@ -454,6 +541,7 @@ class Approvals:
         )
         logger.info("companion: tool call %s held for approval as %s", tool_name, record.id)
         self._notify(record)
+        self._emit_ws_sync(record)
         return (
             f"{DEFERRED_PREFIX} 这个操作没有执行，已作为确认卡片展示给用户（{record.id}）。"
             "用户会在聊天里看到完整内容并决定是否执行；结果会另行通知你。"
@@ -463,15 +551,46 @@ class Approvals:
     # -- Hermes's own prompts (send_exec_approval) ----------------------------------------------------
 
     def hold_exec(self, chat_id: str, command: str, description: str, hermes_session: str,
-                  choices: list[str]) -> ApprovalRecord:
+                  choices: list[str], *, expires_in_s: Optional[float] = None) -> ApprovalRecord:
+        if expires_in_s is None:
+            expires_in_s = 300.0
+            with contextlib.suppress(Exception):
+                from tools.approval_context import _get_approval_timeout
+
+                expires_in_s = float(_get_approval_timeout())
+        now_ms = _now_ms()
         record = self.store.create(
             session_key=f"websocket:{chat_id}", call_id=f"exec_{uuid.uuid4().hex[:8]}",
             tool_name="terminal", action="run_command",
             arguments={"command": command, "reason": description},
-            extra={"hermes_session": hermes_session, "choices": choices},
+            extra={
+                "hermes_session": hermes_session,
+                "choices": choices,
+                "expires_at_ms": now_ms + int(max(1.0, expires_in_s) * 1000),
+            },
         )
         self._notify(record)
+        self._emit_ws_sync(record)
         return record
+
+    def _emit_ws_sync(self, record: ApprovalRecord) -> None:
+        emit = getattr(self.adapter, "emit_approval_updated", None)
+        loop = getattr(self.adapter, "loop", None)
+        if not callable(emit):
+            return
+        if loop is not None and not loop.is_closed():
+            with contextlib.suppress(RuntimeError):
+                asyncio.run_coroutine_threadsafe(emit(record), loop)
+                return
+        with contextlib.suppress(RuntimeError):
+            running = asyncio.get_running_loop()
+            running.create_task(emit(record))
+
+    async def _emit_ws_async(self, record: ApprovalRecord) -> None:
+        emit = getattr(self.adapter, "emit_approval_updated", None)
+        if callable(emit):
+            with contextlib.suppress(Exception):
+                await emit(record)
 
     def _notify(self, record: ApprovalRecord) -> None:
         """A notification on the phone: something is waiting for the user's yes."""
@@ -491,12 +610,15 @@ class Approvals:
             record.scope = scope
             self.grants.add(keys, scope)
         if record.extra.get("hermes_session"):
-            return self._answer_exec(record, approve)
+            decided = self._answer_exec(record, approve)
+            await self._emit_ws_async(decided)
+            return decided
         if approve:
             result = await asyncio.to_thread(self._run, record)
             record.status = FAILED if _failed(result) else EXECUTED
             record.result = result[:_RESULT_PREVIEW_CHARS]
             self.store.save(record)
+        await self._emit_ws_async(record)
         await self._report(record)
         return record
 

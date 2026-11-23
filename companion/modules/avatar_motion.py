@@ -94,7 +94,8 @@ def _first_frame(folder: Path, state: str = "idle") -> str:
     """The state's still picture on white, as the clip's first frame (sent inline: the companies'
     services can't read a file on this computer)."""
     start = folder / _START.get(state, "image.webp")
-    picture = Image.open(start if start.is_file() else folder / "image.webp").convert("RGBA")
+    with Image.open(start if start.is_file() else folder / "image.webp") as raw_img:
+        picture = raw_img.convert("RGBA")
     canvas = Image.new("RGB", picture.size, "white")
     canvas.paste(picture, mask=picture)
     canvas.thumbnail((768, 768))
@@ -119,9 +120,14 @@ def _clip(prompt: str, first_frame: str) -> tuple[Optional[Path], str]:
 
     record_media("video", seconds=KEEP_S, resolution=RESOLUTION)
     if video.startswith(("http://", "https://")):
+        from . import net_safety
+
+        try:
+            raw_video, _ = net_safety.fetch_bytes(video, max_bytes=200_000_000, timeout=120)
+        except Exception as exc:
+            return None, str(exc) or type(exc).__name__
         target = Path(tempfile.mkdtemp(prefix="companion-motion-")) / "clip.mp4"
-        with urllib.request.urlopen(video, timeout=120) as response:  # noqa: S310 - the provider's own result URL
-            target.write_bytes(response.read(200_000_000))
+        target.write_bytes(raw_video)
         return target, ""
     return Path(video), ""
 
@@ -134,7 +140,8 @@ def loop_from(video: Path, side: int = SIDE) -> bytes:
                        check=True, capture_output=True, timeout=300)
         frames = []
         for path in sorted(Path(tmp).glob("f*.png")):
-            frame = Image.open(path).convert("RGBA")
+            with Image.open(path) as raw_frame:
+                frame = raw_frame.convert("RGBA")
             clear_background(frame)
             frames.append(frame)
     if not frames:

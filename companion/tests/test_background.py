@@ -229,7 +229,8 @@ class DrawingRulesTest(unittest.TestCase):
         _, (state,) = load("companion_state")
         words, picture = state.own_look_reference()
         self.assertIn("橘猫", words)
-        self.assertEqual(Image.open(picture).mode, "RGB")  # on white, ready as a reference
+        with Image.open(picture) as opened:
+            self.assertEqual(opened.mode, "RGB")  # on white, ready as a reference
         prompt = state.companion_identity_prompt() or ""
         if prompt:  # only once a state file exists
             self.assertIn(picture, prompt)

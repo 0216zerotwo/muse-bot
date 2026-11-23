@@ -45,7 +45,11 @@ BRIDGE = """<script>
 (function () {
   var post = function (message) { parent.postMessage(message, "*"); };
   window.companion = {
-    send: function (text) { if (text) post({ type: "companion:send", text: String(text) }); }
+    send: function (text) {
+      if (!text) return;
+      if (typeof navigator !== "undefined" && navigator.userActivation && !navigator.userActivation.isActive) return;
+      post({ type: "companion:send", text: String(text) });
+    }
   };
   document.addEventListener("click", function (event) {
     var target = event.target.closest && event.target.closest("[data-send]");
@@ -54,7 +58,11 @@ BRIDGE = """<script>
   window.addEventListener("message", function (event) {
     var data = event.data || {};
     if (data.type !== "companion:theme" || !data.tokens) return;
-    for (var name in data.tokens) document.documentElement.style.setProperty(name, data.tokens[name]);
+    for (var name in data.tokens) {
+      if (typeof name === "string" && name.indexOf("--") === 0) {
+        document.documentElement.style.setProperty(name, data.tokens[name]);
+      }
+    }
   });
   var report = function () { post({ type: "companion:height", height: Math.ceil(document.documentElement.scrollHeight) }); };
   window.addEventListener("load", function () {
@@ -81,7 +89,13 @@ def _served_root() -> Path:
 
 def stage(source: Path) -> Optional[str]:
     """Copy the page into the served folder; the same file always gets the same name (and link)."""
+    from .secrets_guard import is_secret_path
+
+    if is_secret_path(source):
+        return None
     try:
+        if source.is_symlink():
+            return None
         stat = source.stat()
     except OSError:
         return None

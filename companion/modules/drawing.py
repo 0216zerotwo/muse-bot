@@ -40,8 +40,16 @@ def generate(prompt: str, reference: Optional[str] = None) -> tuple[Optional[byt
 
         return base64.b64decode(image.split(",", 1)[1]), ""
     if image.startswith(("http://", "https://")):
-        with urllib.request.urlopen(image, timeout=60) as response:  # noqa: S310 - the provider's own result URL
-            return response.read(20_000_000), ""
+        try:
+            from .net_safety import fetch_bytes
+
+            raw_bytes, _ = fetch_bytes(image, max_bytes=20_000_000, timeout=60)
+            return raw_bytes, ""
+        except ImportError:
+            with urllib.request.urlopen(image, timeout=60) as response:  # noqa: S310 - standalone fallback
+                return response.read(20_000_000), ""
+        except Exception as exc:
+            return None, str(exc) or type(exc).__name__
     return Path(image).read_bytes(), ""
 
 

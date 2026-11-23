@@ -80,8 +80,15 @@ class HelpersTest(unittest.TestCase):
         import threading
 
         loop = asyncio.new_event_loop()
-        threading.Thread(target=loop.run_forever, daemon=True).start()
-        self.addCleanup(loop.call_soon_threadsafe, loop.stop)
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+
+        def stop_loop():
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=2)
+            loop.close()
+
+        self.addCleanup(stop_loop)
         asked, posted = [], []
 
         class Adapter(FakeAdapter):

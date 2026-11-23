@@ -4,13 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _loader import load
+from _loader import load, temp_dir
 
 
 class JobSnapshotsTest(unittest.TestCase):
     def setUp(self):
         self.folder, (self.snapshots,) = load("job_snapshots")
-        self.jobs = Path(tempfile.mkdtemp(prefix="companion-jobs-")) / "jobs.json"
+        self.jobs = temp_dir("companion-jobs-") / "jobs.json"
         self.copies = self.folder / "job-snapshots"
 
     def test_a_copy_only_when_the_jobs_changed_and_the_newest_are_kept(self):

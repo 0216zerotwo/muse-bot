@@ -7,7 +7,8 @@ import unittest
 
 from _loader import ROOT, load
 
-sys.path.insert(0, str(ROOT.parent / "hermes"))
+if (ROOT.parent / "hermes").is_dir() and str(ROOT.parent / "hermes") not in sys.path:
+    sys.path.insert(0, str(ROOT.parent / "hermes"))
 
 
 def _fields(text):
@@ -16,7 +17,10 @@ def _fields(text):
 
 class WordingTest(unittest.TestCase):
     def test_every_rewording_fits_the_notice_it_replaces(self):
-        from agent import i18n
+        try:
+            from agent import i18n
+        except ImportError:
+            self.skipTest("hermes agent.i18n not installed in standalone environment")
 
         _, (persona,) = load("persona")
         bundled = i18n._load_bundled("zh")

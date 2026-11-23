@@ -69,6 +69,11 @@ def make(description: str, name: str = "", reference: str = "", edit_current: bo
                       "centered with some space around it, on a plain pure white background. No text, no border, "
                       "no shadow on the background.")
             return _candidates(prompt, str(base), description, name)
+    if reference:
+        from .secrets_guard import is_secret_path
+
+        if is_secret_path(reference):
+            raise ValueError("不能用这个文件做参考图")
     reference = reference if reference and Path(reference).is_file() else ""
     if reference:
         # First what the picture shows, in words (as Muse does): the drawing keeps to the details.
@@ -182,9 +187,11 @@ def _current_picture(folder: Path) -> Path:
 
     kind, _, avatar_id = str(read_companion_state().get("avatar") or "").partition(":")
     if kind == "image" and avatars.is_character(avatar_id):
-        picture = Image.open(avatars.avatars_root() / avatar_id / "image.webp").convert("RGBA")
+        with Image.open(avatars.avatars_root() / avatar_id / "image.webp") as raw_img:
+            picture = raw_img.convert("RGBA")
     else:
-        picture = Image.open(_builtin_sheet()).convert("RGBA").crop((0, 0, avatars.CELL_WIDTH, avatars.CELL_HEIGHT))
+        with Image.open(_builtin_sheet()) as raw_sheet:
+            picture = raw_sheet.convert("RGBA").crop((0, 0, avatars.CELL_WIDTH, avatars.CELL_HEIGHT))
         picture = picture.resize((picture.width * 4, picture.height * 4), Image.Resampling.LANCZOS)
     canvas = Image.new("RGB", picture.size, "white")
     canvas.paste(picture, mask=picture)
