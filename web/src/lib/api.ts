@@ -543,7 +543,13 @@ export async function fetchAutomationRunResult(
   runId: string | number,
   _kind?: "cron" | "local_trigger",
   signal?: AbortSignal,
-): Promise<{ response: string | null; output?: string | null; status?: string }> {
+): Promise<{
+  response: string | null;
+  text?: string | null;
+  output?: string | null;
+  status?: string;
+  silent?: boolean;
+}> {
   void _kind;
   const data = await request<Record<string, unknown>>(
     `/api/webui/automations/${encodeURIComponent(id)}/runs/${encodeURIComponent(String(runId))}`,
@@ -553,13 +559,15 @@ export async function fetchAutomationRunResult(
   );
   const response = typeof data.response === "string"
     ? data.response
-    : typeof data.output === "string"
-      ? data.output
-      : typeof data.content === "string"
-        ? data.content
-        : null;
+    : typeof data.text === "string"
+      ? data.text
+      : typeof data.output === "string"
+        ? data.output
+        : typeof data.content === "string"
+          ? data.content
+          : null;
   return {
-    ...(data as { output?: string | null; status?: string }),
+    ...(data as { text?: string | null; output?: string | null; status?: string; silent?: boolean }),
     response,
   };
 }

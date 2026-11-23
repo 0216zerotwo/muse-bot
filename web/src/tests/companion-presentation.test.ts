@@ -101,6 +101,8 @@ describe("currentActivity", () => {
     expect(approvalAction("mcp__icloud-calendar__delete_event")).toBe("delete_event");
     expect(approvalAction("mcp__icloud-calendar__update_event")).toBeNull();
     expect(rawToolName("mcp__icloud-calendar__list_events", "icloud-calendar")).toBe("list_events");
+    expect(rawToolName("mcp__google_workspace__list_files", "google-workspace")).toBe("list_files");
+    expect(rawToolName("mcp_brave_search_web", "brave-search")).toBe("web");
     expect(describeToolCall("mcp__icloud-calendar__create_event", { title: "周会" })).toBe("添加了日程「周会」");
   });
 

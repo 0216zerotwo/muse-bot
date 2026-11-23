@@ -422,7 +422,7 @@ describe("Pairing URL, HTTP status mapping, dev WS port & automation run endpoin
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         requestedUrls.push(String(input));
-        return new Response(JSON.stringify({ id: "run-9", output: "今日早报内容" }), {
+        return new Response(JSON.stringify({ status: "ok", text: "今日早报内容", silent: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -431,5 +431,6 @@ describe("Pairing URL, HTTP status mapping, dev WS port & automation run endpoin
     const res = await fetchAutomationRunResult("tok", "job/1", "run-9");
     expect(requestedUrls).toEqual(["/api/webui/automations/job%2F1/runs/run-9"]);
     expect(res.response).toBe("今日早报内容");
+    expect(res.silent).toBe(false);
   });
 });

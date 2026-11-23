@@ -112,6 +112,9 @@ export function filePageDocument(html: string): string {
     "media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'";
   if (typeof DOMParser !== "undefined") {
     const doc = new DOMParser().parseFromString(html, "text/html");
+    // Strip declarative meta http-equiv (e.g. refresh redirects, which CSP connect-src/default-src
+    // do not block) and base tags before injecting our strict CSP first in <head>.
+    doc.querySelectorAll("meta[http-equiv], base").forEach((el) => el.remove());
     let head = doc.head;
     if (!head) {
       head = doc.createElement("head");
@@ -126,7 +129,10 @@ export function filePageDocument(html: string): string {
     return `<!doctype html>${doc.documentElement.outerHTML}`;
   }
   const meta = `<meta http-equiv="Content-Security-Policy" content="${policy}">`;
-  const safeBody = html.replace(/<\/?(?:html|head|body)\b[^>]*>|<!doctype[^>]*>/gi, "");
+  const safeBody = html.replace(
+    /<\/?(?:html|head|body)\b[^>]*>|<meta\b[^>]*http-equiv\b[^>]*>|<base\b[^>]*>|<!doctype[^>]*>/gi,
+    "",
+  );
   return `<!doctype html><html><head>${meta}</head><body>${safeBody}</body></html>`;
 }
 

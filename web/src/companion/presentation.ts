@@ -665,9 +665,10 @@ function approvalTitle(approval: ApprovalRecord): string {
 /** Tools whose name says they only look (``list_events``, ``get_email``…). */
 const READ_ONLY_TOOL = /^(list|get|search|read|query|find|check|debug|fetch|view|describe|count|lookup)_/;
 
-/** ``mcp__<server>__<tool>`` / ``mcp_<server>_<tool>`` → ``<tool>``. */
+/** ``mcp__<server>__<tool>`` / ``mcp_<server>_<tool>`` → ``<tool>`` (including ``-`` → ``_`` sanitized server names). */
 export function rawToolName(name: string, server: string): string {
-  for (const prefix of [`mcp__${server}__`, `mcp_${server}_`]) {
+  const sanitized = server.replace(/[^A-Za-z0-9_]/g, "_");
+  for (const prefix of [`mcp__${sanitized}__`, `mcp__${server}__`, `mcp_${sanitized}_`, `mcp_${server}_`]) {
     if (name.startsWith(prefix)) return name.slice(prefix.length);
   }
   return name;

