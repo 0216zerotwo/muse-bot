@@ -98,14 +98,18 @@ enum Presentation {
         return (String(rest[..<sep]), String(rest[rest.index(after: sep)...]))
     }
 
-    /// Strips a service's MCP prefix (`mcp__<server>__` with `-`/`_` normalized, or `mcp_<server>_`).
+    private static func sanitizeMCPServer(_ server: String) -> String {
+        server.replacingOccurrences(of: #"[^A-Za-z0-9_]"#, with: "_", options: .regularExpression)
+    }
+
+    /// Strips a service's MCP prefix (`mcp__<server>__` with `[^A-Za-z0-9_]` -> `_` normalized, or `mcp_<server>_`).
     static func stripMCPPrefix(_ toolName: String, server: String) -> String {
-        let normalizedServer = server.replacingOccurrences(of: "-", with: "_")
+        let normalizedServer = sanitizeMCPServer(server)
         for candidate in ["mcp__\(normalizedServer)__", "mcp__\(server)__", "mcp_\(server)_", "mcp_\(normalizedServer)_"] {
             if toolName.hasPrefix(candidate) { return String(toolName.dropFirst(candidate.count)) }
         }
         if let parsed = parseMCPTool(toolName),
-           parsed.server.replacingOccurrences(of: "-", with: "_") == normalizedServer,
+           sanitizeMCPServer(parsed.server) == normalizedServer,
            !parsed.tool.isEmpty {
             return parsed.tool
         }

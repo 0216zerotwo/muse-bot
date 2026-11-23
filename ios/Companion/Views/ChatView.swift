@@ -495,7 +495,9 @@ struct ChatView: View {
                     continue
                 }
                 let name = "附件-\(drafts.count + 1).\(type.preferredFilenameExtension ?? "bin")"
-                drafts.append(try await AttachmentEncoder.stagedDraft(data: data, name: name, mimeType: mime))
+                let staged = try await AttachmentEncoder.stagedDraft(data: data, name: name, mimeType: mime)
+                guard chat == store.currentChatID else { staged.removeStagedBlob(); return }
+                drafts.append(staged)
             } catch { composerError = "这个附件暂时无法读取，请尝试从「选择文件」添加。" }
         }
     }
@@ -532,7 +534,9 @@ struct ChatView: View {
         }
         do {
             let name = file.name.replacingOccurrences(of: ".", with: "-\(drafts.count + 1).", options: [], range: file.name.range(of: "."))
-            drafts.append(try await AttachmentEncoder.stagedDraft(data: file.data, name: name, mimeType: file.mimeType))
+            let staged = try await AttachmentEncoder.stagedDraft(data: file.data, name: name, mimeType: file.mimeType)
+            guard chat == store.currentChatID else { staged.removeStagedBlob(); return }
+            drafts.append(staged)
         } catch { composerError = "这个附件暂时无法读取，请尝试从「添加文件」添加。" }
     }
     private func importShot(_ shot: CameraPicker.Shot) async {
@@ -545,22 +549,28 @@ struct ChatView: View {
             composerError = "一次最多添加 \(Self.maxAttachments) 个附件。"
             return
         }
+        let chat = store.currentChatID
         encoding = true; composerError = nil
         defer { encoding = false }
         do {
             switch shot {
             case .photo(let image):
                 guard let data = image.jpegData(compressionQuality: 0.9) else { throw URLError(.cannotDecodeContentData) }
-                drafts.append(try await AttachmentEncoder.stagedDraft(data: data, name: "照片-\(drafts.count + 1).jpg", mimeType: "image/jpeg"))
+                let staged = try await AttachmentEncoder.stagedDraft(data: data, name: "照片-\(drafts.count + 1).jpg", mimeType: "image/jpeg")
+                guard chat == store.currentChatID else { staged.removeStagedBlob(); return }
+                drafts.append(staged)
             case .video(let url):
                 defer { try? FileManager.default.removeItem(at: url) }
                 let data = try Data(contentsOf: url)
                 guard data.count <= 20 * 1024 * 1024 else { composerError = "视频太大了（超过 20 MB），录短一点再试。"; return }
-                drafts.append(try await AttachmentEncoder.stagedDraft(data: data, name: "视频-\(drafts.count + 1).mov", mimeType: "video/quicktime"))
+                let staged = try await AttachmentEncoder.stagedDraft(data: data, name: "视频-\(drafts.count + 1).mov", mimeType: "video/quicktime")
+                guard chat == store.currentChatID else { staged.removeStagedBlob(); return }
+                drafts.append(staged)
             }
         } catch { composerError = "刚拍的内容没能读取，请再拍一次。" }
     }
     private func importFiles(_ result: Result<[URL], Error>) async {
+        let chat = store.currentChatID
         encoding = true; composerError = nil
         defer { encoding = false }
         do {
@@ -578,7 +588,9 @@ struct ChatView: View {
                     composerError = "单个附件不能超过 20 MB。"
                     continue
                 }
-                drafts.append(try await AttachmentEncoder.stagedDraft(data: bytes, name: url.lastPathComponent, mimeType: mime))
+                let staged = try await AttachmentEncoder.stagedDraft(data: bytes, name: url.lastPathComponent, mimeType: mime)
+                guard chat == store.currentChatID else { staged.removeStagedBlob(); return }
+                drafts.append(staged)
             }
         } catch { composerError = "没有读到文件，请重新选择。" }
     }

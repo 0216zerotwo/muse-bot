@@ -179,7 +179,10 @@ enum FileKinds {
     /// same rules as the chat's cards (no network, no navigation, nothing reaching the app).
     static func webPage(_ html: String) -> String {
         let policy = "<meta http-equiv=\"Content-Security-Policy\" content=\"\(EmbeddedCardDocument.policy)\">"
-        var inner = html.replacingOccurrences(of: #"(?is)<meta\b[^>]*http-equiv\s*=\s*['\"]?content-security-policy['\"]?[^>]*>"#, with: "", options: .regularExpression)
+        var inner = html
+        for pattern in [#"(?is)<meta\b[^>]*\bhttp-equiv\b[^>]*>"#, #"(?is)<base\b[^>]*>"#] {
+            inner = inner.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
         let dangerBound = [
             inner.range(of: "<script", options: .caseInsensitive)?.lowerBound,
             inner.range(of: "<!--")?.lowerBound

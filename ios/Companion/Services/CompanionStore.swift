@@ -177,6 +177,7 @@ final class CompanionStore: ObservableObject {
                     return
                 }
             }
+            guard socket === currentSocket, !connecting else { return }
         }
         await connect(server: serverAddress)
     }
@@ -443,13 +444,7 @@ final class CompanionStore: ObservableObject {
         }
         guard !id.isEmpty else { return }
         if kind == "goal_state" {
-            let state = GoalState(json: event["goal_state"])
-            if state.active {
-                goalStates[id] = state
-            } else {
-                goalStates.removeValue(forKey: id)
-                cancelGoalAfterStop.remove(id)
-            }
+            applyGoalState(event["goal_state"], chatID: id)
             if id == currentChatID { publishCurrent() }
             return
         }
@@ -466,7 +461,8 @@ final class CompanionStore: ObservableObject {
                 }
             }
         }
-        if ["message_accepted", "delta", "reasoning_delta"].contains(kind) {
+        if kind == "delta" || kind == "reasoning_delta"
+            || (kind == "message_accepted" && !event["turn_id"].stringValue.hasPrefix("webui-system:")) {
             runningChats.insert(id)
         }
         if kind == "message", ["tool_hint", "progress"].contains(event["kind"].stringValue),
@@ -487,11 +483,15 @@ final class CompanionStore: ObservableObject {
             if id == currentChatID { errorMessage = "消息未被服务器接受，请检查内容后重试" }
         }
         var projection = projections[id] ?? StreamProjection()
+        var removedOptimisticUser = false
         if kind == "user_message", let turnID = event["turn_id"].string {
+            let before = projection.messages.count
             projection.messages.removeAll { $0.id.hasPrefix("local-") && $0.role == "user" && $0.turnId == turnID }
+            removedOptimisticUser = projection.messages.count != before
         }
         projection.apply(event)
         projections[id] = projection
+        if removedOptimisticUser { persistOutbox() }
         let replayKinds = ["user_message", "message", "delta", "stream_end", "turn_end", "reasoning_delta", "reasoning_end", "context_compaction", "file_edit"]
         // Only the chat's own events wait for a history load: "attached" and "goal_state" answer the
         // attach sent just before it, and counted as news they kept a finished chat "working".
@@ -499,22 +499,36 @@ final class CompanionStore: ObservableObject {
             if duringHistory[id] != nil { duringHistory[id, default: []].append(event) }
             else { historyEvents[id, default: []].append(event) }
         }
-        if id == currentChatID { publishCurrent() }
         if kind == "turn_end" {
             let shouldCancelGoal = cancelGoalAfterStop.remove(id) != nil
-            let reconcile = reconcileAtTurnEnd.remove(id) != nil
-            if shouldCancelGoal {
-                _ = send(text: "/goal stop", chatID: id)
+            if event["goal_state"] != .null {
+                applyGoalState(event["goal_state"], chatID: id)
             }
+            if id == currentChatID { publishCurrent() }
+            let reconcile = reconcileAtTurnEnd.remove(id) != nil
             Task { [weak self] in
+                if shouldCancelGoal { await self?.sendControl("/goal stop", chatID: id) }
                 if reconcile { await self?.hydrate(id) }
                 await self?.refreshSessions()
                 await self?.refreshCompanion()
                 await self?.refreshLibrary()
                 await self?.refreshApprovals()
             }
-        } else if kind == "message" && id == currentChatID && Date().timeIntervalSince(lastApprovalRefresh) > 2 {
-            Task { [weak self] in await self?.refreshApprovals() }
+        } else {
+            if id == currentChatID { publishCurrent() }
+            if kind == "message" && id == currentChatID && Date().timeIntervalSince(lastApprovalRefresh) > 2 {
+                Task { [weak self] in await self?.refreshApprovals() }
+            }
+        }
+    }
+
+    private func applyGoalState(_ raw: JSONValue, chatID id: String) {
+        let state = GoalState(json: raw)
+        if state.active {
+            goalStates[id] = state
+        } else {
+            goalStates.removeValue(forKey: id)
+            cancelGoalAfterStop.remove(id)
         }
     }
 

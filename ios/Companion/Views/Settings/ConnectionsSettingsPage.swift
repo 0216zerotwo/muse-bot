@@ -79,7 +79,7 @@ struct ConnectionDetailPage: View {
                     Button("刷新能力列表") { Task { await test() } }.disabled(resource.busy)
                     if !tools.filter({ isReadOnly($0) }).isEmpty {
                         Button("只允许查看") {
-                            let reading = tools.filter(isReadOnly)
+                            let reading = normalizedRawNames(tools.filter(isReadOnly))
                             Task { await resource.change(store, "settings.mcp.tools", ["name": .string(name), "enabled_tools": .array(reading.map(JSONValue.string))]) }
                         }.disabled(resource.busy)
                     }
@@ -138,14 +138,26 @@ struct ConnectionDetailPage: View {
         }
     }
     private func rawName(_ name: String) -> String { Presentation.stripMCPPrefix(name, server: self.name) }
+    private func normalizedRawNames(_ list: [String]) -> [String] {
+        var seen: Set<String> = []
+        var result: [String] = []
+        for item in list {
+            let clean = rawName(item)
+            if !clean.isEmpty, seen.insert(clean).inserted {
+                result.append(clean)
+            }
+        }
+        return result
+    }
     private func isReadOnly(_ name: String) -> Bool {
         let raw = rawName(name)
         return raw.range(of: "^(list|get|search|read|query|find|check|debug|fetch|view|describe|count|lookup)_", options: .regularExpression) != nil
     }
     private func toggleTool(_ tool: String, _ on: Bool) {
-        var allowed = enabled.contains("*") ? tools : enabled
-        allowed.removeAll { $0 == tool || $0 == rawName(tool) }
-        if on { allowed.append(tool) }
+        let target = rawName(tool)
+        var allowed = normalizedRawNames(enabled.contains("*") ? tools : enabled)
+        allowed.removeAll { $0 == target }
+        if on { allowed.append(target) }
         guard !allowed.isEmpty else { resource.error = "至少保留一个能力，或者暂停整个服务。"; return }
         Task { await resource.change(store, "settings.mcp.tools", ["name": .string(name), "enabled_tools": .array(allowed.map(JSONValue.string))]) }
     }

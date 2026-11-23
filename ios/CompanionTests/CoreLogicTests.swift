@@ -231,6 +231,8 @@ final class CoreLogicTests: XCTestCase {
         XCTAssertEqual(Presentation.toolActivity("mcp__github__list_issues").label, "正在使用 github")
         XCTAssertEqual(Presentation.stripMCPPrefix("mcp__icloud_calendar__list_events", server: "icloud-calendar"), "list_events")
         XCTAssertEqual(Presentation.stripMCPPrefix("mcp_icloud-calendar_list_events", server: "icloud-calendar"), "list_events")
+        XCTAssertEqual(Presentation.stripMCPPrefix("mcp__google_workspace__list_files", server: "google-workspace"), "list_files")
+        XCTAssertEqual(Presentation.stripMCPPrefix("mcp__my_custom_srv__query_docs", server: "my.custom-srv"), "query_docs")
         XCTAssertEqual(Presentation.stripMCPPrefix("mcp__email__send_email", server: "email"), "send_email")
     }
 
@@ -253,13 +255,13 @@ final class CoreLogicTests: XCTestCase {
 
     func testTabRecordsDayFormattingIsThreadSafe() {
         let pastMs = 946_684_800_000.0  // 2000-01-01T00:00:00Z
-        let expected = TabRecords.day(pastMs)
+        let expected = TabRecords.day(.number(pastMs))
         XCTAssertTrue(expected.contains("年"))
         DispatchQueue.concurrentPerform(iterations: 32) { index in
             let sample = index.isMultiple(of: 2) ? pastMs : Date().timeIntervalSince1970 * 1_000
-            XCTAssertFalse(TabRecords.day(sample).isEmpty)
+            XCTAssertFalse(TabRecords.day(.number(sample)).isEmpty)
         }
-        XCTAssertEqual(TabRecords.day(pastMs), expected)
+        XCTAssertEqual(TabRecords.day(.number(pastMs)), expected)
     }
 
     func testDraftUploadStagingSpillsBlobOffOutboxJSON() async throws {

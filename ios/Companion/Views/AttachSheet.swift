@@ -148,6 +148,13 @@ final class RecentPhotos: ObservableObject {
         }
     }
 
+    private static func shouldIgnoreDegraded(_ info: [AnyHashable: Any]?) -> Bool {
+        let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
+        let isCancelled = (info?[PHImageCancelledKey] as? Bool) == true
+        let hasError = info?[PHImageErrorKey] != nil
+        return isDegraded && !isCancelled && !hasError
+    }
+
     /// The asset's own bytes, a file name and its type: a photo as stored (HEIC/JPEG…), a video as a file.
     static func file(for asset: PHAsset) async -> (data: Data, name: String, mimeType: String)? {
         if asset.mediaType == .video {
@@ -158,7 +165,7 @@ final class RecentPhotos: ObservableObject {
             let url: URL? = await withCheckedContinuation { continuation in
                 let box = OnceBox(continuation)
                 PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { video, _, info in
-                    if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
+                    if shouldIgnoreDegraded(info) { return }
                     box.resume(returning: (video as? AVURLAsset)?.url)
                 }
             }
@@ -175,7 +182,7 @@ final class RecentPhotos: ObservableObject {
         return await withCheckedContinuation { continuation in
             let box = OnceBox(continuation)
             PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, uti, _, info in
-                if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
+                if shouldIgnoreDegraded(info) { return }
                 guard let data else { box.resume(returning: nil); return }
                 let type = uti.flatMap { UTType($0) } ?? .jpeg
                 box.resume(returning: (data, "照片.\(type.preferredFilenameExtension ?? "jpg")", type.preferredMIMEType ?? "image/jpeg"))

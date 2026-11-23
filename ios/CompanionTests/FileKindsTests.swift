@@ -98,5 +98,10 @@ final class FileKindsTests: XCTestCase {
         if let commentCSPRange, let commentStartRange {
             XCTAssertLessThan(commentCSPRange.lowerBound, commentStartRange.lowerBound)
         }
+
+        let refreshAndBase = FileKinds.webPage("<head><base href=\"https://evil.example/\"><meta http-equiv=\"refresh\" content=\"0;url=https://evil.example/\"></head><p>safe</p>")
+        XCTAssertFalse(refreshAndBase.localizedCaseInsensitiveContains("http-equiv=&quot;refresh&quot;"))
+        XCTAssertFalse(refreshAndBase.localizedCaseInsensitiveContains("&lt;base"))
+        XCTAssertTrue(refreshAndBase.contains("Content-Security-Policy"))
     }
 }

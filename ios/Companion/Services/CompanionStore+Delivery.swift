@@ -250,6 +250,7 @@ extension CompanionStore {
             return false
         }
         let stagedAttachments = attachments.map { $0.ensuringStaged() }
+        trackedOutboxBlobs.formUnion(stagedAttachments.compactMap(\.blobName))
         let queued = QueuedTurn(id: UUID().uuidString, chatID: targetChatID, text: trimmed,
                                 attachments: stagedAttachments, createdAt: Date().timeIntervalSince1970 * 1000, state: "queued")
         outbox.append(queued)
@@ -381,25 +382,31 @@ extension CompanionStore {
         }
     }
 
-    func stop(chatID: String? = nil) async {
+    func sendControl(_ command: String, chatID: String? = nil) async {
         let targetChatID = chatID ?? currentChatID
-        guard connected, !targetChatID.isEmpty else { return }
+        guard connected, !targetChatID.isEmpty else { show(ServiceError.message("连接后再试一次")); return }
         do {
             try await write(.object(["type": .string("message"), "chat_id": .string(targetChatID),
-                                     "content": .string("/stop"), "turn_id": .string("webui-system:" + UUID().uuidString), "webui": .bool(true)]))
+                                     "content": .string(command), "turn_id": .string("webui-system:" + UUID().uuidString), "webui": .bool(true)]))
         } catch { show(error) }
     }
 
-    /// Stops an active `/goal` loop, interrupting any in-flight turn first (matching `CompanionScreen.tsx`).
+    func stop(chatID: String? = nil) async {
+        let targetChatID = chatID ?? currentChatID
+        guard connected, !targetChatID.isEmpty else { return }
+        await sendControl("/stop", chatID: targetChatID)
+    }
+
+    /// Stops an active `/goal` loop via silent system control frame, interrupting any in-flight turn first.
     func stopGoal() async {
         let id = currentChatID
-        guard !id.isEmpty else { return }
+        guard connected, !id.isEmpty else { show(ServiceError.message("连接后再试一次")); return }
         if runningChats.contains(id) {
             cancelGoalAfterStop.insert(id)
             await stop(chatID: id)
         } else {
             cancelGoalAfterStop.remove(id)
-            _ = send(text: "/goal stop", chatID: id)
+            await sendControl("/goal stop", chatID: id)
         }
     }
 
@@ -573,11 +580,28 @@ extension CompanionStore {
         }
     }
 
+    private func referencedOptimisticBlobNames() -> Set<String> {
+        guard let blobsDirPath = DraftUpload.blobsDirectory?.standardizedFileURL.path else { return [] }
+        var active: Set<String> = []
+        for projection in projections.values {
+            for message in projection.messages where message.id.hasPrefix("local-") {
+                for item in message.media {
+                    guard let url = URL(string: item.url), url.isFileURL else { continue }
+                    if url.deletingLastPathComponent().standardizedFileURL.path == blobsDirPath {
+                        active.insert(url.lastPathComponent)
+                    }
+                }
+            }
+        }
+        return active
+    }
+
     func persistOutboxNow() async {
         let queued = outbox.filter { $0.state == "queued" }.count
         if queuedCount != queued { queuedCount = queued }
         let snapshot = outbox
         let currentBlobs = Set(snapshot.flatMap(\.attachments).compactMap(\.blobName))
+            .union(referencedOptimisticBlobNames())
         let removedBlobs = trackedOutboxBlobs.subtracting(currentBlobs)
         trackedOutboxBlobs = currentBlobs
         let staleURLs = removedBlobs.compactMap(DraftUpload.blobURL(named:))
