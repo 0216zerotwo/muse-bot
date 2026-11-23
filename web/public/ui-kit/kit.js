@@ -26,17 +26,72 @@
 
   /* ---------- theme ---------- */
 
+  var isDark = function () {
+    return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  };
+  var prefersReducedMotion = function () {
+    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  };
+
   ui.css = function (name, fallback) {
     var value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     return value || fallback || "";
   };
+  var cssFirst = function (names, fallback) {
+    var style = getComputedStyle(document.documentElement);
+    for (var i = 0; i < names.length; i++) {
+      var value = style.getPropertyValue(names[i]).trim();
+      if (value) return value;
+    }
+    return fallback;
+  };
+  var chartTheme = function () {
+    var dark = isDark();
+    return {
+      dark: dark,
+      ink: cssFirst(["--c-ink", "--c-text"], dark ? "#f5efe9" : "#1e1814"),
+      muted: cssFirst(["--c-muted", "--c-text-muted"], dark ? "#b9aba0" : "#6e6058"),
+      border: cssFirst(["--c-border"], dark ? "rgba(255,255,255,0.14)" : "rgba(30,24,20,0.085)"),
+      surface: cssFirst(["--c-surface"], dark ? "#1e1815" : "#fffefd"),
+      tooltipBg: dark ? "rgba(24,19,16,0.94)" : "rgba(30,24,20,0.9)",
+      tooltipInk: "#fffefd",
+    };
+  };
+  var applyChartDefaults = function () {
+    var t = chartTheme();
+    if (!window.Chart || !window.Chart.defaults) return t;
+    window.Chart.defaults.color = t.muted;
+    window.Chart.defaults.borderColor = t.border;
+    if (window.Chart.defaults.plugins) {
+      if (window.Chart.defaults.plugins.legend && window.Chart.defaults.plugins.legend.labels) {
+        window.Chart.defaults.plugins.legend.labels.color = t.ink;
+      }
+      if (window.Chart.defaults.plugins.title) {
+        window.Chart.defaults.plugins.title.color = t.ink;
+      }
+    }
+    return t;
+  };
+  ui.chartTheme = chartTheme;
+  ui.applyChartDefaults = applyChartDefaults;
+
   var themed = [];
+  var notifyTheme = function () {
+    applyChartDefaults();
+    themed.forEach(function (fn) { try { fn(); } catch (e) { /* keep others */ } });
+  };
   window.addEventListener("message", function (event) {
     var data = event.data || {};
     if (data.type !== "companion:theme" || !data.tokens) return;
     for (var name in data.tokens) if (data.tokens[name]) document.documentElement.style.setProperty(name, data.tokens[name]);
-    themed.forEach(function (fn) { try { fn(); } catch (e) { /* keep others */ } });
+    notifyTheme();
   });
+  if (window.matchMedia) {
+    var schemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    if (schemeQuery.addEventListener) schemeQuery.addEventListener("change", notifyTheme);
+    else if (schemeQuery.addListener) schemeQuery.addListener(notifyTheme);
+  }
+  applyChartDefaults();
 
   /* ---------- size ---------- */
 
@@ -160,9 +215,18 @@
   };
   var alpha = function (color, a) {
     var m = /^#([0-9a-f]{6})$/i.exec(color);
-    if (!m) return color;
-    var v = parseInt(m[1], 16);
-    return "rgba(" + (v >> 16) + "," + ((v >> 8) & 255) + "," + (v & 255) + "," + a + ")";
+    if (m) {
+      var v = parseInt(m[1], 16);
+      return "rgba(" + (v >> 16) + "," + ((v >> 8) & 255) + "," + (v & 255) + "," + a + ")";
+    }
+    var shortHex = /^#([0-9a-f]{3})$/i.exec(color);
+    if (shortHex) {
+      var h = shortHex[1];
+      return "rgba(" + parseInt(h[0] + h[0], 16) + "," + parseInt(h[1] + h[1], 16) + "," + parseInt(h[2] + h[2], 16) + "," + a + ")";
+    }
+    var rgb = /^rgba?\(\s*(\d+)\s*[, ]\s*(\d+)\s*[, ]\s*(\d+)/i.exec(color);
+    if (rgb) return "rgba(" + rgb[1] + "," + rgb[2] + "," + rgb[3] + "," + a + ")";
+    return color;
   };
 
   /**
@@ -184,8 +248,7 @@
     var config = function (s) {
       var colors = palette();
       var round = s.type === "pie" || s.type === "doughnut";
-      var text = ui.css("--c-text-muted", "#6e6058");
-      var grid = ui.css("--c-border", "rgba(0,0,0,0.08)");
+      var t = applyChartDefaults();
       return {
         type: s.type || "bar",
         data: {
@@ -193,7 +256,7 @@
           datasets: (s.datasets || []).map(function (d, i) {
             var color = d.color || colors[i % colors.length];
             return Object.assign({
-              borderColor: round ? ui.css("--c-surface", "#fff") : color,
+              borderColor: round ? t.surface : color,
               backgroundColor: round ? (s.labels || []).map(function (_, j) { return colors[j % colors.length]; })
                 : s.type === "line" ? alpha(color, 0.15) : color,
               borderWidth: round ? 2 : s.type === "line" ? 2.5 : 0,
@@ -203,15 +266,19 @@
           }),
         },
         options: {
-          responsive: true, maintainAspectRatio: false, animation: { duration: 300 },
+          responsive: true, maintainAspectRatio: false,
+          animation: prefersReducedMotion() ? false : { duration: 300 },
           indexAxis: s.horizontal ? "y" : "x",
           plugins: {
-            legend: { display: round || (s.datasets || []).length > 1, position: "bottom", labels: { color: text, boxWidth: 10, boxHeight: 10, usePointStyle: true } },
-            tooltip: { callbacks: { label: function (c) { var v = c.parsed && typeof c.parsed === "object" ? (s.horizontal ? c.parsed.x : c.parsed.y) : c.parsed; return (c.dataset.label ? c.dataset.label + "：" : "") + ui.fmt.num(v, 2) + (s.unit || ""); } } },
+            legend: { display: round || (s.datasets || []).length > 1, position: "bottom", labels: { color: t.ink, boxWidth: 10, boxHeight: 10, usePointStyle: true } },
+            tooltip: {
+              backgroundColor: t.tooltipBg, titleColor: t.tooltipInk, bodyColor: t.tooltipInk, borderColor: t.border, borderWidth: 1,
+              callbacks: { label: function (c) { var v = c.parsed && typeof c.parsed === "object" ? (s.horizontal ? c.parsed.x : c.parsed.y) : c.parsed; return (c.dataset.label ? c.dataset.label + "：" : "") + ui.fmt.num(v, 2) + (s.unit || ""); } },
+            },
           },
           scales: round ? {} : {
-            x: { stacked: !!s.stacked, grid: { display: false }, ticks: { color: text, maxRotation: 0, autoSkip: true } },
-            y: { stacked: !!s.stacked, grid: { color: grid }, border: { display: false }, ticks: { color: text, callback: function (v) { return ui.fmt.num(v) + (s.unit || ""); } } },
+            x: { stacked: !!s.stacked, grid: { display: false }, border: { color: t.border }, ticks: { color: t.muted, maxRotation: 0, autoSkip: true } },
+            y: { stacked: !!s.stacked, grid: { color: t.border }, border: { display: false }, ticks: { color: t.muted, callback: function (v) { return ui.fmt.num(v) + (s.unit || ""); } } },
           },
         },
       };
@@ -221,7 +288,7 @@
     themed.push(function () { var c = config(current); chart.data = c.data; chart.options = c.options; chart.update("none"); });
     return {
       chart: chart,
-      update: function (next) { current = Object.assign({}, current, next); var c = config(current); chart.data = c.data; chart.update(); },
+      update: function (next) { current = Object.assign({}, current, next); var c = config(current); chart.data = c.data; chart.options = c.options; chart.update(); },
     };
   };
 
