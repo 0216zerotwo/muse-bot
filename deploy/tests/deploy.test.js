@@ -474,8 +474,12 @@ test("GitHub Actions workflows pin action SHAs, drop checkout credentials, and e
   assert.match(releaseYml, /unittest discover/);
 
   const androidYml = fs.readFileSync(path.join(wfDir, "android.yml"), "utf8");
+  assert.match(androidYml, /python3 android\/scripts\/validate\.py/);
   assert.match(androidYml, /ANDROID_KEYSTORE_PASSWORD is empty/);
   assert.match(androidYml, /rm -rf android\/signing/);
+
+  const serverYml = fs.readFileSync(path.join(wfDir, "server.yml"), "utf8");
+  assert.match(serverYml, /python3 android\/scripts\/validate\.py/);
 
   const iosYml = fs.readFileSync(path.join(wfDir, "ios.yml"), "utf8");
   assert.doesNotMatch(iosYml, /continue-on-error:\s*true/);
