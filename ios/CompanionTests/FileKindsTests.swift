@@ -80,5 +80,28 @@ final class FileKindsTests: XCTestCase {
         XCTAssertTrue(page.contains("&lt;head&gt;&lt;meta http-equiv=&quot;Content-Security-Policy&quot;"))
         XCTAssertTrue(page.contains("connect-src 'none'"))
         XCTAssertTrue(FileKinds.webPage("<p>只有片段</p>").contains("srcdoc=\"&lt;meta http-equiv"))
+
+        let scriptTrap = FileKinds.webPage("<script>const x = '<head>'; fetch('https://evil.example');</script><p>ok</p>")
+        let cspRange = scriptTrap.range(of: "Content-Security-Policy")
+        let scriptRange = scriptTrap.range(of: "&lt;script&gt;")
+        XCTAssertNotNil(cspRange)
+        XCTAssertNotNil(scriptRange)
+        if let cspRange, let scriptRange {
+            XCTAssertLessThan(cspRange.lowerBound, scriptRange.lowerBound)
+        }
+
+        let commentTrap = FileKinds.webPage("<!-- <head> --><p>ok</p>")
+        let commentCSPRange = commentTrap.range(of: "Content-Security-Policy")
+        let commentStartRange = commentTrap.range(of: "&lt;!--")
+        XCTAssertNotNil(commentCSPRange)
+        XCTAssertNotNil(commentStartRange)
+        if let commentCSPRange, let commentStartRange {
+            XCTAssertLessThan(commentCSPRange.lowerBound, commentStartRange.lowerBound)
+        }
+
+        let refreshAndBase = FileKinds.webPage("<head><base href=\"https://evil.example/\"><meta http-equiv=\"refresh\" content=\"0;url=https://evil.example/\"></head><p>safe</p>")
+        XCTAssertFalse(refreshAndBase.localizedCaseInsensitiveContains("http-equiv=&quot;refresh&quot;"))
+        XCTAssertFalse(refreshAndBase.localizedCaseInsensitiveContains("&lt;base"))
+        XCTAssertTrue(refreshAndBase.contains("Content-Security-Policy"))
     }
 }

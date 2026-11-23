@@ -122,7 +122,6 @@ extension CompanionStore {
             var projection = project(combined)
             let canonicalTurns = Set(events.filter { $0["event"].stringValue == "user_message" }.compactMap { $0["turn_id"].string })
             outbox.removeAll { $0.chatID == id && canonicalTurns.contains($0.id) }
-            persistOutbox()
             let projectedTurns = Set(projection.messages.filter { $0.role == "user" }.compactMap(\.turnId))
             let pendingLocal = (projections[id]?.messages ?? []).filter { message in
                 message.id.hasPrefix("local-") && message.role == "user" && !projectedTurns.contains(message.turnId ?? "")
@@ -133,6 +132,7 @@ extension CompanionStore {
                 projection.messages.append(optimistic(queued))
             }
             projections[id] = projection
+            persistOutbox()
             if older { visibleCounts[id, default: 60] += 60 }
             if let cursor = payload["page"]["before_cursor"].string { beforeCursors[id] = cursor }
             if payload["page"]["has_more_before"].boolValue { serverHasOlder.insert(id) }

@@ -180,11 +180,24 @@ enum FileKinds {
     static func webPage(_ html: String) -> String {
         let policy = "<meta http-equiv=\"Content-Security-Policy\" content=\"\(EmbeddedCardDocument.policy)\">"
         var inner = html
-        if let head = inner.range(of: #"(?is)<head\b[^>]*>"#, options: .regularExpression)
-            ?? inner.range(of: #"(?is)<html\b[^>]*>"#, options: .regularExpression)
-            ?? inner.range(of: #"(?is)^\s*<!doctype[^>]*>"#, options: .regularExpression) {
-            inner.insert(contentsOf: policy, at: head.upperBound)
-        } else { inner = policy + inner }
+        for pattern in [#"(?is)<meta\b[^>]*\bhttp-equiv\b[^>]*>"#, #"(?is)<base\b[^>]*>"#] {
+            inner = inner.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        let dangerBound = [
+            inner.range(of: "<script", options: .caseInsensitive)?.lowerBound,
+            inner.range(of: "<!--")?.lowerBound
+        ].compactMap { $0 }.min() ?? inner.endIndex
+        let prefixSlice = String(inner[..<dangerBound])
+        if let head = prefixSlice.range(of: #"(?is)<head\b[^>]*>"#, options: .regularExpression) {
+            let offset = prefixSlice.distance(from: prefixSlice.startIndex, to: head.upperBound)
+            inner.insert(contentsOf: policy, at: inner.index(inner.startIndex, offsetBy: offset))
+        } else if let rootTag = prefixSlice.range(of: #"(?is)<html\b[^>]*>"#, options: .regularExpression)
+                    ?? prefixSlice.range(of: #"(?is)^\s*<!doctype[^>]*>"#, options: .regularExpression) {
+            let offset = prefixSlice.distance(from: prefixSlice.startIndex, to: rootTag.upperBound)
+            inner.insert(contentsOf: policy, at: inner.index(inner.startIndex, offsetBy: offset))
+        } else {
+            inner = policy + inner
+        }
         let escaped = inner.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
         let outer = EmbeddedCardDocument.policy.replacingOccurrences(of: "frame-src 'none'", with: "frame-src about:")

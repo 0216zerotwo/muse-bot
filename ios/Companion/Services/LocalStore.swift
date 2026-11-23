@@ -44,7 +44,7 @@ enum LocalStore {
         guard let url else { return }
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         } catch { /* only a head start for next time */ }
     }
 

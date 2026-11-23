@@ -209,9 +209,16 @@ struct MediaViewer: View {
         } else {
             guard let remoteURL else { throw URLError(.badURL) }
             if remoteURL.isFileURL { localURL = remoteURL; return remoteURL }
-            // A file's card already keeps it on this iPhone.
+            // Reuse local cached bytes so previously viewed files/images open and share offline too.
             var kept: Data?
-            if item.kind == "file" { kept = await LocalStore.download(remoteURL, kind: "files") }
+            if item.kind == "file" {
+                kept = await LocalStore.download(remoteURL, kind: "files")
+            } else if item.kind == "image" {
+                kept = await LocalStore.download(remoteURL, kind: "media")
+            } else if item.kind == "video" {
+                let cachedFile = LocalStore.url("media", server: remoteURL.absoluteString, name: remoteURL.absoluteString)
+                kept = await Task.detached(priority: .userInitiated) { LocalStore.read(cachedFile) }.value
+            }
             if let kept { temporary = nil; inline = kept }
             else {
                 let (file, response) = try await URLSession.shared.download(from: remoteURL)
@@ -229,7 +236,7 @@ struct MediaViewer: View {
         let filename = (base as NSString).pathExtension.isEmpty && !safeExtension.isEmpty ? base + "." + String(safeExtension) : base
         let result = directory.appendingPathComponent(filename)
         if let temporary { try FileManager.default.moveItem(at: temporary, to: result) }
-        else if let inline { try inline.write(to: result, options: .atomic) }
+        else if let inline { try inline.write(to: result, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) }
         localURL = result
         return result
     }
@@ -324,6 +331,12 @@ enum AttachmentEncoder {
         let filename = (name as NSString).deletingPathExtension + ".jpg"
         return DraftUpload(data: encoded, mimeType: "image/jpeg", name: filename)
     }
+
+    static func stagedDraft(data: Data, name: String, mimeType: String) async throws -> DraftUpload {
+        let encoded = try draft(data: data, name: name, mimeType: mimeType)
+        return await DraftUpload.staged(data: encoded.data, mimeType: encoded.mimeType, name: encoded.name)
+    }
+
     private static var jpegFormat: UIGraphicsImageRendererFormat {
         let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true; return format
     }

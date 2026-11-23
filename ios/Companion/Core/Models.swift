@@ -144,3 +144,34 @@ struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws { self.init(json: try JSONValue(from: decoder)) }
 }
+
+/// Live `/goal` state pushed over the chat WebSocket (`goal_state` frame), matching `GoalBanner.tsx`.
+struct GoalState: Codable, Equatable, Sendable {
+    var active: Bool
+    var status: String
+    var objective: String
+    var uiSummary: String?
+    var recap: String?
+
+    var isBlocked: Bool { status == "blocked" }
+
+    init(active: Bool = false, status: String = "idle", objective: String = "", uiSummary: String? = nil, recap: String? = nil) {
+        self.active = active
+        self.status = status
+        self.objective = objective
+        self.uiSummary = uiSummary
+        self.recap = recap
+    }
+
+    init(json: JSONValue) {
+        let active = json["active"].boolValue
+        let rawStatus = json["status"].nonemptyString ?? (active ? "active" : "idle")
+        self.init(
+            active: active,
+            status: rawStatus,
+            objective: json["objective"].nonemptyString ?? "",
+            uiSummary: json["ui_summary"].nonemptyString,
+            recap: json["recap"].nonemptyString
+        )
+    }
+}

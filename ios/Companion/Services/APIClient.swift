@@ -146,6 +146,16 @@ final class APIClient {
         return result
     }
 
+    func makeWebSocketTask(url: URL, maximumMessageSize: Int) -> URLSessionWebSocketTask {
+        let task = session.webSocketTask(with: url)
+        task.maximumMessageSize = max(maximumMessageSize, 1024)
+        return task
+    }
+
+    func invalidate() {
+        session.invalidateAndCancel()
+    }
+
     func upload(_ draft: DraftUpload, capability: JSONValue) async throws -> JSONValue {
         guard let path = capability["path"].string, !path.isEmpty,
               let token = capability["token"].string, !token.isEmpty else {
