@@ -21,7 +21,11 @@ import { useBackKey } from "../Screen";
 type Frame = { data: string; w: number; h: number };
 
 /** One live connection to the browser: the latest frame, the page, and a way to send input. */
-function useBrowserStream(onFocus?: (editable: boolean) => void, onTaught?: (steps: TaughtStep[]) => void) {
+function useBrowserStream(
+  onFocus?: (editable: boolean) => void,
+  onTaught?: (steps: TaughtStep[]) => void,
+  onBeforeClose?: (ws: WebSocket | null) => void,
+) {
   const { token } = useClient();
   const tokenRef = useRef(token);
   tokenRef.current = token;
@@ -30,6 +34,8 @@ function useBrowserStream(onFocus?: (editable: boolean) => void, onTaught?: (ste
   focusRef.current = onFocus;
   const taughtRef = useRef(onTaught);
   taughtRef.current = onTaught;
+  const beforeCloseRef = useRef(onBeforeClose);
+  beforeCloseRef.current = onBeforeClose;
   // 教它做: how many steps are written down so far (null: not recording).
   const [teachCount, setTeachCount] = useState<number | null>(null);
   const [frame, setFrame] = useState<Frame | null>(null);
@@ -71,6 +77,7 @@ function useBrowserStream(onFocus?: (editable: boolean) => void, onTaught?: (ste
     return () => {
       closed = true;
       clearTimeout(retry);
+      beforeCloseRef.current?.(socket.current);
       socket.current?.close();
     };
   }, []);
@@ -197,21 +204,34 @@ export function BrowserFullscreen({
   const keepSteps = useRef(true);
   // 做完了 waits for the steps to arrive before closing (closing drops the connection they come on).
   const finishing = useRef(false);
-  const { frame, page, hold, idle, send, whenOpen, teachCount } = useBrowserStream(onFocus, (steps) => {
-    if (keepSteps.current && steps.length) onTaught?.(steps);
-    if (finishing.current) {
-      finishing.current = false;
-      send({ type: "done" });
-      onClose();
-    }
-  });
+  const released = useRef(false);
+  const recordingRef = useRef(false);
+  const controllingRef = useRef(false);
+  const { frame, page, hold, idle, send, whenOpen, teachCount } = useBrowserStream(
+    onFocus,
+    (steps) => {
+      if (keepSteps.current && steps.length) onTaught?.(steps);
+      if (finishing.current) {
+        finishing.current = false;
+        released.current = true;
+        send({ type: "done" });
+        onClose();
+      }
+    },
+    (ws) => {
+      if (released.current || ws?.readyState !== WebSocket.OPEN) return;
+      if (recordingRef.current) ws.send(JSON.stringify({ type: "teach_stop" }));
+      if (controllingRef.current) ws.send(JSON.stringify({ type: "done" }));
+      released.current = true;
+    },
+  );
   const recording = teachCount !== null;
+  recordingRef.current = recording;
   const [editingUrl, setEditingUrl] = useState(false);
   const [url, setUrl] = useState("");
   const drag = useRef<{ x: number; y: number; lastY: number; moved: boolean } | null>(null);
   // The user has control only after 接管控制; until then the companion does, and this only watches.
   const controlling = hold === "user";
-  const controllingRef = useRef(controlling);
   controllingRef.current = controlling;
 
   // 去接手 (the companion asked for the user), or 教它做: open already in control.
@@ -237,9 +257,8 @@ export function BrowserFullscreen({
     keyboard.current?.blur();
   };
   // Leaving full screen while in control hands it back: the companion must not wait on nobody.
-  const recordingRef = useRef(recording);
-  recordingRef.current = recording;
   const leave = useCallback(() => {
+    released.current = true;
     if (recordingRef.current) {
       keepSteps.current = false;
       send({ type: "teach_stop" });
@@ -248,10 +267,24 @@ export function BrowserFullscreen({
     onClose();
   }, [onClose, send]);
   const closeBrowser = () => {
+    released.current = true;
     send({ type: "close" });
     onClose();
   };
-  useBackKey(leave, !typing);
+  const handleBack = useCallback(() => {
+    if (editingUrl) {
+      setEditingUrl(false);
+      return;
+    }
+    if (typing) {
+      setTyping(false);
+      keyboard.current?.blur();
+      send({ type: "key", key: "Escape" });
+      return;
+    }
+    leave();
+  }, [editingUrl, typing, send, leave]);
+  useBackKey(handleBack);
 
   const point = (event: React.PointerEvent<HTMLImageElement>) => {
     const box = event.currentTarget.getBoundingClientRect();

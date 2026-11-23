@@ -201,6 +201,7 @@ describe("ui blocks", () => {
   });
 
   it("escapes map pin tooltips and range selector IDs in kit.js", () => {
+    vi.useFakeTimers();
     const kitSource = readFileSync(resolve(process.cwd(), "public/ui-kit/kit.js"), "utf8");
     new Function(kitSource)();
     const ui = (window as unknown as { ui: Record<string, (...args: unknown[]) => unknown> }).ui;

@@ -6,9 +6,11 @@ import type { McpPresetInfo } from "@/lib/types";
 import { useClient } from "@/providers/ClientProvider";
 
 import { AddModelSheet } from "./AddModelSheet";
+import { androidShell } from "./android-shell";
 import { deviceTimezone, fetchModels, updateCompanionState, type CompanionState, type Routines } from "./companion-api";
 import { ConnectSheet, recommendedPresets, RecommendedServices } from "./ConnectSheet";
 import { NameAndLookFields, PersonalityFields, personaChanges, personaDraft } from "./IdentityPanel";
+import { useNotifications } from "./NotificationsAction";
 import { PetView } from "./Pet";
 import { DEFAULT_BRIEF_TIME, RoutineFields, useSaveRoutines } from "./ProactivePanel";
 
@@ -36,6 +38,7 @@ export function Onboarding({
   const [needsModel, setNeedsModel] = useState(false);
   const [addedModels, setAddedModels] = useState<string[]>([]);
   const [addingModel, setAddingModel] = useState(false);
+  const notifications = useNotifications();
   const [notifPerm, setNotifPerm] = useState<NotificationPermission | "unsupported">(() =>
     typeof Notification === "undefined" ? "unsupported" : Notification.permission,
   );
@@ -173,38 +176,59 @@ export function Onboarding({
             </button>
           </div>
         )}
-        {step === "proactive" && (
-          <div className="flex flex-col gap-5">
-            <StepTitle title="要我主动找你吗？" subtitle="消息会出现在「动态」里，开了通知还会推送到手机。" />
-            <RoutineFields value={routines} onChange={(changes) => setRoutines({ ...routines, ...changes })} />
-            {(routines.brief_time !== null || routines.checkins) &&
-              companion.capabilities?.push !== false &&
-              notifPerm === "default" && (
+        {step === "proactive" && (() => {
+          const wantsProactive = routines.brief_time !== null || routines.checkins;
+          const pushSupported = notifications.status.kind !== "unsupported";
+          const fallbackBrowserNotif = !pushSupported && !androidShell() && notifPerm !== "unsupported";
+          const isNotifOn =
+            notifications.status.kind === "on" || (fallbackBrowserNotif && notifPerm === "granted");
+          const canEnableNotif =
+            notifications.status.kind === "off" ||
+            notifications.status.kind === "busy" ||
+            notifications.status.kind === "error" ||
+            (fallbackBrowserNotif && notifPerm === "default");
+          const notifBusy = notifications.status.kind === "busy";
+
+          return (
+            <div className="flex flex-col gap-5">
+              <StepTitle title="要我主动找你吗？" subtitle="消息会出现在「动态」里，开了通知还会推送到手机。" />
+              <RoutineFields value={routines} onChange={(changes) => setRoutines({ ...routines, ...changes })} />
+              {wantsProactive && companion.capabilities?.push !== false && canEnableNotif && (
                 <div className="c-card flex items-center justify-between gap-3 rounded-2xl px-4 py-3">
                   <div className="min-w-0">
                     <p className="text-[15px] font-medium">顺便开启系统通知</p>
-                    <p className="c-muted text-[13px]">早报或提醒发来时，在锁屏上叫你一声。</p>
+                    <p className="c-muted text-[13px]">
+                      {notifications.status.kind === "error"
+                        ? notifications.status.message
+                        : "早报或提醒发来时，在锁屏上叫你一声。"}
+                    </p>
                   </div>
                   <button
                     type="button"
+                    disabled={notifBusy}
                     onClick={() => {
-                      void Notification.requestPermission()
-                        .then((perm) => setNotifPerm(perm))
-                        .catch(() => undefined);
+                      if (pushSupported) {
+                        void notifications.toggle();
+                      } else {
+                        void Notification.requestPermission()
+                          .then((perm) => setNotifPerm(perm))
+                          .catch(() => undefined);
+                      }
                     }}
-                    className="c-primary shrink-0 rounded-full px-3.5 py-2 text-[14px] font-semibold"
+                    className="c-primary shrink-0 rounded-full px-3.5 py-2 text-[14px] font-semibold disabled:opacity-50"
                   >
-                    开启通知
+                    {notifBusy ? "开启中…" : "开启通知"}
                   </button>
                 </div>
               )}
-            {notifPerm === "granted" && (routines.brief_time !== null || routines.checkins) && (
-              <p className="c-muted flex items-center gap-1.5 px-1 text-[13px]">
-                <Bell className="h-3.5 w-3.5" aria-hidden="true" /> 已开启通知提醒
-              </p>
-            )}
-          </div>
-        )}
+              {wantsProactive && isNotifOn && (
+                <p className="c-muted flex items-center gap-1.5 px-1 text-[13px]">
+                  <Bell className="h-3.5 w-3.5" aria-hidden="true" /> 已开启通知提醒
+                </p>
+              )}
+            </div>
+          );
+        })()}
         {step === "connect" && (
           <div className="flex flex-col gap-5">
             <StepTitle

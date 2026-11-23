@@ -98,10 +98,21 @@ export function Composer({
   const { token } = useClient();
   const [helpers, setHelpers] = useState<Helper[] | null>(null);
   const mention = /(?:^|\s)@([^\s@]{0,12})$/.exec(value)?.[1];
+  const mentionOpen = mention !== undefined;
   useEffect(() => {
-    if (mention === undefined || helpers !== null) return;
-    fetchHelpers(token).then((payload) => setHelpers(payload.helpers)).catch(() => setHelpers([]));
-  }, [helpers, mention, token]);
+    if (!mentionOpen) return;
+    let cancelled = false;
+    fetchHelpers(token)
+      .then((payload) => {
+        if (!cancelled) setHelpers(payload.helpers);
+      })
+      .catch(() => {
+        if (!cancelled) setHelpers((prev) => prev ?? []);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mentionOpen, token]);
   const mentionable = mention === undefined ? [] : (helpers ?? []).filter((h) => h.name.includes(mention)).slice(0, 5);
   const pickHelper = (helper: Helper) => {
     onChange(value.replace(/@[^\s@]{0,12}$/, `@${helper.name} `));
@@ -111,12 +122,21 @@ export function Composer({
   /* "/" at the start: built-in presets plus skills the companion has learned. */
   const [skills, setSkills] = useState<SkillInfo[] | null>(null);
   const slash = /^\/(\S{0,20})$/.exec(value)?.[1];
+  const slashOpen = slash !== undefined;
   useEffect(() => {
-    if (slash === undefined || skills !== null) return;
+    if (!slashOpen) return;
+    let cancelled = false;
     fetchSkills(token)
-      .then((payload) => setSkills(payload.learned))
-      .catch(() => setSkills([]));
-  }, [skills, slash, token]);
+      .then((payload) => {
+        if (!cancelled) setSkills(payload.learned);
+      })
+      .catch(() => {
+        if (!cancelled) setSkills((prev) => prev ?? []);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slashOpen, token]);
   const slashItems = [
     ...SLASH_PRESETS,
     ...(skills ?? [])

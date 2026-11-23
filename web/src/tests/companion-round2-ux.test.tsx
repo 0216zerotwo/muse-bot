@@ -16,6 +16,7 @@ import { PageSheet } from "@/companion/Screen";
 import { IdeasView } from "@/companion/TabViews";
 import { Viewer } from "@/companion/Viewer";
 import type { ApprovalRecord, CompanionState, Goal, ModelsPayload } from "@/companion/companion-api";
+import { BrowserFullscreen } from "@/companion/muse/BrowserPane";
 import { SwipeRow } from "@/companion/muse/Drawer";
 import { GoalsScreen } from "@/companion/muse/GoalsScreen";
 import { SoulMemoryPane } from "@/companion/muse/Identity";
@@ -632,5 +633,146 @@ describe("ModelPanel, ApprovalCard, Composer, Onboarding, Viewer, StatusSheet & 
     expect(screen.getByRole("menu", { name: "这条消息" })).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("keeps BrowserFullscreen on top of MuseSheet on Escape while typing and sends done when leaving", async () => {
+    const sent: Record<string, unknown>[] = [];
+    let latestWs: { onmessage: ((ev: { data: string }) => void) | null } | null = null;
+    const OriginalWS = globalThis.WebSocket;
+    class MockWS {
+      static readonly OPEN = 1;
+      readyState = 1;
+      onmessage: ((ev: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
+        latestWs = this;
+      }
+      send(raw: string) {
+        sent.push(JSON.parse(raw) as Record<string, unknown>);
+      }
+      addEventListener() {}
+      close() {}
+    }
+    globalThis.WebSocket = MockWS as unknown as typeof WebSocket;
+
+    const closeSheet = vi.fn();
+    const closeBrowser = vi.fn();
+    try {
+      render(
+        <MuseSheet open onClose={closeSheet} title="状态">
+          <BrowserFullscreen name="小糯" take onClose={closeBrowser} />
+        </MuseSheet>,
+      );
+
+      act(() => {
+        latestWs?.onmessage?.({ data: JSON.stringify({ type: "hold", hold: "user" }) });
+        latestWs?.onmessage?.({ data: JSON.stringify({ type: "focus", editable: true }) });
+      });
+      expect(screen.getByText("直接打字，就会输进网页")).toBeInTheDocument();
+
+      // First Escape exits typing mode and forwards Escape to browser without closing BrowserFullscreen or MuseSheet.
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(closeBrowser).not.toHaveBeenCalled();
+      expect(closeSheet).not.toHaveBeenCalled();
+      expect(sent).toContainEqual({ type: "key", key: "Escape" });
+
+      // Second Escape leaves BrowserFullscreen and sends {"type":"done"} without closing underlying MuseSheet.
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(closeBrowser).toHaveBeenCalledTimes(1);
+      expect(closeSheet).not.toHaveBeenCalled();
+      expect(sent).toContainEqual({ type: "done" });
+    } finally {
+      globalThis.WebSocket = OriginalWS;
+    }
+  });
+
+  it("enables Android native reminders via useNotifications in Onboarding", async () => {
+    fetchModelsMock.mockResolvedValue({ ...emptyModelsPayload, presets: [{ name: "gpt-4o", model: "gpt-4o", vendor: "openai", temperature: 0.7 }] });
+    let enabled = false;
+    const setRemindersEnabled = vi.fn((on: boolean) => {
+      enabled = on;
+    });
+    (window as Window & { PersonalBotAndroid?: unknown }).PersonalBotAndroid = {
+      remindersEnabled: () => enabled,
+      setRemindersEnabled,
+    };
+
+    render(<Onboarding companion={baseCompanion} onDone={vi.fn()} />);
+    const next = () => fireEvent.click(screen.getByRole("button", { name: /开始|下一步/ }));
+    next(); // look
+    next(); // personality
+    next(); // proactive
+
+    fireEvent.click(await screen.findByRole("button", { name: "开启通知" }));
+    await waitFor(() => expect(setRemindersEnabled).toHaveBeenCalledWith(true));
+    expect(await screen.findByText("已开启通知提醒")).toBeInTheDocument();
+  });
+
+  it("refreshes Composer / learned skills when reopened without refetching on every keystroke", async () => {
+    fetchSkillsMock
+      .mockResolvedValueOnce({ learned: [{ name: "周报汇总", description: "整理本周工作", category: "办公" }], builtin: [] })
+      .mockResolvedValueOnce({
+        learned: [
+          { name: "周报汇总", description: "整理本周工作", category: "办公" },
+          { name: "报销贴票", description: "自动归类发票", category: "财务" },
+        ],
+        builtin: [],
+      });
+
+    const { rerender } = render(
+      <Composer
+        value="/"
+        onChange={vi.fn()}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        streaming={false}
+        connected
+        transcribeAudio={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("button", { name: /周报汇总/ })).toBeInTheDocument();
+    expect(fetchSkillsMock).toHaveBeenCalledTimes(1);
+
+    // Typing further inside the same "/" session does NOT refetch.
+    rerender(
+      <Composer
+        value="/周"
+        onChange={vi.fn()}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        streaming={false}
+        connected
+        transcribeAudio={vi.fn()}
+      />,
+    );
+    expect(fetchSkillsMock).toHaveBeenCalledTimes(1);
+
+    // Closing "/" then reopening "/" fetches newly learned skills.
+    rerender(
+      <Composer
+        value=""
+        onChange={vi.fn()}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        streaming={false}
+        connected
+        transcribeAudio={vi.fn()}
+      />,
+    );
+    rerender(
+      <Composer
+        value="/"
+        onChange={vi.fn()}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        streaming={false}
+        connected
+        transcribeAudio={vi.fn()}
+      />,
+    );
+    expect(await screen.findByRole("button", { name: /报销贴票/ })).toBeInTheDocument();
+    expect(fetchSkillsMock).toHaveBeenCalledTimes(2);
   });
 });
