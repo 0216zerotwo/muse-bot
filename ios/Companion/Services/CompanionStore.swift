@@ -44,7 +44,8 @@ final class CompanionStore: ObservableObject {
     @Published private(set) var helperApprovals: [JSONValue] = []
     @Published private(set) var helperRunning = false
     @Published private(set) var helperHasOlder = false
-    @Published private(set) var helperLoadingHistory = false
+    /// Set from `CompanionStore+History.swift` (a `private(set)` setter is not visible across files).
+    @Published var helperLoadingHistory = false
     @Published private(set) var helperGoal: GoalState?
     @Published private(set) var sttAvailable = true
     @Published private(set) var modelsChecked = false
