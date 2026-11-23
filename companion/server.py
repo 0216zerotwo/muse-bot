@@ -24,7 +24,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .modules import chat_search as chat_search_module
-from .modules import automations, avatars, companion_state, computer, connections, creations, feed, helpers, ideas, memory, memory_learn, model_catalog, models, oauth_login, permissions, plans, push, routines, skills_page, triggers, vault, widgets
+from .modules import automations, avatars, companion_state, computer, connections, creations, feed, helpers, ideas, memory, memory_learn, model_catalog, models, oauth_login, permissions, plans, push, routines, skills_page, stt_sensevoice, triggers, vault, widgets
 from .approvals import SCOPES as APPROVAL_SCOPES
 from .media import child_file
 from .store import chat_id_of
@@ -252,36 +252,49 @@ class ApiError(Exception):
 # -- mutations (``webui_request`` frames) -----------------------------------------------------------
 
 
+def _runtime_capabilities() -> dict[str, bool]:
+    return {
+        "stt": stt_sensevoice.stt_available(),
+        "push": bool(push.available()),
+        "browser": bool(computer._executable()),
+    }
+
+
+def _companion_payload(state: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    base = state if state is not None else companion_state.read_companion_state()
+    return {**base, "capabilities": _runtime_capabilities()}
+
+
 async def _companion_update(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     changes = payload.get("changes")
     if not isinstance(changes, dict):
-        raise ApiError(400, "changes must be an object")
+        raise ApiError(400, "修改内容格式不正确")
     try:
         state = companion_state.update_companion_state(changes)
     except ValueError as exc:
         raise ApiError(400, str(exc)) from None
     adapter.sync_identity()
-    return state
+    return await asyncio.to_thread(_companion_payload, state)
 
 
 async def _approval_decide(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     approval_id = payload.get("id")
     decision = payload.get("decision")
     if not isinstance(approval_id, str) or decision not in {"approve", "reject"}:
-        raise ApiError(400, "id and decision (approve/reject) are required")
+        raise ApiError(400, "缺少审核记录 ID 或决定选项")
     scope = payload.get("scope", "once")
     if scope not in APPROVAL_SCOPES:
-        raise ApiError(400, "scope must be one of " + "/".join(APPROVAL_SCOPES))
+        raise ApiError(400, "授权范围不正确")
     record = await adapter.approvals.decide(approval_id, decision == "approve", scope)
     if record is None:
-        raise ApiError(409, "approval not found or already decided")
+        raise ApiError(409, "这条审核不存在或已经处理过了")
     return record.public()
 
 
 def _changes(payload: dict[str, Any]) -> dict[str, Any]:
     changes = payload.get("changes")
     if not isinstance(changes, dict):
-        raise ApiError(400, "changes must be an object")
+        raise ApiError(400, "修改内容格式不正确")
     return changes
 
 
@@ -298,7 +311,7 @@ async def _models_check(adapter: "CompanionAdapter", payload: dict[str, Any]) ->
         return await _models_vendor_check(adapter, payload)
     names = payload.get("names")
     if names is not None and not (isinstance(names, list) and all(isinstance(n, str) for n in names)):
-        raise ApiError(400, "names must be a list of model names")
+        raise ApiError(400, "模型列表格式不正确")
     try:
         return await models.check_models(names)
     except ValueError as exc:
@@ -315,7 +328,7 @@ async def _routines_update(adapter: "CompanionAdapter", payload: dict[str, Any])
 async def _grants_revoke(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     key = payload.get("key")
     if key is not None and not isinstance(key, str):
-        raise ApiError(400, "key must be a string (or omitted to revoke all)")
+        raise ApiError(400, "权限标识格式不正确")
     adapter.approvals.grants.revoke(key)
     return _grants(adapter)
 
@@ -327,10 +340,10 @@ def _grants(adapter: "CompanionAdapter") -> dict[str, Any]:
 async def _goals_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     goal_id, action = payload.get("id"), payload.get("action")
     if action not in {"add", "update", "remove", "checkin"} or (action != "add" and not isinstance(goal_id, str)):
-        raise ApiError(400, "action (add/update/remove/checkin) and, except for add, id are required")
+        raise ApiError(400, "操作类型或目标 ID 不正确")
     changes = payload.get("changes") or {}
     if not isinstance(changes, dict):
-        raise ApiError(400, "changes must be an object")
+        raise ApiError(400, "修改内容格式不正确")
     try:
         if action == "add":
             await asyncio.to_thread(plans.add_goal, changes.get("title", ""), changes.get("steps"),
@@ -349,7 +362,7 @@ async def _goals_change(adapter: "CompanionAdapter", payload: dict[str, Any]) ->
 async def _triggers_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     trigger_id, action = payload.get("id"), payload.get("action")
     if action not in {"remove", "pause", "resume"} or not isinstance(trigger_id, str):
-        raise ApiError(400, "action (remove/pause/resume) and id are required")
+        raise ApiError(400, "操作类型或触发器 ID 不正确")
     try:
         if action == "remove":
             await asyncio.to_thread(triggers.remove_trigger, trigger_id)
@@ -363,7 +376,7 @@ async def _triggers_change(adapter: "CompanionAdapter", payload: dict[str, Any])
 async def _devices_remove(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     device_id = payload.get("id")
     if not isinstance(device_id, str) or not await asyncio.to_thread(adapter.devices.remove, device_id):
-        raise ApiError(404, "no such device")
+        raise ApiError(404, "找不到这台设备")
     # Its sessions end now: tokens stop working, open connections close (the app then asks to pair).
     adapter.tokens.revoke_device(device_id)
     for socket, owner in list(adapter.socket_devices.items()):
@@ -376,7 +389,7 @@ async def _devices_remove(adapter: "CompanionAdapter", payload: dict[str, Any]) 
 async def _soul_update(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     text = payload.get("text")
     if not isinstance(text, str):
-        raise ApiError(400, "text is required")
+        raise ApiError(400, "请填写设定内容")
     try:
         saved = await asyncio.to_thread(companion_state.write_user_soul, text)
     except ValueError as exc:
@@ -388,7 +401,7 @@ async def _soul_update(adapter: "CompanionAdapter", payload: dict[str, Any]) -> 
 async def _memory_doc_update(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     text = payload.get("text")
     if not isinstance(text, str):
-        raise ApiError(400, "text is required")
+        raise ApiError(400, "请填写记忆内容")
     try:
         return await asyncio.to_thread(memory.write_memory_doc, text)
     except ValueError as exc:
@@ -408,7 +421,7 @@ async def _memory_learn(adapter: "CompanionAdapter", payload: dict[str, Any]) ->
 async def _memory_undo(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     change_id = payload.get("id")
     if not isinstance(change_id, str) or not change_id:
-        raise ApiError(400, "id is required")
+        raise ApiError(400, "缺少变更记录 ID")
     try:
         return await asyncio.to_thread(memory.undo_change, change_id)
     except ValueError as exc:
@@ -418,7 +431,7 @@ async def _memory_undo(adapter: "CompanionAdapter", payload: dict[str, Any]) -> 
 async def _memory_forget(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     file, line = payload.get("file"), payload.get("line")
     if not isinstance(file, str) or not isinstance(line, str):
-        raise ApiError(400, "file and line are required")
+        raise ApiError(400, "缺少记忆文件或条目内容")
     try:
         return await asyncio.to_thread(memory.forget_memory, file, line)
     except ValueError as exc:
@@ -428,7 +441,7 @@ async def _memory_forget(adapter: "CompanionAdapter", payload: dict[str, Any]) -
 async def _memory_remember(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     text = payload.get("text")
     if not isinstance(text, str):
-        raise ApiError(400, "text is required")
+        raise ApiError(400, "请填写要记住的内容")
     try:
         return await asyncio.to_thread(memory.remember, text)
     except ValueError as exc:
@@ -457,7 +470,7 @@ def _creations(adapter: "CompanionAdapter") -> Any:
 async def _creations_hide(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     creation_id = payload.get("id")
     if not isinstance(creation_id, str):
-        raise ApiError(400, "id is required")
+        raise ApiError(400, "缺少作品 ID")
     try:
         await asyncio.to_thread(creations.hide_creation, creation_id)
     except ValueError as exc:
@@ -498,7 +511,7 @@ def _avatar_action(action: str) -> Mutation:
             if action == "from_creation":
                 path = child_file(creations.creations_root(), str(payload.get("id") or ""))
                 if path is None or creations.kind_of(path.name) != "image":
-                    raise ApiError(404, "unknown picture")
+                    raise ApiError(404, "找不到这张图片")
                 return _avatars(adapter, avatars.from_creation(path, name=path.stem))
             avatars.delete(str(payload.get("id") or ""))
             return _avatars(adapter)
@@ -508,7 +521,7 @@ def _avatar_action(action: str) -> Mutation:
             raise ApiError(400, str(exc)) from None
         except OSError:
             logger.exception("companion avatar storage failed")
-            raise ApiError(500, "could not save the picture") from None
+            raise ApiError(500, "保存图片失败，请稍后再试") from None
     return handler
 
 
@@ -522,7 +535,7 @@ async def _push_subscribe(adapter: "CompanionAdapter", payload: dict[str, Any]) 
 async def _push_unsubscribe(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     endpoint = payload.get("endpoint")
     if not isinstance(endpoint, str):
-        raise ApiError(400, "endpoint is required")
+        raise ApiError(400, "缺少通知订阅地址")
     return {"devices": await asyncio.to_thread(push.remove_subscription, endpoint)}
 
 
@@ -563,7 +576,9 @@ def _automation_action(action: str) -> Mutation:
         try:
             return await asyncio.to_thread(automations.run_action, action, payload.get("id"))
         except ValueError as exc:
-            raise ApiError(404, str(exc)) from None
+            msg = str(exc)
+            status = 409 if "不能删除" in msg else 400 if "不支持" in msg else 404
+            raise ApiError(status, msg) from None
     return handler
 
 
@@ -611,7 +626,7 @@ async def _helpers_change(adapter: "CompanionAdapter", payload: dict[str, Any]) 
         elif action == "delete":
             await asyncio.to_thread(helpers.delete, adapter.store, helper_id)
         else:
-            raise ApiError(400, "action must be create, blank, update, reset, avatar or delete")
+            raise ApiError(400, "不支持的帮手操作")
     except ValueError as exc:
         raise ApiError(409, str(exc)) from None
     return {**helpers.page(adapter.store, set(adapter._turns)), **({"opened": opened} if opened else {})}
@@ -632,7 +647,7 @@ async def _groups_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -
         elif action == "delete":
             await asyncio.to_thread(helpers.delete_group, adapter.store, group_id)
         else:
-            raise ApiError(400, "action must be create, update or delete")
+            raise ApiError(400, "不支持的群聊操作")
     except ValueError as exc:
         raise ApiError(409, str(exc)) from None
     return {**helpers.page(adapter.store, set(adapter._turns)), **({"opened": opened} if opened else {})}
@@ -661,7 +676,7 @@ async def _vault_change(adapter: "CompanionAdapter", payload: dict[str, Any]) ->
             return await asyncio.to_thread(vault.remove, str(payload.get("kind") or ""), str(payload.get("id") or ""))
     except ValueError as exc:
         raise ApiError(400, str(exc)) from None
-    raise ApiError(400, "action must be add_login, add_key or remove")
+    raise ApiError(400, "不支持的安全凭证操作")
 
 
 async def _skills_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
@@ -681,7 +696,7 @@ async def _skills_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -
                                            [s for s in steps if isinstance(s, dict)] if isinstance(steps, list) else [])
     except ValueError as exc:
         raise ApiError(400, str(exc)) from None
-    raise ApiError(400, "action must be read, save, delete or draft")
+    raise ApiError(400, "不支持的技能操作")
 
 
 async def _feed_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
@@ -699,7 +714,7 @@ async def _feed_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -> 
             return await asyncio.to_thread(feed.react, str(payload.get("id") or ""), how, payload.get("on", True) is not False)
     except ValueError as exc:
         raise ApiError(400, str(exc)) from None
-    raise ApiError(400, "action must be update, write_now, delete, like or discussed")
+    raise ApiError(400, "不支持的动态操作")
 
 
 async def _chats_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
@@ -709,7 +724,7 @@ async def _chats_change(adapter: "CompanionAdapter", payload: dict[str, Any]) ->
     if action == "delete" and chat_id and not adapter.store.exists(chat_id):
         return {"sessions": adapter.store.list()}  # already gone (deleted on another device, say)
     if action not in {"rename", "delete", "delete_message", "regenerate"} or not adapter.store.exists(chat_id):
-        raise ApiError(400, "action (rename/delete/delete_message/regenerate) and an existing chat id are required")
+        raise ApiError(400, "找不到这个对话，或操作类型不正确")
     if action == "regenerate":  # 重新生成 the last answer
         try:
             await adapter.regenerate(chat_id, str(payload.get("turn_id") or ""))
@@ -719,7 +734,7 @@ async def _chats_change(adapter: "CompanionAdapter", payload: dict[str, Any]) ->
     if action == "delete_message":
         turn_id, role = str(payload.get("turn_id") or ""), payload.get("role")
         if not turn_id or role not in ("user", "reply"):
-            raise ApiError(400, "turn_id and role (user/reply) are required")
+            raise ApiError(400, "缺少消息标识或消息角色不正确")
         await asyncio.to_thread(adapter.store.remove_events, chat_id, lambda e: e.get("turn_id") == turn_id and (
             (e.get("event") == "user_message") == (role == "user")) and e.get("event") != "turn_end")
         return {"sessions": adapter.store.list()}
@@ -892,6 +907,7 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
                 "limits": {"transport": {"max_frame_bytes": MAX_FRAME_BYTES, "envelope_reserve_bytes": 64 * 1024}},
                 "model_name": None,
                 "runtime_surface": "browser",
+                "capabilities": await asyncio.to_thread(_runtime_capabilities),
             },
             headers=NO_STORE,
         )
@@ -966,7 +982,7 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
     async def companion(request: Request) -> Response:
         if not authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return JSONResponse(companion_state.read_companion_state(), headers=NO_STORE)
+        return JSONResponse(await asyncio.to_thread(_companion_payload), headers=NO_STORE)
 
     async def approvals(request: Request) -> Response:
         if not authorized(request):
@@ -1307,7 +1323,7 @@ async def _handle_mutation(adapter: "CompanionAdapter", socket: WebSocket, frame
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     try:
         if handler is None:
-            raise ApiError(404, f"unknown action: {frame.get('action')}")
+            raise ApiError(404, f"不支持的请求操作：{frame.get('action')}")
         result = await handler(adapter, payload)
         await socket.send_json({"event": "webui_response", "request_id": request_id, "ok": True, "result": result})
     except ApiError as exc:

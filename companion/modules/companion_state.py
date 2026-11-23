@@ -192,6 +192,21 @@ def read_companion_state() -> dict[str, Any]:
     return normalize_companion_state(raw)
 
 
+_FIELD_LABELS: dict[str, str] = {
+    "name": "名字",
+    "avatar": "形象",
+    "chat_id": "主对话",
+    "tone": "语气",
+    "user_name": "称呼",
+    "style_note": "补充要求",
+    "onboarded": "引导状态",
+    "timezone": "时区",
+    "theme_mode": "外观模式",
+    "pet_size": "宠物大小",
+    "feed_seen_at": "动态已读时间",
+}
+
+
 def update_companion_state(changes: dict[str, Any]) -> dict[str, Any]:
     """Merge the provided fields into the stored state and persist it.
 
@@ -200,13 +215,13 @@ def update_companion_state(changes: dict[str, Any]) -> dict[str, Any]:
     """
     unknown = set(changes) - set(_FIELDS)
     if unknown:
-        raise ValueError(f"unknown companion fields: {', '.join(sorted(unknown))}")
+        raise ValueError(f"不支持的设置项：{', '.join(sorted(unknown))}")
     cleaned: dict[str, Any] = {}
     for field, value in changes.items():
         try:
             cleaned[field] = _FIELDS[field](value)
         except ValueError:
-            raise ValueError(f"invalid companion {field}") from None
+            raise ValueError(f"{_FIELD_LABELS.get(field, field)}格式不正确") from None
 
     with _WRITE_LOCK:
         state = read_companion_state()

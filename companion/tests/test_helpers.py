@@ -120,6 +120,85 @@ class HelpersTest(unittest.TestCase):
         # ...but may ask a third one.
         self.assertTrue(json.loads(self.helpers._handle_ask({"helper": "行程", "task": "y"}, chat=books["chat_id"]))["success"])
 
+    def test_concurrent_callers_queue_without_losing_cycle_detection(self):
+        import asyncio
+        import json
+        import threading
+
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+
+        def stop_loop():
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=2)
+            loop.close()
+
+        self.addCleanup(stop_loop)
+
+        a_started = threading.Event()
+        release_a = threading.Event()
+        results = {}
+        helper_locks: dict[str, asyncio.Lock] = {}
+
+        boss_a, boss_b, worker_c = (self.make(n, instructions="做事") for n in ("主管甲", "主管乙", "执行丙"))
+
+        class Adapter(FakeAdapter):
+            def helper_origin(self, chat_id):
+                return None
+
+            async def ask_helper(self, origin, chat_id, task, timeout):
+                lock = helper_locks.setdefault(chat_id, asyncio.Lock())
+                async with lock:
+                    if origin == boss_a["chat_id"]:
+                        a_started.set()
+                        await asyncio.to_thread(release_a.wait, 5)
+                        return "甲的事做完了"
+                    return "乙的事做完了"
+
+            async def post_as_helper(self, chat_id, helper, text):
+                pass
+
+        self.helpers._adapter, self.helpers._loop = Adapter(self.store), loop
+        self.helpers._current_chat = lambda kwargs: kwargs.get("chat")
+
+        def run_a():
+            results["a"] = json.loads(
+                self.helpers._handle_ask({"helper": "执行丙", "task": "任务A"}, chat=boss_a["chat_id"])
+            )
+
+        def run_b():
+            results["b"] = json.loads(
+                self.helpers._handle_ask({"helper": "执行丙", "task": "任务B"}, chat=boss_b["chat_id"])
+            )
+
+        ta = threading.Thread(target=run_a, daemon=True)
+        tb = threading.Thread(target=run_b, daemon=True)
+        self.addCleanup(release_a.set)
+        ta.start()
+        self.assertTrue(a_started.wait(2))
+        tb.start()
+        # Wait until tb has queued in _asking_queue while ta holds worker_c's lock.
+        for _ in range(50):
+            if len(self.helpers._asking_queue.get(worker_c["chat_id"], ())) >= 2:
+                break
+            threading.Event().wait(0.02)
+
+        # Head waiter is still boss_a (not overwritten by boss_b!), and BOTH C->A and C->B are rejected as cycles!
+        self.assertEqual(self.helpers._asking.get(worker_c["chat_id"]), boss_a["chat_id"])
+        cycle_to_a = json.loads(self.helpers._handle_ask({"helper": "主管甲", "task": "回调甲"}, chat=worker_c["chat_id"]))
+        cycle_to_b = json.loads(self.helpers._handle_ask({"helper": "主管乙", "task": "回调乙"}, chat=worker_c["chat_id"]))
+        self.assertFalse(cycle_to_a["success"])
+        self.assertFalse(cycle_to_b["success"])
+
+        release_a.set()
+        ta.join(timeout=3)
+        tb.join(timeout=3)
+        self.assertTrue(results["a"]["success"])
+        self.assertTrue(results["b"]["success"])
+        self.assertEqual(self.helpers._asking, {})
+        self.assertEqual(self.helpers._asking_queue, {})
+
     def test_browser_desks_are_fresh_hidden_chats(self):
         self.helpers._adapter = FakeAdapter(self.store)
         first, second = self.helpers.new_desk(self.store), self.helpers.new_desk(self.store)

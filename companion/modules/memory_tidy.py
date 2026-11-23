@@ -25,6 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from .fs_atomic import atomic_write_json
 from .memory import _LOCK, _TARGETS, _store
 from .paths import get_webui_dir
 
@@ -95,11 +96,7 @@ def seen_at(meta: dict[str, Any], entry: str) -> Optional[float]:
 
 
 def _write_meta(data: dict[str, Any]) -> None:
-    path = _meta_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_json(_meta_path(), data)
 
 
 def note_user_written(entry: str) -> None:
@@ -108,6 +105,19 @@ def note_user_written(entry: str) -> None:
         meta = _read_meta()
         if entry not in meta["user_written"]:
             meta["user_written"].append(entry)
+            _write_meta(meta)
+
+
+def drop_user_written(entries: Any) -> None:
+    """Forget protection flags for entries the user deleted."""
+    gone = {str(e) for e in entries if e}
+    if not gone:
+        return
+    with _META_LOCK:
+        meta = _read_meta()
+        kept = [e for e in meta["user_written"] if e not in gone and e.strip() not in gone]
+        if len(kept) != len(meta["user_written"]):
+            meta["user_written"] = kept
             _write_meta(meta)
 
 
@@ -213,6 +223,7 @@ def tidy(force: bool = False) -> dict[str, Any]:
             return {"changed": 0}
         protected = set(_read_meta()["user_written"])
         applied = []
+        failed_targets: set[str] = set()
         for file, (target, _) in _TARGETS.items():
             entries = _all_entries()[target]
             if len(entries) < 2:
@@ -221,7 +232,8 @@ def tidy(force: bool = False) -> dict[str, Any]:
                 proposal = _propose(entries, protected)
             except Exception as exc:  # no model right now: try again at the next due time
                 logger.info("companion: memory tidy has no model (%s)", type(exc).__name__)
-                proposal = {}
+                failed_targets.add(target)
+                continue
             for change in _plan(entries, proposal, protected):
                 with _LOCK:
                     error = _failed(_store().apply_batch(target, _ops(change)))
@@ -229,10 +241,23 @@ def tidy(force: bool = False) -> dict[str, Any]:
                     logger.info("companion: memory tidy skipped a change: %s", error)
                     continue
                 applied.append({"id": uuid.uuid4().hex[:10], "at": time.time(), "file": file, **change})
+        if failed_targets and not applied:
+            return {"changed": 0}
         with _META_LOCK:
             meta = _read_meta()
-            meta["last_tidy_at"] = time.time()
-            meta["seen"] = [e for items in _all_entries().values() for e in items]
+            current_by_target = _all_entries()
+            prev_seen = set(meta["seen"])
+            if not failed_targets:
+                meta["last_tidy_at"] = time.time()
+                meta["seen"] = [e for items in current_by_target.values() for e in items]
+            else:
+                seen_out: list[str] = []
+                for target, items in current_by_target.items():
+                    if target in failed_targets:
+                        seen_out.extend(e for e in items if e in prev_seen)
+                    else:
+                        seen_out.extend(items)
+                meta["seen"] = seen_out
             for change in applied:
                 if change["after"] is not None:
                     # A merged line came up when the newest of the lines it replaces did.

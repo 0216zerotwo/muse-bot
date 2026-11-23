@@ -141,7 +141,7 @@ def _service(provider: str) -> dict[str, Any]:
 
     service = (read_raw_config().get("providers") or {}).get(provider)
     if not isinstance(service, dict) or not service.get("base_url"):
-        raise ValueError(f"unknown service: {provider}")
+        raise ValueError(f"找不到这个服务：{provider}")
     return service
 
 
@@ -178,7 +178,7 @@ async def check_models(names: Optional[list[str]] = None) -> dict[str, Any]:
     for name in names or sorted(data["presets"]):
         preset = data["presets"].get(name)
         if preset is None:
-            raise ValueError(f"unknown model: {name}")
+            raise ValueError(f"找不到这个模型：{name}")
         if preset.get("auth"):
             await asyncio.to_thread(_check_signed_in, name, preset)
             continue
@@ -290,11 +290,19 @@ def models_payload() -> dict[str, Any]:
     }
 
 
+_NUMBER_LABELS = {
+    "max_tokens": "最大回复长度",
+    "temperature": "温度",
+    "max_tool_iterations": "单次最多步数",
+}
+
+
 def _number(value: Any, bounds: tuple[float, float], field: str, *, integer: bool) -> float:
+    label = _NUMBER_LABELS.get(field, field)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or (integer and not float(value).is_integer()):
-        raise ValueError(f"{field} must be a number")
+        raise ValueError(f"{label}必须是{'整数' if integer else '数字'}")
     if not bounds[0] <= value <= bounds[1]:
-        raise ValueError(f"{field} must be between {bounds[0]:g} and {bounds[1]:g}")
+        raise ValueError(f"{label}必须在 {bounds[0]:g} 到 {bounds[1]:g} 之间")
     return int(value) if integer else float(value)
 
 
@@ -302,20 +310,20 @@ def _price(value: Any) -> Optional[float]:
     if value is None or value == "":
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
-        raise ValueError("price must be a non-negative number")
+        raise ValueError("价格必须是不小于 0 的数字")
     return float(value)
 
 
 def _model_info(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
-        raise ValueError("model info must be an object")
+        raise ValueError("模型信息格式不正确")
     description, tier, vision = raw.get("description", ""), raw.get("tier", "balanced"), raw.get("vision", False)
     if not isinstance(description, str) or len(description) > _MAX_DESCRIPTION:
-        raise ValueError(f"description must be text up to {_MAX_DESCRIPTION} characters")
+        raise ValueError(f"模型说明最多 {_MAX_DESCRIPTION} 个字")
     if tier not in TIERS:
-        raise ValueError(f"tier must be one of {', '.join(TIERS)}")
+        raise ValueError(f"模型档位只能是 {', '.join(TIERS)} 之一")
     if not isinstance(vision, bool):
-        raise ValueError("vision must be true or false")
+        raise ValueError("图片理解开关格式不正确")
     return {"description": description.strip(), "tier": tier, "vision": vision,
             "price_in": _price(raw.get("price_in")), "price_out": _price(raw.get("price_out")),
             "price_cached": _price(raw.get("price_cached"))}
@@ -323,20 +331,20 @@ def _model_info(raw: Any) -> dict[str, Any]:
 
 def _apply_limits(data: dict[str, Any], limits: Any) -> None:
     if not isinstance(limits, dict):
-        raise ValueError("presets must be an object")
+        raise ValueError("模型参数格式不正确")
     for name, values in limits.items():
         preset = data["presets"].get(name)
         if preset is None:
-            raise ValueError(f"unknown model: {name}")
+            raise ValueError(f"找不到这个模型：{name}")
         if not isinstance(values, dict):
-            raise ValueError(f"limits for {name} must be an object")
+            raise ValueError(f"{name} 的参数格式不正确")
         unknown = set(values) - {"reasoning_effort", "max_tokens", "temperature"}
         if unknown:
-            raise ValueError(f"unknown limits: {', '.join(sorted(unknown))}")
+            raise ValueError(f"不支持的模型参数：{', '.join(sorted(unknown))}")
         if "reasoning_effort" in values:
             effort = values["reasoning_effort"]
             if effort is not None and effort not in REASONING_EFFORTS:
-                raise ValueError(f"reasoning_effort must be one of {', '.join(REASONING_EFFORTS)}")
+                raise ValueError(f"思考强度只能是 {', '.join(REASONING_EFFORTS)} 之一")
             preset["reasoning_effort"] = effort
         if "max_tokens" in values:
             preset["max_tokens"] = _number(values["max_tokens"], MAX_TOKENS_RANGE, "max_tokens", integer=True)
@@ -372,26 +380,26 @@ def update_models(changes: dict[str, Any]) -> dict[str, Any]:
     unknown = set(changes) - {
         "enabled", "router", "fixed", "default", "models", "fallbacks", "presets", "max_tool_iterations", "media_active"}
     if unknown:
-        raise ValueError(f"unknown fields: {', '.join(sorted(unknown))}")
+        raise ValueError(f"不支持的字段：{', '.join(sorted(unknown))}")
     with _LOCK:
         data = read_models()
         names = data["presets"]
         if "default" in changes:
             if changes["default"] not in names:
-                raise ValueError(f"unknown model: {changes['default']}")
+                raise ValueError(f"找不到这个模型：{changes['default']}")
             data["default"] = changes["default"]
         if "enabled" in changes:
             if not isinstance(changes["enabled"], bool):
-                raise ValueError("enabled must be true or false")
+                raise ValueError("自动选择开关格式不正确")
             data["router"]["enabled"] = changes["enabled"]
         if "fixed" in changes:
             fixed = changes["fixed"] or None
             if fixed is not None and fixed not in names:
-                raise ValueError(f"unknown model: {fixed}")
+                raise ValueError(f"找不到这个模型：{fixed}")
             data["router"]["fixed"] = fixed
         if "models" in changes:
             if not isinstance(changes["models"], dict):
-                raise ValueError("models must be an object")
+                raise ValueError("模型配置格式不正确")
             for name, info in changes["models"].items():
                 if info is None:
                     data["router"]["models"].pop(str(name), None)
@@ -400,10 +408,10 @@ def update_models(changes: dict[str, Any]) -> dict[str, Any]:
         if "fallbacks" in changes:
             fallbacks = changes["fallbacks"]
             if not isinstance(fallbacks, list) or not all(isinstance(name, str) for name in fallbacks):
-                raise ValueError("fallbacks must be a list of model names")
+                raise ValueError("备用模型必须是模型名称列表")
             missing = [name for name in fallbacks if name not in names]
             if missing:
-                raise ValueError(f"unknown models: {', '.join(missing)}")
+                raise ValueError(f"找不到这些模型：{', '.join(missing)}")
             data["fallbacks"] = list(dict.fromkeys(fallbacks))
         if "presets" in changes:
             _apply_limits(data, changes["presets"])
@@ -413,10 +421,11 @@ def update_models(changes: dict[str, Any]) -> dict[str, Any]:
         if "media_active" in changes:
             active = changes["media_active"]
             if not isinstance(active, dict):
-                raise ValueError("media_active must be an object")
+                raise ValueError("媒体模型配置格式不正确")
             for kind, name in active.items():
                 if kind not in MEDIA_KINDS or (name is not None and name not in data["media"][kind]["models"]):
-                    raise ValueError(f"unknown {kind} model: {name}")
+                    label = "画图" if kind == "image" else "视频" if kind == "video" else str(kind)
+                    raise ValueError(f"找不到这个{label}模型：{name}")
                 data["media"][kind]["active"] = name
         _write_json(_models_path(), data)
     apply_to_hermes()

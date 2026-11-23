@@ -11,13 +11,15 @@ import re
 from typing import Any
 
 _CARD = re.compile(r"```(?:card|json|ui)[ \t]*\n[\s\S]*?(?:\n```|$)")
-_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _AROUND = 28
 _LIMIT = 40
 
 
 def _plain(text: str) -> str:
     text = _CARD.sub(" ", text or "")
+    text = _IMAGE.sub(r" \1 ", text)
     text = _LINK.sub(r"\1", text)
     return " ".join(text.replace("**", "").split())
 
@@ -32,6 +34,7 @@ def search(store: Any, query: str, main_chat: str | None = None, limit: int = _L
     if not words:
         return {"query": "", "hits": []}
     needle = words.casefold()
+    tokens = [tok.casefold() for tok in words.split() if tok]
     hits: list[dict[str, Any]] = []
     for chat_id, meta in store._read_index().items():
         if meta.get("desk") or meta.get("helper"):
@@ -44,11 +47,16 @@ def search(store: Any, query: str, main_chat: str | None = None, limit: int = _L
             if (event.get("source") or {}).get("kind") == "notice":
                 continue
             text = _plain(str(event.get("text") or ""))
-            at = text.casefold().find(needle)
+            folded = text.casefold()
+            at = folded.find(needle)
+            match_len = len(words)
+            if at < 0 and len(tokens) > 1 and all(tok in folded for tok in tokens):
+                at = folded.find(tokens[0])
+                match_len = len(tokens[0])
             if at < 0:
                 continue
             hits.append({"chat_id": chat_id, "chat_title": title, "role": "user" if kind == "user_message" else "assistant",
-                         "text": _snippet(text, at, len(words)), "turn_id": event.get("turn_id"),
+                         "text": _snippet(text, at, match_len), "turn_id": event.get("turn_id"),
                          "at_ms": event.get("created_at_ms") or 0})
     hits.sort(key=lambda hit: hit["at_ms"], reverse=True)
     return {"query": words, "hits": hits[:limit], "more": len(hits) > limit}
