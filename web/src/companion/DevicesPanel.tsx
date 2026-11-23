@@ -69,16 +69,18 @@ export function DevicesPanel({ onDisconnect }: { onDisconnect: () => void }) {
               </button>
             </li>
           ) : devices === null ? (
-            <li role="status" aria-busy="true" aria-label="正在读取设备" className="divide-y c-divider">
-              {[0, 1].map((index) => (
-                <div key={index} className="flex items-center gap-3 px-4 py-3">
-                  <Skeleton className="h-5 w-5 shrink-0 rounded-md" />
-                  <div className="min-w-0 flex-1 space-y-1.5">
-                    <Skeleton className={index === 0 ? "h-3.5 w-32" : "h-3.5 w-24"} />
-                    <Skeleton className="h-2.5 w-40" />
+            <li>
+              <div role="status" aria-busy="true" aria-label="正在读取设备" className="divide-y c-divider">
+                {[0, 1].map((index) => (
+                  <div key={index} className="flex items-center gap-3 px-4 py-3">
+                    <Skeleton className="h-5 w-5 shrink-0 rounded-md" />
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <Skeleton className={index === 0 ? "h-3.5 w-32" : "h-3.5 w-24"} />
+                      <Skeleton className="h-2.5 w-40" />
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </li>
           ) : devices.length === 0 ? (
             <li className="c-muted px-4 py-3 text-[14px]">这台是服务器本机，不需要配对。</li>

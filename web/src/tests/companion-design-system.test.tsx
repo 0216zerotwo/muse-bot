@@ -76,6 +76,7 @@ describe("Skeleton primitives", () => {
     expect(bars.length).toBeGreaterThan(8);
     for (const bar of bars) {
       expect(bar).toHaveAttribute("aria-hidden", "true");
+      expect(bar.className).toContain("max-w-full");
     }
   });
 });
@@ -278,12 +279,16 @@ describe("CSS token harmony, reduced motion, and UI Kit invariants", () => {
     expect(companionCss).toContain(".companion .c-bubble-text .code-content");
     expect(companionCss).toContain(".companion .c-bubble-text blockquote");
     expect(companionCss).toContain(".companion .c-bubble-text th");
+    // Dark-mode user bubbles must derive link/quote colors from --c-bubble-user-text (never dark --c-accent-soft).
+    expect(companionCss).toMatch(/\.companion \.c-bubble-user\.c-bubble-text a\s*\{[^}]*--c-bubble-user-text/);
+    expect(companionCss).not.toMatch(/\.companion \.c-bubble-user\.c-bubble-text (?:a|blockquote)\s*\{[^}]*--c-accent-soft/);
   });
 
   it("aligns kit.css with --c-* tokens, 16px/44px mobile inputs, and short class names", () => {
     for (const token of [".card", ".soft", ".accent-card", ".seg", ".chips", "textarea:focus-visible"]) {
       expect(kitCss).toContain(token);
     }
+    expect(kitCss).toContain("var(--c-rim-soft, rgb(255 255 255 / 0.14))");
     expect(kitCss).toMatch(/input\[type="text"\][\s\S]*?font-size:\s*16px/);
     expect(kitCss).toMatch(/input\[type="text"\][\s\S]*?min-height:\s*44px/);
   });

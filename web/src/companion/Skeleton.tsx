@@ -2,7 +2,7 @@ import { cn } from "@/lib/utils";
 
 /** Warm --c-* shimmer bar; static under prefers-reduced-motion. */
 export function Skeleton({ className }: { className?: string }) {
-  return <div className={cn("c-skeleton rounded-lg", className)} aria-hidden="true" />;
+  return <div className={cn("c-skeleton max-w-full rounded-lg", className)} aria-hidden="true" />;
 }
 
 /** Inline shimmer lines for loading regions inside an existing card. */

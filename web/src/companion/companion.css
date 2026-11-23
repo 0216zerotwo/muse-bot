@@ -234,9 +234,18 @@
   color: var(--c-accent);
   text-decoration-color: currentColor;
 }
+.companion .c-bubble-user.c-bubble-text .prose {
+  --tw-prose-links: color-mix(in srgb, var(--c-bubble-user-text) 92%, var(--c-accent));
+  --tw-prose-quotes: color-mix(in srgb, var(--c-bubble-user-text) 82%, transparent);
+  --tw-prose-quote-borders: color-mix(in srgb, var(--c-bubble-user-text) 55%, transparent);
+}
 .companion .c-bubble-user.c-bubble-text a {
-  color: var(--c-accent-soft);
-  text-decoration-color: color-mix(in srgb, var(--c-accent-soft) 55%, transparent);
+  color: color-mix(in srgb, var(--c-bubble-user-text) 92%, var(--c-accent));
+  text-decoration-color: color-mix(in srgb, var(--c-bubble-user-text) 55%, transparent);
+}
+.companion .c-bubble-user.c-bubble-text a:hover {
+  color: var(--c-bubble-user-text);
+  text-decoration-color: currentColor;
 }
 .companion .c-bubble-text :not(pre) > code {
   background: var(--c-fill);
@@ -285,7 +294,7 @@
   font-style: normal;
 }
 .companion .c-bubble-user.c-bubble-text blockquote {
-  border-left-color: var(--c-accent-soft);
+  border-left-color: color-mix(in srgb, var(--c-bubble-user-text) 55%, transparent);
   color: color-mix(in srgb, var(--c-bubble-user-text) 82%, transparent);
 }
 .companion .c-bubble-text hr {
