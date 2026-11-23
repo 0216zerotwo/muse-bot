@@ -1,7 +1,7 @@
 name: Server & Deploy
 
 # Backend plugin tests (companion/), deploy CLI/script tests (deploy/), tool syntax checks,
-# iOS static project validation, and a release-bundle dry run.
+# iOS & Android static project validation, and a release-bundle dry run.
 on:
   workflow_dispatch:
   push:
@@ -43,13 +43,15 @@ jobs:
             tools/draw_icons.py \
             tools/make_app_icons.py \
             tools/icon-runs/contact_sheet.py \
-            ios/scripts/validate.py
-      - name: Validate iOS project and workflow contracts
+            ios/scripts/validate.py \
+            android/scripts/validate.py
+      - name: Validate iOS & Android project and workflow contracts
         run: |
           set -euo pipefail
           python3 -m venv .ci-validate-env
           .ci-validate-env/bin/pip install --quiet pyyaml pillow
           .ci-validate-env/bin/python ios/scripts/validate.py
+          python3 android/scripts/validate.py
       - name: Run deploy & installer tests
         env:
           MUSEBOT_PYTHON: ${{ github.workspace }}/.ci-validate-env/bin/python

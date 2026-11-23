@@ -32,6 +32,8 @@ jobs:
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0, node24
         with:
           persist-credentials: false
+      - name: Validate Android manifest, resources, and bridge contracts
+        run: python3 android/scripts/validate.py
       - name: Ensure Android SDK platform 34 & build-tools
         run: |
           set -euo pipefail
