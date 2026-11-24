@@ -38,7 +38,33 @@ def bind(adapter: "CompanionAdapter", loop: asyncio.AbstractEventLoop) -> None:
 
 
 def _chat_for_session(session_id: str) -> Optional[str]:
-    """The companion chat a Hermes session (or its subagent's parent chain) belongs to."""
+    """The companion chat a session (or its subagent's parent chain) belongs to."""
+    from muse.paths import active_engine_name, get_muse_db_path
+
+    if active_engine_name() == "native":
+        from muse.context import get_turn_context
+
+        ctx = get_turn_context()
+        if ctx is not None and ctx.chat_id and (not session_id or ctx.session_id == session_id):
+            return ctx.chat_id
+        if session_id.startswith("companion:"):
+            return session_id.split(":", 1)[1] or None
+        cached_native = _chat_by_session.get(session_id)
+        if cached_native:
+            return cached_native
+        db_path = get_muse_db_path()
+        if session_id and db_path.is_file():
+            with contextlib.suppress(Exception):
+                from muse.db import MuseDB
+
+                with MuseDB(db_path) as mdb:
+                    row = mdb.get_session(session_id)
+                    if row and row.get("chat_id"):
+                        cid = str(row["chat_id"])
+                        _chat_by_session[session_id] = cid
+                        return cid
+        return None
+
     cached = _chat_by_session.get(session_id)
     if cached:
         return cached

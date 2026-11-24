@@ -23,7 +23,11 @@ _LINES = (
 
 def _size(value: Any) -> str:
     text = "" if value is None else str(value)
-    return f"<{len(text)} 字>" if text else ""
+    if not text:
+        return ""
+    if text.startswith("<") and text.endswith(" 字>"):
+        return text
+    return f"<{len(text)} 字>"
 
 
 class _WordsOut(logging.Filter):
@@ -46,6 +50,9 @@ class _WordsOut(logging.Filter):
 
 def install() -> None:
     """Once per process (a second call leaves the filters as they are)."""
+    from muse.interceptors import install_privacy_hardening
+
+    install_privacy_hardening()
     by_logger: dict[str, list[tuple[str, tuple[int, ...]]]] = {}
     for name, start, positions in _LINES:
         by_logger.setdefault(name, []).append((start, positions))

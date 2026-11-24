@@ -509,10 +509,20 @@ class Approvals:
         self.adapter = adapter
         self.store = ApprovalStore(root)
         self.grants = GrantStore(root)
+        self._native_coordinator: Any = None
         with contextlib.suppress(Exception):
             from .modules import computer
 
             computer.set_pending_browser_check(self.has_pending_browser)
+
+    def bind_native_coordinator(self, coordinator: Any) -> None:
+        self._native_coordinator = coordinator
+
+    def _resolve_native_coordinator(self) -> Any:
+        if self._native_coordinator is not None:
+            return self._native_coordinator
+        engine = getattr(self.adapter, "_engine", None)
+        return getattr(engine, "approval_coordinator", None) or getattr(engine, "_approval_coordinator", None)
 
     def has_pending_browser(self, chat_id: Optional[str] = None) -> bool:
         """True when ``chat_id`` (or any chat, when ``chat_id`` is None) has a pending browser approval."""
@@ -627,17 +637,65 @@ class Approvals:
         if approve and scope in SCOPES and scope != "once" and keys:
             record.scope = scope
             self.grants.add(keys, scope)
+        if record.extra.get("native_exec"):
+            if approve and scope in (*SCOPES, "session"):
+                record.scope = scope
+            decided = self._answer_native_exec(record, approve, scope=scope)
+            await self._emit_ws_async(decided)
+            return decided
         if record.extra.get("hermes_session"):
             decided = self._answer_exec(record, approve)
             await self._emit_ws_async(decided)
             return decided
         if approve:
-            result = await asyncio.to_thread(self._run, record)
+            result = await self._execute_record(record)
             record.status = FAILED if _failed(result) else EXECUTED
             record.result = result[:_RESULT_PREVIEW_CHARS]
             self.store.save(record)
         await self._emit_ws_async(record)
         await self._report(record)
+        return record
+
+    async def _execute_record(self, record: ApprovalRecord) -> str:
+        from muse.paths import active_engine_name
+
+        coord = self._resolve_native_coordinator()
+        engine = getattr(self.adapter, "_engine", None)
+        use_native = (
+            active_engine_name() == "native"
+            or coord is not None
+            or callable(getattr(engine, "execute_approved", None))
+        )
+        if not use_native:
+            return await asyncio.to_thread(self._run, record)
+        try:
+            from .modules import computer
+
+            if record.action in _BROWSER_ACTIONS or computer.is_browser_tool(record.tool_name):
+                await asyncio.to_thread(computer.ensure_browser)
+            if coord is not None and getattr(coord, "_exec_runner", None) is not None:
+                raw = await coord.execute_approved(record, skip_policy_gates=True)
+            elif callable(exec_fn := getattr(engine, "execute_approved", None)):
+                raw = await exec_fn(record, skip_policy_gates=True)
+            else:
+                return await asyncio.to_thread(self._run, record)
+        except Exception as exc:
+            logger.exception("companion: native approved call %s failed", record.id)
+            return f"Error: {exc}"
+        return raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
+
+    def _answer_native_exec(self, record: ApprovalRecord, approve: bool, *, scope: str = "once") -> ApprovalRecord:
+        coord = self._resolve_native_coordinator()
+        effective_scope = scope if (approve and scope in (*SCOPES, "session")) else record.scope
+        resolved = (
+            coord.resolve_held_exec(record.id, approve=approve, scope=effective_scope)
+            if coord is not None
+            else False
+        )
+        if not resolved:
+            record.status = FAILED
+            record.result = "等待确认超时，这一步已经跳过了"
+        self.store.save(record)
         return record
 
     def _run(self, record: ApprovalRecord) -> str:

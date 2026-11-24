@@ -17,6 +17,7 @@ from typing import Any, Literal, Optional
 from .context import (
     ActorKind, CancelScope, ContextCompactor, PromptAssembler, TurnExecutionContext, turn_context_scope,
 )
+from .interceptors import scrub_url_secrets
 from .notices import render_notice
 from .streaming import (
     APPROVE_COMMAND, CANCEL_COMMAND, ChatSink, DraftSegmentStreamer, classify_turn_failure,
@@ -541,6 +542,10 @@ class ChatTurnActor:
                                 session_id, self.chat_id, "user", sm.text,
                                 turn_id=current_turn_id, extra={"steered_turn_id": sm.turn_id},
                             )
+                else:
+                    await self.sink.post_notice(
+                        self.chat_id, render_notice("gateway.errors.stopped_before_finishing", reason="")
+                    )
         except asyncio.CancelledError:
             self._write_cancelled_tool_results(session_id, current_turn_id)
             if not turn_closed_by_clarify:
@@ -558,7 +563,8 @@ class ChatTurnActor:
             self._set_active_turn(None)
             await self._emit_turn_end(
                 current_turn_id, outcome="failed", failure_kind="model",
-                failure_error_kind=error_kind, failure_attempts=attempts, failure_message=str(exc)[:300],
+                failure_error_kind=error_kind, failure_attempts=attempts,
+                failure_message=scrub_url_secrets(str(exc))[:300],
             )
             return
 
