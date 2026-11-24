@@ -105,7 +105,7 @@ def _first_frame(folder: Path, state: str = "idle") -> str:
 
 
 def _clip(prompt: str, first_frame: str) -> tuple[Optional[Path], str]:
-    from tools.video_generation_tool import _handle_video_generate
+    from muse.media.video import _handle_video_generate
 
     try:
         result = json.loads(_handle_video_generate({

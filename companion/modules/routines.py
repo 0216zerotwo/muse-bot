@@ -45,7 +45,7 @@ def _deliver(chat_id: str) -> str:
 
 
 def _ours(name: str, chat_id: str) -> list[dict[str, Any]]:
-    from cron.jobs import list_jobs
+    from muse.cron.jobs import list_jobs
 
     return [job for job in list_jobs(include_disabled=True)
             if job.get("name") == name and job.get("deliver") == _deliver(chat_id)]
@@ -101,7 +101,7 @@ def _daily(at: str) -> str:
 
 
 def _replace(name: str, chat_id: str, schedule: Optional[str], prompt: str) -> None:
-    from cron.jobs import create_job, remove_job
+    from muse.cron.jobs import create_job, remove_job
 
     for job in _ours(name, chat_id):
         remove_job(job["id"])
@@ -117,7 +117,7 @@ def source_for_job(job_id: Optional[str]) -> Optional[dict[str, str]]:
     if not job_id:
         return None
     try:
-        from cron.jobs import get_job
+        from muse.cron.jobs import get_job
 
         job = get_job(str(job_id)) or {}
     except Exception:

@@ -143,7 +143,7 @@ def _schedule_for(trigger: dict[str, Any]) -> str:
 
 
 def _sync_job(trigger: dict[str, Any]) -> None:
-    from cron.jobs import create_job, remove_job
+    from muse.cron.jobs import create_job, remove_job
 
     if trigger.get("job_id"):
         remove_job(trigger["job_id"])
@@ -166,7 +166,7 @@ def _sync_job(trigger: dict[str, Any]) -> None:
 
 def ensure_jobs() -> None:
     """Create missing cron jobs once ``chat_id`` is populated."""
-    from cron.jobs import get_job
+    from muse.cron.jobs import get_job
 
     with _LOCK:
         triggers = _read()
@@ -235,7 +235,7 @@ def add_trigger(kind: str, name: str, instruction: str, url: Optional[str] = Non
 
 
 def remove_trigger(trigger_id: str) -> None:
-    from cron.jobs import remove_job
+    from muse.cron.jobs import remove_job
 
     with _LOCK:
         triggers = _read()
@@ -286,7 +286,7 @@ def _check_key(trigger: dict[str, Any], key: Optional[str]) -> bool:
 
 def receive(trigger_id: str, key: Optional[str], body: str) -> bool:
     """A webhook POST: keep the payload and run the job now. False for a wrong id or key."""
-    from cron.jobs import trigger_job
+    from muse.cron.jobs import trigger_job
 
     with _LOCK:
         triggers = _read()

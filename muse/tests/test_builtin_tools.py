@@ -130,12 +130,17 @@ class ToolRegistryAndOverflowTest(unittest.TestCase):
             {
                 "browser",
                 "clarify",
+                "cronjob",
                 "file",
+                "image_gen",
                 "memory",
                 "session_search",
                 "skills",
                 "terminal",
                 "tool_search",
+                "tts",
+                "video_gen",
+                "vision",
                 "web",
             },
         )

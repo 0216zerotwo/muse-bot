@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 def generate(prompt: str, reference: Optional[str] = None) -> tuple[Optional[bytes], str]:
     """The picture's bytes (or None) and, when it failed, why. ``reference``: a picture to keep to."""
-    from tools.image_generation_tool import _handle_image_generate
+    from muse.media.image_gen import _handle_image_generate
 
     args: dict[str, Any] = {"prompt": prompt, "aspect_ratio": "square"}
     if reference:

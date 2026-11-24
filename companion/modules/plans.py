@@ -120,7 +120,7 @@ def _checkin_prompt(goal: dict[str, Any]) -> str:
 
 def _sync_job(goal: dict[str, Any]) -> None:
     """Keep the goal's check-in job in step with its cadence (none once it is done)."""
-    from cron.jobs import create_job, remove_job
+    from muse.cron.jobs import create_job, remove_job
 
     if goal.get("job_id"):
         remove_job(goal["job_id"])
@@ -135,7 +135,7 @@ def _sync_job(goal: dict[str, Any]) -> None:
 
 def ensure_jobs() -> None:
     """Create missing goal check-in cron jobs once ``chat_id`` is populated."""
-    from cron.jobs import get_job
+    from muse.cron.jobs import get_job
 
     with _LOCK:
         goals = _read()
@@ -174,7 +174,7 @@ def _next_run_ms(job_id: Optional[str]) -> Optional[int]:
     if not job_id:
         return None
     try:
-        from cron.jobs import get_job
+        from muse.cron.jobs import get_job
 
         job = get_job(job_id) or {}
     except Exception:
@@ -285,7 +285,7 @@ def remove_goal(goal_id: str) -> None:
         goals = _read()
         goal = _find(goals, goal_id)
         if goal.get("job_id"):
-            from cron.jobs import remove_job
+            from muse.cron.jobs import remove_job
 
             remove_job(goal["job_id"])
         _write([g for g in goals if g is not goal])
@@ -296,7 +296,7 @@ def check_in_now(goal_id: str) -> None:
     goal = _find(_read(), goal_id)
     if not goal.get("job_id"):
         raise ValueError("这个目标没有设定跟进时间")
-    from cron.jobs import trigger_job
+    from muse.cron.jobs import trigger_job
 
     trigger_job(goal["job_id"])
 

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import sys
-import types
 import unittest
 from unittest import mock
 
@@ -17,8 +15,6 @@ from test_auth_devices import _companion_pkg
 def _install_fake_cron():
     jobs_by_id: dict[str, dict] = {}
     counter = {"n": 0}
-
-    cron_jobs = types.ModuleType("cron.jobs")
 
     def create_job(**kwargs):
         counter["n"] += 1
@@ -49,23 +45,24 @@ def _install_fake_cron():
             jobs_by_id[job_id].update(changes)
         return jobs_by_id.get(job_id)
 
-    cron_jobs.create_job = create_job
-    cron_jobs.remove_job = remove_job
-    cron_jobs.get_job = get_job
-    cron_jobs.list_jobs = list_jobs
-    cron_jobs.pause_job = pause_job
-    cron_jobs.resume_job = resume_job
-    cron_jobs.update_job = update_job
-    cron_jobs.get_cron_output_dir = lambda: temp_dir("companion-cron-out-")
-    cron_jobs.compute_next_run = lambda schedule, last_run_at=None: None
-
-    cron_pkg = types.ModuleType("cron")
-    cron_pkg.jobs = cron_jobs
-    return cron_pkg, cron_jobs, jobs_by_id
+    stubs = {
+        "create_job": create_job,
+        "remove_job": remove_job,
+        "get_job": get_job,
+        "list_jobs": list_jobs,
+        "pause_job": pause_job,
+        "resume_job": resume_job,
+        "update_job": update_job,
+        "get_cron_output_dir": lambda: temp_dir("companion-cron-out-"),
+        "compute_next_run": lambda schedule, last_run_at=None: None,
+    }
+    return stubs, jobs_by_id
 
 
 class PlansTriggersAndAutomationsTest(unittest.TestCase):
     def setUp(self):
+        import muse.cron.jobs as cron_jobs
+
         self.folder, (
             self.companion_state,
             self.triggers,
@@ -74,8 +71,8 @@ class PlansTriggersAndAutomationsTest(unittest.TestCase):
             self.routines,
             self.feed,
         ) = load("companion_state", "triggers", "plans", "automations", "routines", "feed")
-        cron_pkg, cron_jobs, self.jobs_by_id = _install_fake_cron()
-        self.enterContext(mock.patch.dict(sys.modules, {"cron": cron_pkg, "cron.jobs": cron_jobs}))
+        stubs, self.jobs_by_id = _install_fake_cron()
+        self.enterContext(mock.patch.multiple(cron_jobs, **stubs))
         self.enterContext(
             mock.patch.object(self.triggers.net_safety, "is_safe_url_target", return_value=True)
         )

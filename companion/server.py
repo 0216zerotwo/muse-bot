@@ -549,14 +549,17 @@ def _connection_action(action: str) -> Mutation:
         name = str(payload.get("name") or "")
         try:
             if action == "test":
-                last = await asyncio.to_thread(connections.test_server, name)
+                last = await connections.test_server_async(name)
                 return await asyncio.to_thread(connections.presets_payload, last)
             last = await asyncio.to_thread(connections.run_action, action, name, payload)
         except connections.ConnectionError_ as exc:
             raise ApiError(exc.status, str(exc)) from None
-        # Live: Hermes reconnects its services and open chats see the new tools on their next turn.
+        # Live: reconnect MCP services on the active event loop so open chats see updated tools.
         try:
-            reload = await asyncio.to_thread(connections.apply_live, getattr(adapter, "gateway_runner", None))
+            reload = await connections.apply_live_async(
+                engine=getattr(adapter, "engine", None),
+                runner=getattr(adapter, "gateway_runner", None),
+            )
         except Exception as exc:
             logger.exception("companion: MCP reload failed")
             reload = {"ok": False, "failed": [name], "message": str(exc)}
@@ -806,7 +809,10 @@ async def _connection_custom(adapter: "CompanionAdapter", payload: dict[str, Any
         raise ApiError(exc.status, str(exc)) from None
     name = str(payload.get("name") or "").strip().lower()
     try:
-        reload = await asyncio.to_thread(connections.apply_live, getattr(adapter, "gateway_runner", None))
+        reload = await connections.apply_live_async(
+            engine=getattr(adapter, "engine", None),
+            runner=getattr(adapter, "gateway_runner", None),
+        )
     except Exception as exc:
         logger.exception("companion: MCP reload failed")
         reload = {"ok": False, "failed": [name], "message": str(exc)}
@@ -1297,7 +1303,7 @@ async def _transcribe(socket: WebSocket, frame: dict[str, Any]) -> None:
         return
 
     def run() -> dict[str, Any]:
-        from tools.transcription_tools import transcribe_audio
+        from muse.media.stt import transcribe_audio
 
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / f"voice{_AUDIO_SUFFIX.get(mime, '.webm')}"

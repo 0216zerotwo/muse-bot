@@ -47,7 +47,7 @@ _UPCOMING_LIMIT = 24
 def upcoming(job: dict[str, Any], now: Optional[float] = None) -> list[int]:
     """When it runs next, over the coming two days (ms), by Hermes's own clock rules: the iPhone app
     gets no push, so it sets its own notifications for these times."""
-    from cron.jobs import compute_next_run
+    from muse.cron.jobs import compute_next_run
 
     schedule = job.get("schedule") if isinstance(job.get("schedule"), dict) else {}
     if not job.get("enabled", True) or not schedule:
@@ -106,7 +106,7 @@ _KEEP_RUNS = 20
 
 
 def _run_files(job_id: str) -> list[Any]:
-    from cron.jobs import get_cron_output_dir
+    from muse.cron.jobs import get_cron_output_dir
 
     folder = get_cron_output_dir() / job_id
     if not folder.is_dir():
@@ -169,7 +169,7 @@ def _job(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_automations() -> dict[str, Any]:
-    from cron.jobs import list_jobs
+    from muse.cron.jobs import list_jobs
 
     jobs = [_job(job) for job in list_jobs(include_disabled=True) if isinstance(job, dict) and job.get("id")]
     jobs.sort(key=lambda j: j["state"]["next_run_at_ms"] or 2**62)
@@ -179,7 +179,7 @@ def list_automations() -> dict[str, Any]:
 def run_action(action: str, job_id: str) -> dict[str, Any]:
     """``enable`` (resume), ``disable`` (pause), ``delete`` or ``run`` (now)."""
     import contextlib
-    from cron import jobs
+    from muse.cron import jobs
 
     job = jobs.get_job(job_id) if isinstance(job_id, str) else None
     if job is None:

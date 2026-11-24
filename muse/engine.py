@@ -138,6 +138,7 @@ class ChatTurnEngine(AgentEngine):
         approvals: Any = None,
         on_goal_control: Optional[Callable[..., Any]] = None,
         tools_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
+        mcp_manager: Any = None,
     ) -> None:
         from .context import ContextCompactor, PromptAssembler
         from .helpers_orch import HelperOrchestrator
@@ -150,6 +151,8 @@ class ChatTurnEngine(AgentEngine):
         self._execute_tool = execute_tool
         self._on_goal_control = on_goal_control
         self._tools_provider = tools_provider
+        self._mcp_manager = mcp_manager
+        self._mcp_active = False
         self._assembler = PromptAssembler()
         self._compactor = ContextCompactor()
         self._actors: dict[str, Any] = {}
@@ -210,6 +213,9 @@ class ChatTurnEngine(AgentEngine):
         for actor in list(self._actors.values()):
             if actor.active_turn_id is not None:
                 await actor.handle_stop()
+        if self._mcp_active and self._mcp_manager is not None:
+            await self._mcp_manager.shutdown()
+            self._mcp_active = False
         if self._goal_controller is not None:
             self._goal_controller.close()
         if self._owns_db and self._db is not None and callable(getattr(self._db, "close", None)):
@@ -418,8 +424,98 @@ class ChatTurnEngine(AgentEngine):
     ) -> None:
         await self.get_actor(chat_id).deliver_proactive(text, job_id=job_id, attach_to_session=attach_to_session)
 
+    def _ensure_mcp_manager(self) -> Any:
+        if self._mcp_manager is None:
+            from .mcp import get_mcp_manager
+
+            self._mcp_manager = get_mcp_manager()
+        return self._mcp_manager
+
     async def reload_mcp(self) -> dict[str, Any]:
-        return {"ok": True, "message": "", "failed": []}
+        self._mcp_active = True
+        return await self._ensure_mcp_manager().reload_mcp()
+
+
+def adapt_video_provider_for_hermes(provider: Any) -> Any:
+    """Wrap a Muse ``VideoGenProvider`` as a Hermes ``agent.video_gen_provider.VideoGenProvider``."""
+    try:
+        from agent.video_gen_provider import VideoGenProvider as HermesVideoGenProvider
+    except ImportError:
+        return provider
+    if isinstance(provider, HermesVideoGenProvider):
+        return provider
+
+    class _HermesVideoAdapter(HermesVideoGenProvider):
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        @property
+        def name(self) -> str:
+            return str(self._inner.name)
+
+        @property
+        def display_name(self) -> str:
+            return str(getattr(self._inner, "display_name", self._inner.name))
+
+        def is_available(self) -> bool:
+            return bool(self._inner.is_available())
+
+        def list_models(self) -> list[dict[str, Any]]:
+            return list(self._inner.list_models())
+
+        def default_model(self) -> Optional[str]:
+            return self._inner.default_model()
+
+        def capabilities(self) -> dict[str, Any]:
+            return dict(self._inner.capabilities())
+
+        def generate(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            return self._inner.generate(prompt, **kwargs)
+
+    return _HermesVideoAdapter(provider)
+
+
+def adapt_transcription_provider_for_hermes(provider: Any) -> Any:
+    """Wrap a Muse ``TranscriptionProvider`` as a Hermes ``agent.transcription_provider``."""
+    try:
+        from agent.transcription_provider import TranscriptionProvider as HermesSTTProvider
+    except ImportError:
+        return provider
+    if isinstance(provider, HermesSTTProvider):
+        return provider
+
+    class _HermesTranscriptionAdapter(HermesSTTProvider):
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        @property
+        def name(self) -> str:
+            return str(self._inner.name)
+
+        @property
+        def display_name(self) -> str:
+            return str(getattr(self._inner, "display_name", self._inner.name))
+
+        def is_available(self) -> bool:
+            return bool(self._inner.is_available())
+
+        def list_models(self) -> list[dict[str, Any]]:
+            return list(self._inner.list_models())
+
+        def default_model(self) -> Optional[str]:
+            return self._inner.default_model()
+
+        @property
+        def streaming_capable(self) -> bool:
+            return bool(getattr(self._inner, "streaming_capable", False))
+
+        def open_stream_session(self, **kwargs: Any) -> Any:
+            return self._inner.open_stream_session(**kwargs)
+
+        def transcribe(self, file_path: str, **kwargs: Any) -> dict[str, Any]:
+            return self._inner.transcribe(file_path, **kwargs)
+
+    return _HermesTranscriptionAdapter(provider)
 
 
 _NATIVE_ENGINE_FACTORY: Optional[Callable[..., AgentEngine]] = None
@@ -444,6 +540,8 @@ __all__ = [
     "ChatTurnEngine",
     "EngineName",
     "HermesEngineBridge",
+    "adapt_transcription_provider_for_hermes",
+    "adapt_video_provider_for_hermes",
     "build_engine",
     "register_native_engine_factory",
 ]

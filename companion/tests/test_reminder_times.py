@@ -1,9 +1,8 @@
 """The phone's own notifications for reminders: what to say, and when it runs over the next two days."""
 
-import sys
-import types
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 from _loader import load
 
@@ -17,20 +16,17 @@ def iso(dt):
 
 class ReminderTimesTest(unittest.TestCase):
     def setUp(self):
-        _, (self.automations,) = load("automations")
-        # Every two hours from the last run: a stand-in for Hermes's own schedule rules (never the real cron).
-        jobs = types.ModuleType("cron.jobs")
-        jobs.compute_next_run = lambda schedule, last_run_at=None: iso(datetime.fromisoformat(last_run_at) + timedelta(hours=2))
-        self.saved = {name: sys.modules.get(name) for name in ("cron", "cron.jobs")}
-        sys.modules["cron"] = types.ModuleType("cron")
-        sys.modules["cron.jobs"] = jobs
+        import muse.cron.jobs as cron_jobs
 
-    def tearDown(self):
-        for name, module in self.saved.items():
-            if module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = module
+        _, (self.automations,) = load("automations")
+        # Every two hours from the last run: a stand-in for schedule rules (never the real cron).
+        self.enterContext(
+            mock.patch.object(
+                cron_jobs,
+                "compute_next_run",
+                lambda schedule, last_run_at=None: iso(datetime.fromisoformat(last_run_at) + timedelta(hours=2)),
+            )
+        )
 
     def job(self, **extra):
         return {"id": "w", "name": "喝水提醒（带当日次数）", "enabled": True, "deliver": "companion:main",
