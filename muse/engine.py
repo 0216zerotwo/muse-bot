@@ -123,6 +123,173 @@ class HermesEngineBridge(AgentEngine):
         return await asyncio.to_thread(_sync_reload)
 
 
+class ChatTurnEngine(AgentEngine):
+    """Native ``AgentEngine`` wiring one shared ``MuseDB``, ``muse.llm`` streaming, and per-chat ``ChatTurnActor``s."""
+
+    def __init__(
+        self,
+        sink: Any,
+        *,
+        db: Any = None,
+        stream_llm: Optional[Callable[..., Any]] = None,
+        execute_tool: Optional[Callable[..., Any]] = None,
+        on_goal_control: Optional[Callable[..., Any]] = None,
+        tools_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
+    ) -> None:
+        from .context import ContextCompactor, PromptAssembler
+
+        self._sink = sink
+        self._db = db
+        self._owns_db = db is None
+        self._custom_stream_llm = stream_llm
+        self._execute_tool = execute_tool
+        self._on_goal_control = on_goal_control
+        self._tools_provider = tools_provider
+        self._assembler = PromptAssembler()
+        self._compactor = ContextCompactor()
+        self._actors: dict[str, Any] = {}
+
+    @property
+    def name(self) -> EngineName:
+        return "native"
+
+    def _ensure_db(self) -> Any:
+        if self._db is None:
+            from .db import MuseDB
+
+            self._db = MuseDB()
+            self._owns_db = True
+        return self._db
+
+    async def start(self) -> None:
+        db = self._ensure_db()
+        if callable(getattr(db, "sync_from_legacy_state_db", None)):
+            await asyncio.to_thread(db.sync_from_legacy_state_db)
+
+    async def stop(self) -> None:
+        for actor in list(self._actors.values()):
+            if actor.active_turn_id is not None:
+                await actor.handle_stop()
+        if self._owns_db and self._db is not None and callable(getattr(self._db, "close", None)):
+            self._db.close()
+            self._db = None
+
+    async def _default_stream_llm(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model_override: Optional[dict[str, Any]] = None,
+        cancel_scope: Any = None,
+        actor: Any = None,
+    ) -> Any:
+        from .llm.auxiliary import create_transport, describe_images_if_blind, get_pooled_async_client
+        from .llm.providers import resolve_runtime_provider
+
+        del cancel_scope
+        ov = model_override or {}
+        runtime = await asyncio.to_thread(
+            resolve_runtime_provider,
+            ov.get("provider"),
+            target_model=ov.get("model"),
+            base_url=ov.get("base_url"),
+            api_key=ov.get("api_key"),
+            api_mode=ov.get("api_mode"),
+        )
+        if actor is not None:
+            actor.model_name = str(runtime.get("model") or actor.model_name)
+            actor.provider_name = str(runtime.get("provider") or actor.provider_name)
+            actor.base_url = str(runtime.get("base_url") or actor.base_url)
+            if isinstance(ctx_len := runtime.get("context_length"), int) and ctx_len > 0:
+                actor.context_window = ctx_len
+        chat_vision = bool(ov.get("vision", True))
+        prepared = await describe_images_if_blind(messages, chat_vision=chat_vision)
+        transport = create_transport(
+            api_mode=str(runtime.get("api_mode") or "chat_completions"),
+            base_url=str(runtime.get("base_url") or ""),
+            api_key=str(runtime.get("api_key") or ""),
+            provider=str(runtime.get("provider") or ""),
+            default_headers=runtime.get("extra_headers") or None,
+            client=get_pooled_async_client(),
+        )
+        tools = self._tools_provider() if self._tools_provider is not None else None
+        async for ev in transport.stream(
+            model=str(runtime.get("model") or ""),
+            messages=prepared,
+            tools=tools,
+            max_tokens=runtime.get("max_tokens"),
+            temperature=runtime.get("temperature"),
+            extra_body=runtime.get("extra_body") or None,
+        ):
+            yield ev
+
+    def get_actor(self, chat_id: str) -> Any:
+        from .turn_actor import ChatTurnActor
+
+        actor = self._actors.get(chat_id)
+        if actor is None:
+            async def _bound_stream(**kw: Any) -> Any:
+                stream_fn = self._custom_stream_llm
+                if stream_fn is not None:
+                    async for ev in stream_fn(**kw):
+                        yield ev
+                else:
+                    async for ev in self._default_stream_llm(actor=actor, **kw):
+                        yield ev
+
+            actor = ChatTurnActor(
+                chat_id,
+                db=self._ensure_db(),
+                sink=self._sink,
+                stream_llm=_bound_stream,
+                execute_tool=self._execute_tool,
+                assembler=self._assembler,
+                compactor=self._compactor,
+                on_goal_control=self._on_goal_control,
+            )
+            self._actors[chat_id] = actor
+        return actor
+
+    async def submit_turn(
+        self,
+        chat_id: str,
+        text: str,
+        turn_id: str,
+        files: Optional[list[tuple[str, str]]] = None,
+    ) -> None:
+        await self.get_actor(chat_id).submit(text, turn_id, files=files, emit_user_message=False)
+
+    async def submit_internal(self, chat_id: str, text: str) -> str:
+        return await self.get_actor(chat_id).submit_internal(text)
+
+    async def stop_turn(self, chat_id: str) -> None:
+        await self.get_actor(chat_id).handle_stop()
+
+    async def handle_goal_control(self, chat_id: str, command: str) -> None:
+        await self.get_actor(chat_id).submit(command.strip(), f"webui-system:{uuid.uuid4().hex}")
+
+    async def renew_session(self, chat_id: str) -> bool:
+        return await self.get_actor(chat_id).renew_session(silent=True)
+
+    def set_session_model_override(self, chat_id: str, override: Optional[dict[str, Any]]) -> None:
+        self.get_actor(chat_id).set_model_override(override)
+
+    async def regenerate(self, chat_id: str, turn_id: str) -> str:
+        return await self.get_actor(chat_id).regenerate(turn_id)
+
+    async def deliver_proactive(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        job_id: str,
+        attach_to_session: bool = False,
+    ) -> None:
+        await self.get_actor(chat_id).deliver_proactive(text, job_id=job_id, attach_to_session=attach_to_session)
+
+    async def reload_mcp(self) -> dict[str, Any]:
+        return {"ok": True, "message": "", "failed": []}
+
+
 _NATIVE_ENGINE_FACTORY: Optional[Callable[..., AgentEngine]] = None
 
 
@@ -140,4 +307,11 @@ def build_engine(adapter: Any = None, *, runner: Any = None, engine_name: Option
     return HermesEngineBridge(adapter=adapter, runner=runner)
 
 
-__all__ = ["AgentEngine", "EngineName", "HermesEngineBridge", "build_engine", "register_native_engine_factory"]
+__all__ = [
+    "AgentEngine",
+    "ChatTurnEngine",
+    "EngineName",
+    "HermesEngineBridge",
+    "build_engine",
+    "register_native_engine_factory",
+]

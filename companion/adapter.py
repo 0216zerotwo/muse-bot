@@ -27,6 +27,7 @@ from typing import Any, Optional
 from gateway.config import HomeChannel, Platform, persist_home_channel
 from gateway.platforms.base import BasePlatformAdapter, ExecApprovalPrompt, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
+from muse.streaming import ChatSink
 
 from . import activity
 from .approvals import DEFERRED_PREFIX, Approvals
@@ -71,7 +72,7 @@ class _Draft:
     draft_id: Optional[int] = None
 
 
-class CompanionAdapter(BasePlatformAdapter):
+class CompanionAdapter(BasePlatformAdapter, ChatSink):
     """Serves the companion web app and relays its chats to the agent."""
 
     # The gateway splits longer replies into "(1/2)" parts (chat apps' size limits) and reads this,
@@ -387,7 +388,7 @@ class CompanionAdapter(BasePlatformAdapter):
         for sockets in self._subs.values():
             sockets.discard(socket)
 
-    async def _emit(self, chat_id: str, event: dict[str, Any], *, persist: bool = False) -> None:
+    async def _emit(self, chat_id: str, event: dict[str, Any], *, persist: bool = False) -> dict[str, Any]:
         body = {**event, "chat_id": chat_id}
         if event.get("event") in ("delta", "message") and (event.get("source") or {}).get("kind") != "notice":
             self._note_turn_output(chat_id, event.get("turn_id"))
@@ -400,6 +401,82 @@ class CompanionAdapter(BasePlatformAdapter):
                 await socket.send_json(body)
             except Exception:
                 self.detach_all(socket)
+        return body
+
+    # -- ChatSink compatibility (native MuseEngine / ChatTurnActor) ------------------------------
+
+    def _use_native_engine(self) -> bool:
+        eng = getattr(self, "_engine", None)
+        if eng is not None:
+            return getattr(eng, "name", None) == "native"
+        from muse.paths import active_engine_name
+
+        return active_engine_name() == "native"
+
+    async def emit(self, chat_id: str, event: dict[str, Any], *, persist: bool = False) -> dict[str, Any]:
+        return await self._emit(chat_id, event, persist=persist)
+
+    def append_store(self, chat_id: str, event: dict[str, Any]) -> dict[str, Any]:
+        return self.store.append(chat_id, {**event, "chat_id": chat_id})
+
+    def remove_store_events(self, chat_id: str, predicate: Any) -> int:
+        return self.store.remove_events(chat_id, predicate)
+
+    def store_events(self, chat_id: str) -> list[dict[str, Any]]:
+        return self.store.events(chat_id)
+
+    def ensure_chat(self, chat_id: str) -> None:
+        self.store.ensure(chat_id)
+
+    def set_active_turn(self, chat_id: str, turn_id: Optional[str]) -> None:
+        if turn_id is None:
+            self._clear_active_turn(chat_id)
+        else:
+            self._set_active_turn(chat_id, turn_id)
+
+    def get_active_turn(self, chat_id: str) -> Optional[str]:
+        return self._turns.get(chat_id)
+
+    def note_turn_output(self, chat_id: str, turn_id: Optional[str]) -> None:
+        self._note_turn_output(chat_id, turn_id)
+
+    def is_main_chat(self, chat_id: str) -> bool:
+        return bool(chat_id and chat_id == companion_state.read_companion_state().get("chat_id"))
+
+    def transform_cards(self, chat_id: str, text: str, *, include_pick_card: bool = False) -> str:
+        out = avatar_make.with_pick_card(text) if (include_pick_card and self.is_main_chat(chat_id)) else text
+        return self._cards(out)
+
+    async def send_media_file(
+        self,
+        chat_id: str,
+        path: str,
+        *,
+        caption: str = "",
+        turn_id: Optional[str] = None,
+        reply_context: str = "",
+    ) -> bool:
+        import mimetypes
+
+        del turn_id
+        if reply_context and hasattr(self, "_last_reply"):
+            self._last_reply[chat_id] = reply_context
+        mime = mimetypes.guess_type(path)[0] or ""
+        if mime.startswith("image/"):
+            res = await self.send_image_file(chat_id, path, caption=caption or None)
+        elif mime.startswith("video/"):
+            res = await self.send_video(chat_id, path, caption=caption or None)
+        elif mime.startswith("audio/"):
+            res = await self.send_voice(chat_id, path, caption=caption or None)
+        else:
+            res = await self.send_document(chat_id, path, caption=caption or None)
+        return bool(getattr(res, "success", True))
+
+    def source_for_job(self, job_id: str) -> Optional[dict[str, Any]]:
+        return routines.source_for_job(job_id)
+
+    def schedule_push(self, title: str, preview: str, *, tag: str = "") -> None:
+        push.schedule_push(title, preview, tag=tag)
 
     # -- inbound (phone → agent) -----------------------------------------------------------------
 
@@ -451,6 +528,9 @@ class CompanionAdapter(BasePlatformAdapter):
             return await self.stop(chat_id)
         if text.strip().lower() in GOAL_CONTROLS:
             # Stopping or pausing a goal is a button in the app, not something the user said.
+            if self._use_native_engine():
+                await self.engine.handle_goal_control(chat_id, text.strip())
+                return ""
             await self.handle_message(self._event(chat_id, text.strip(), uuid.uuid4().hex))
             asyncio.get_running_loop().call_later(1.5, lambda: asyncio.ensure_future(self.push_goal_state(chat_id)))
             return ""
@@ -689,6 +769,9 @@ class CompanionAdapter(BasePlatformAdapter):
     async def submit_internal(self, chat_id: str, text: str, *, timeout: float = 600.0) -> str:
         """A turn the user didn't type (e.g. the outcome of an approval card): serialized behind any
         active turn on ``chat_id`` so it never clobbers a running turn's state."""
+        if self._use_native_engine() and callable(getattr(self.engine, "submit_internal", None)):
+            self.store.ensure(chat_id)
+            return await self.engine.submit_internal(chat_id, text)
         locks = getattr(self, "_internal_locks", None)
         if locks is None:
             locks = {}
@@ -702,6 +785,10 @@ class CompanionAdapter(BasePlatformAdapter):
     async def stop(self, chat_id: str) -> str:
         """The app's stop button (it sends ``/stop``): not a chat message, so no bubble, and the
         running turn keeps its id — Hermes cancels it and its completion closes the turn."""
+        if self._use_native_engine():
+            turn_id = self._turns.get(chat_id)
+            await self.engine.stop_turn(chat_id)
+            return turn_id or ""
         turn_id = self._turns.get(chat_id)
         if turn_id is None:
             # Nothing running here: just let the app leave its "working" state.
@@ -714,6 +801,9 @@ class CompanionAdapter(BasePlatformAdapter):
         """重新生成: the chat's last answer again. Its old answer (and what it did on the way) leaves
         the chat, and Hermes's /retry takes the agent's own history back to the question and asks it
         again, under the same turn, so the new answer takes the old one's place."""
+        if self._use_native_engine() and callable(getattr(self.engine, "regenerate", None)):
+            await self.engine.regenerate(chat_id, turn_id)
+            return
         if chat_id in self._turns:
             raise ValueError("还在回复，等它说完再重新生成")
         events = self.store.events(chat_id)
@@ -733,6 +823,9 @@ class CompanionAdapter(BasePlatformAdapter):
 
     async def _start_turn(self, chat_id: str, text: str, turn_id: str,
                           files: Optional[list[tuple[str, str]]] = None) -> str:
+        if self._use_native_engine():
+            await self.engine.submit_turn(chat_id, text, turn_id, files=files)
+            return turn_id
         active = self._turns.get(chat_id)
         queued_here = False
         if active is None or active == turn_id:
