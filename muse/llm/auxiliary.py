@@ -69,20 +69,12 @@ def create_transport(
     return OpenAIChatTransport(**kw)
 
 
-def _active_engine() -> str:
-    try:
-        from muse.paths import active_engine_name
-        return str(active_engine_name())
-    except ImportError:
-        return "hermes" if os.environ.get("MUSE_ENGINE", "native").strip().lower() == "hermes" else "native"
-
-
 def _record_usage_best_effort(
     *, task: str, model: str, provider: str, base_url: str, usage: Optional[UsageInfo],
     session_id: str = "", billing_mode: str = "",
 ) -> None:
-    """Log auxiliary usage into ``muse.db`` ONLY when ``active_engine_name() == 'native'``."""
-    if usage is None or _active_engine() != "native":
+    """Log auxiliary usage into ``muse.db``."""
+    if usage is None:
         return
     if not (usage.input_tokens or usage.output_tokens or usage.cache_read_tokens or usage.cache_write_tokens):
         return

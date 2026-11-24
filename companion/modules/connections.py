@@ -498,14 +498,9 @@ def _run_coro_sync(coro: Any) -> Any:
 
 async def apply_live_async(engine: Any = None, runner: Any = None) -> dict[str, Any]:
     """Bring running MCP servers in line with config on the active asyncio event loop."""
+    del runner
     if engine is not None and callable(getattr(engine, "reload_mcp", None)):
         return await engine.reload_mcp()
-    from muse.paths import active_engine_name
-
-    if active_engine_name() == "hermes" and runner is not None:
-        from muse.engine import HermesEngineBridge
-
-        return await HermesEngineBridge(runner=runner).reload_mcp()
     from muse.mcp import get_mcp_manager
 
     return await get_mcp_manager().reload_mcp()

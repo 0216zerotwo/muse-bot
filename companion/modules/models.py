@@ -906,41 +906,22 @@ def _media_period(since: float, data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def usage_summary(timezone: Optional[str] = None) -> dict[str, Any]:
-    from muse.paths import active_engine_name, get_legacy_state_db_path, get_muse_db_path
+    from muse.db import sync_from_legacy_state_db
+    from muse.paths import get_muse_db_path
+    from muse.runtime import use_shared_db
 
     data = read_models()
     periods = {label: _since(days, timezone) for label, days in (("today", 1), ("week", 7))}
     fetched: dict[str, list[tuple]] = {label: [] for label in periods}
-    if active_engine_name() == "native":
-        from muse.db import sync_from_legacy_state_db
-        from muse.runtime import use_shared_db
-
-        try:
-            sync_from_legacy_state_db()
-            muse_path = get_muse_db_path()
-            if muse_path.is_file():
-                with use_shared_db(db_path=muse_path) as db:
-                    for label, since in periods.items():
-                        fetched[label] = db.query_usage_since(since)
-        except (sqlite3.Error, OSError, ValueError) as exc:
-            logger.debug("companion: could not read usage from muse.db (%s)", type(exc).__name__)
-    else:
-        path = get_legacy_state_db_path()
-        query = (
-            "SELECT u.model, u.billing_base_url, u.task, s.source, SUM(u.api_call_count), "
-            "SUM(u.input_tokens + u.cache_read_tokens + u.cache_write_tokens), SUM(u.output_tokens), "
-            "SUM(u.cache_read_tokens) "
-            "FROM session_model_usage u LEFT JOIN sessions s ON s.id = u.session_id "
-            "WHERE u.last_seen >= ? GROUP BY u.model, u.billing_base_url, u.task, s.source"
-        )
-        if path.is_file():
-            try:
-                uri = path.resolve().as_uri() + "?mode=ro"
-                with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=5)) as db:
-                    for label, since in periods.items():
-                        fetched[label] = db.execute(query, (since,)).fetchall()
-            except (sqlite3.Error, OSError, ValueError) as exc:
-                logger.debug("companion: could not read usage from state.db (%s)", type(exc).__name__)
+    try:
+        sync_from_legacy_state_db()
+        muse_path = get_muse_db_path()
+        if muse_path.is_file():
+            with use_shared_db(db_path=muse_path) as db:
+                for label, since in periods.items():
+                    fetched[label] = db.query_usage_since(since)
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        logger.debug("companion: could not read usage from muse.db (%s)", type(exc).__name__)
     result = {}
     for label, since in periods.items():
         period = _period(fetched[label], data)

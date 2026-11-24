@@ -19,14 +19,14 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-from gateway.config import HomeChannel, Platform, persist_home_channel
-from gateway.platforms.base import BasePlatformAdapter, ExecApprovalPrompt, SendResult
-from gateway.platforms.event import MessageEvent, MessageType
+from muse.config_store import get_env_value
+from muse.interceptors import ExecApprovalPrompt
 from muse.streaming import ChatSink
 
 from . import activity
@@ -52,12 +52,88 @@ _DEBUG_FRAMES = bool(os.environ.get("COMPANION_DEBUG_FRAMES"))
 DEFAULT_WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
 
-def _env(name: str, default: str = "") -> str:
-    """Plugin settings from the profile's .env (read through Hermes's scoped secrets)."""
-    with contextlib.suppress(Exception):
-        from gateway.platforms._shared import get_scoped_secret
+class Platform(str, Enum):
+    COMPANION = "companion"
 
-        value = get_scoped_secret(name, "")
+    @classmethod
+    def _missing_(cls, value: object) -> "Platform":
+        obj = str.__new__(cls, str(value))
+        obj._name_ = str(value).upper()
+        obj._value_ = str(value)
+        return obj
+
+
+@dataclass
+class HomeChannel:
+    platform: Any
+    chat_id: str
+    name: str = ""
+
+
+@dataclass
+class SendResult:
+    success: bool = True
+    message_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+class MessageType(str, Enum):
+    TEXT = "text"
+    PHOTO = "photo"
+    DOCUMENT = "document"
+
+
+@dataclass
+class MessageSource:
+    platform: str = "companion"
+    chat_id: str = ""
+    chat_name: str = ""
+    chat_type: str = "dm"
+    user_id: str = ""
+    user_name: str = ""
+
+
+@dataclass
+class MessageEvent:
+    text: str
+    message_type: Any
+    source: MessageSource
+    user_id: str = ""
+    user_name: str = ""
+    message_id: str = ""
+    timestamp: Any = None
+    media_urls: list[str] = field(default_factory=list)
+    media_types: list[str] = field(default_factory=list)
+    media_text_inlined: list[Optional[bool]] = field(default_factory=list)
+
+
+class BasePlatformAdapter:
+    def __init__(self, config: Any = None, platform: Any = None, **kwargs: Any) -> None:
+        del kwargs
+        self.config = config
+        self.platform = platform
+        self.gateway_runner = None
+
+    def build_source(self, **kwargs: Any) -> MessageSource:
+        return MessageSource(**kwargs)
+
+    def _mark_connected(self) -> None:
+        pass
+
+    def _mark_disconnected(self) -> None:
+        pass
+
+    def _set_fatal_error(self, code: str, message: str, *, retryable: bool = True) -> None:
+        del code, message, retryable
+
+    async def handle_message(self, event: MessageEvent) -> None:
+        del event
+
+
+def _env(name: str, default: str = "") -> str:
+    """Read Companion settings from ``<HOME>/.env`` or process environment."""
+    with contextlib.suppress(Exception):
+        value = get_env_value(name)
         if value:
             return str(value)
     return os.environ.get(name, default) or default
@@ -233,14 +309,12 @@ class CompanionAdapter(BasePlatformAdapter, ChatSink):
         with contextlib.suppress(Exception):
             feed.ensure_job()
         home = HomeChannel(platform=Platform(PLATFORM), chat_id=chat_id, name="伙伴")
-        current = getattr(self.config, "home_channel", None)
-        if current is not None and getattr(current, "chat_id", None) == chat_id:
-            return
-        # Scheduled results and proactive messages land in the companion chat, and
-        # Hermes never asks the user to /sethome.
-        self.config.home_channel = home
-        with contextlib.suppress(Exception):
-            persist_home_channel(home)
+        cfg = getattr(self, "config", None)
+        if cfg is not None:
+            current = getattr(cfg, "home_channel", None)
+            if current is not None and getattr(current, "chat_id", None) == chat_id:
+                return
+            cfg.home_channel = home
 
     def _cards(self, text: str) -> str:
         """Small pages in the reply get a signed link the app can open."""
@@ -407,11 +481,7 @@ class CompanionAdapter(BasePlatformAdapter, ChatSink):
 
     def _use_native_engine(self) -> bool:
         eng = getattr(self, "_engine", None)
-        if eng is not None:
-            return getattr(eng, "name", None) == "native"
-        from muse.paths import active_engine_name
-
-        return active_engine_name() == "native"
+        return eng is not None and getattr(eng, "name", None) == "native"
 
     async def emit(self, chat_id: str, event: dict[str, Any], *, persist: bool = False) -> dict[str, Any]:
         return await self._emit(chat_id, event, persist=persist)
@@ -874,12 +944,8 @@ class CompanionAdapter(BasePlatformAdapter, ChatSink):
         )
 
     async def _send_exec_approval_prompt(self, prompt: ExecApprovalPrompt) -> SendResult:
-        """Hermes asks before a risky command: show it as an approval card (the agent waits)."""
+        """Show a held command prompt as an approval card routed to the user-facing chat."""
         if self.approvals.granted("run_command", {"reason": prompt.description}):
-            # A standing yes for this kind of command: answer for the user (the request is queued).
-            from tools.approval import resolve_gateway_approval
-
-            resolve_gateway_approval(prompt.session_key, "session")
             return SendResult(success=True)
         raw_chat = prompt.chat_id or activity._home_chat() or ""
         facing = self.facing_chat(raw_chat) if raw_chat else raw_chat
@@ -1123,14 +1189,11 @@ class CompanionAdapter(BasePlatformAdapter, ChatSink):
 
     async def send_clarify(self, chat_id: str, question: str, choices: Optional[list], clarify_id: str,
                            session_key: str, metadata: Optional[dict[str, Any]] = None) -> SendResult:
-        """Hermes asks the user something: its options become a choices card. Tapping one sends the
-        option's exact text, which Hermes takes as the answer; typing something else works too."""
+        """Render a clarify question and its options as a choices card."""
+        del clarify_id, session_key
         if not choices:
             return await self.send(chat_id, question, metadata=metadata)
-        from tools.clarify_gateway import get_pending, mark_awaiting_text
-
-        multi = bool(getattr(get_pending(clarify_id), "multi_select", False))
-        mark_awaiting_text(clarify_id)
+        multi = bool((metadata or {}).get("multi_select", False))
         options = []
         for choice in choices:
             text = str(choice).strip()
@@ -1259,10 +1322,6 @@ def _without_tips(text: str) -> str:
 
 def _translate_or_overlay(key: str) -> str:
     try:
-        from agent.i18n import t
-
-        return t(key).strip()
-    except ImportError:
         from .modules import persona
 
         return str(persona._COMPANION_ZH.get(key, "")).strip()

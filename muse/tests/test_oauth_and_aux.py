@@ -345,6 +345,7 @@ class AuxiliaryClientAndVisionFallbackTest(unittest.TestCase):
         # 1) Calling sync call_llm from inside a running event loop thread must NOT deadlock.
         async def invoke_from_running_loop():
             return auxiliary.call_llm(
+                task="",
                 messages=[{"role": "user", "content": "hi"}],
                 base_url="https://api.deepseek.com/v1",
                 api_key="sk-test",
@@ -353,28 +354,25 @@ class AuxiliaryClientAndVisionFallbackTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="muse-usage-test-") as td:
             with muse_home_override(td), mock.patch("httpx.AsyncClient", side_effect=patched_client):
-                # Hermes mode: call_llm succeeds AND never creates muse.db!
-                with mock.patch.dict(os.environ, {"MUSE_ENGINE": "hermes"}):
-                    resp = asyncio.run(invoke_from_running_loop())
-                    self.assertEqual(resp.choices[0].message.content, "safe")
-                    self.assertFalse(get_muse_db_path().exists())
+                # Explicit task="" skips usage recording and does not create muse.db:
+                resp = asyncio.run(invoke_from_running_loop())
+                self.assertEqual(resp.choices[0].message.content, "safe")
+                self.assertFalse(get_muse_db_path().exists())
 
-                # Native mode: default call_llm records system usage to real muse.db without double-counting cache;
-                # explicit task="" skips usage recording.
-                with mock.patch.dict(os.environ, {"MUSE_ENGINE": "native"}):
-                    auxiliary.call_llm(
-                        messages=[{"role": "user", "content": "hi"}],
-                        base_url="https://api.deepseek.com/v1",
-                        api_key="sk-test",
-                        model="deepseek-chat",
-                    )
-                    auxiliary.call_llm(
-                        task="",
-                        messages=[{"role": "user", "content": "skip"}],
-                        base_url="https://api.deepseek.com/v1",
-                        api_key="sk-test",
-                        model="deepseek-chat",
-                    )
+                # Default call_llm records system usage to real muse.db without double-counting cache:
+                auxiliary.call_llm(
+                    messages=[{"role": "user", "content": "hi"}],
+                    base_url="https://api.deepseek.com/v1",
+                    api_key="sk-test",
+                    model="deepseek-chat",
+                )
+                auxiliary.call_llm(
+                    task="",
+                    messages=[{"role": "user", "content": "skip"}],
+                    base_url="https://api.deepseek.com/v1",
+                    api_key="sk-test",
+                    model="deepseek-chat",
+                )
                 self.assertTrue(get_muse_db_path().is_file())
                 with MuseDB() as db:
                     rows = db.query_usage_since(0.0)

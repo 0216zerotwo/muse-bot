@@ -10,7 +10,7 @@ from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Literal
 
-EngineName = Literal["hermes", "native"]
+EngineName = Literal["native"]
 _UNSET = object()
 _MUSE_HOME_CTX: ContextVar[Path | object] = ContextVar("_MUSE_HOME_CTX", default=_UNSET)
 
@@ -86,7 +86,7 @@ def get_env_path(home: Path | None = None) -> Path:
 
 
 def active_engine_name() -> EngineName:
-    return "hermes" if os.environ.get("MUSE_ENGINE", "native").strip().lower() == "hermes" else "native"
+    return "native"
 
 
 __all__ = [

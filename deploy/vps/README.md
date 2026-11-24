@@ -1,6 +1,6 @@
 # 把伙伴装到 VPS
 
-一个脚本装好全部核心功能：伙伴本身、它的浏览器（无界面 Chromium）、浏览器自动化（Node + `@playwright/mcp`）、音频转码（`ffmpeg`）、Web Push 推送通知、HTTPS 证书、开机自启。镜像基于 `debian:13-slim` 按 `uv.lock` 固定版本从源码构建 Hermes Agent 并挂载本仓库的 `companion` 插件，前面放 Caddy 自动申请和续期 HTTPS 证书。
+一个脚本装好全部核心功能：伙伴本身、它的浏览器（无界面 Chromium）、浏览器自动化（Node + `@playwright/mcp`）、音频转码（`ffmpeg`）、Web Push 推送通知、HTTPS 证书、开机自启。镜像基于 `debian:13-slim` 按根 `pyproject.toml` 与 `uv.lock` 固定版本构建本仓库的 `muse/` 原生智能体运行时与 `companion/` 伙伴服务，前面放 Caddy 自动申请和续期 HTTPS 证书。
 
 ## 选 VPS
 
@@ -22,17 +22,18 @@ sudo apt-get install -y nodejs npm
 sudo npx -y musebot-server install 你的域名
 ```
 
-效果和下面的三步一样（下载并校验 GitHub Releases 里的同一份安装包），只是不用在电脑上打包、上传；以后升级运行 `sudo npx -y musebot-server update`。要带着电脑上的数据搬家，用下面的 `pack.sh --with-data`，再 `sudo npx -y musebot-server install 你的域名 --bundle 那个包`。
+效果和下面的三步一样（下载并校验 GitHub Releases 里的同一份安装包），只是不用在电脑上打包、上传；以后升级运行 `sudo npx -y musebot-server update`（支持从 `v1.x` 在线无感升级至 `v2.0`：原位保留配对设备与密钥，只读增量同步 `state.db -> muse.db`，探活失败自动回滚镜像与配置）。要带着电脑上的数据搬家，用下面的 `uv run musebot pack --with-data`（或 `pack.sh --with-data`），再 `sudo npx -y musebot-server install 你的域名 --bundle 那个包`。
 
 ## 三步装好（本地打包上传）
 
-**1. 在电脑上打包**（Git Bash / Linux / macOS，先确保已运行过 `cd web && npm ci && npm run build`）：
+**1. 在电脑上打包**（Windows PowerShell / macOS / Linux 通用，先确保已运行过 `python tools/setup.py` 或 `cd web && npm ci && npm run build`）：
 
-```bash
-bash deploy/vps/pack.sh --with-data
+```powershell
+uv run musebot pack --with-data
+# Linux / macOS 也可用：bash deploy/vps/pack.sh --with-data
 ```
 
-`--with-data` 会把当前 `HERMES_HOME` 里的记忆、对话、配置（自动重写为服务器路径与内置 `playwright-mcp`）和 API 密钥一起打进权限为 `0600` 的私有压缩包；不加就是全新安装，模型在 App 的 **设置 → 模型** 里添加。打好的包在 `deploy/dist/`。
+`--with-data` 会把当前 `MUSE_HOME`（或旧版 `HERMES_HOME`）里的记忆、对话数据库（在线热备 `muse.db` 与 `state.db`）、配置（自动重写为服务器路径与内置 `playwright-mcp`）和 API 密钥一起打进权限为 `0600` 的私有压缩包；不加就是全新安装，模型在 App 的 **设置 → 模型** 里添加。打好的包在 `deploy/dist/`。
 
 **2. 上传并安装**：
 
@@ -48,7 +49,7 @@ tar xzf musebot-server-*.tar.gz && bash musebot-server-*/install.sh 你的域名
 - **iPhone 原生 App**：按 [ios/README.md](../../ios/README.md) 安装 `.ipa` 后填入服务器地址与配对码（或直接打开一键连接链接）；也可直接用 Safari 打开 `https://你的域名` → 分享 → 添加到主屏幕。
 - **安卓 App**：打开 App 后把一键连接链接粘贴进去（或填入地址与配对码）。
 
-配对一次就固定下来，之后不用再连。
+配对一次就固定下来，之后升级服务器也不用重连。
 
 ## 可选：开启服务器本机离线语音识别（SenseVoice）
 
@@ -67,7 +68,7 @@ tar xzf musebot-server-*.tar.gz && bash musebot-server-*/install.sh 你的域名
 | 要做的事 | 怎么做 |
 |---|---|
 | 再配对一台设备 | `sudo npx musebot-server pair`（或 `python3 /opt/companion/tools/companion-pair.py https://你的域名`），或在已连上的设备里 **设置 → 设备 → 生成配对码** |
-| 升级 | `sudo npx -y musebot-server update`（先构建新镜像再原子替换，新版本若启动失败会自动回滚，数据保留） |
+| 升级 | `sudo npx -y musebot-server update`（先构建新镜像再原子替换，新版本若启动失败会自动回滚镜像与配置，数据保留） |
 | 看日志 | `sudo npx musebot-server logs -f`（加 `--caddy` 看 HTTPS 反向代理日志） |
 | 重启 | `sudo npx musebot-server restart`（或 `cd /opt/companion && docker compose restart`） |
 | 改 API 密钥 | App 的 **设置 → 模型**；或编辑 `/opt/companion/data/.env` 后重启 |
@@ -78,6 +79,6 @@ tar xzf musebot-server-*.tar.gz && bash musebot-server-*/install.sh 你的域名
 - 没有 Docker 时用官方脚本 `get.docker.com` 安装
 - 内存小于 3G 且没有交换空间时，新建 2G 交换文件 `/swapfile-companion`
 - `ufw` 防火墙开着时放行 `80/tcp`、`443/tcp`、`443/udp`
-- 程序和数据都在 `/opt/companion`（数据目录 `/opt/companion/data` 权限收紧为 `0700`，密钥文件 `0600`）；两个容器 `companion`（伙伴）和 `companion-caddy`（HTTPS）
+- 程序和数据都在 `/opt/companion`（数据目录 `/opt/companion/data` 权限收紧为 `0700`，`muse.db` 与密钥文件权限 `0600`）；两个容器 `companion`（伙伴）和 `companion-caddy`（HTTPS）
 
 伙伴只监听服务器本机的 8766 端口，外部流量全部经 Caddy 的 HTTPS 访问，且必须经过设备配对认证。

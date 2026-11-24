@@ -108,20 +108,13 @@ class PathsFoundationTest(TempDirMixin, unittest.TestCase):
         self.assertEqual(res_a, (home_a, home_a))
         self.assertEqual(res_b, (home_b, home_b))
 
-    def test_active_engine_name_feature_flag(self):
+    def test_active_engine_name_is_always_native(self):
         clean_env = {k: v for k, v in os.environ.items() if k != "MUSE_ENGINE"}
         with mock.patch.dict(os.environ, clean_env, clear=True):
             self.assertEqual(paths.active_engine_name(), "native")
-        for val, expected in (
-            ("native", "native"),
-            ("  NATIVE \n", "native"),
-            ("", "native"),
-            ("other", "native"),
-            ("hermes", "hermes"),
-            ("  HERMES \n", "hermes"),
-        ):
+        for val in ("native", "  NATIVE \n", "", "other", "hermes"):
             with mock.patch.dict(os.environ, {**clean_env, "MUSE_ENGINE": val}, clear=True):
-                self.assertEqual(paths.active_engine_name(), expected)
+                self.assertEqual(paths.active_engine_name(), "native")
 
 
 class TimeUtilsFoundationTest(TempDirMixin, unittest.TestCase):
@@ -374,64 +367,31 @@ class NoticesAndEngineFoundationTest(TempDirMixin, unittest.TestCase):
         )
         self.assertEqual(res.returncode, 0, "muse-home/auth.json must be ignored by .gitignore")
 
-    def test_engine_protocol_and_hermes_bridge_hooks(self):
-        events_handled: list[Any] = []
-        resets_called: list[Any] = []
-        evicted_keys: list[str] = []
-
-        class DummyRunner:
-            def __init__(self):
-                self._session_model_overrides: dict[str, Any] = {}
-
-            def _session_key_for_source(self, source: Any) -> str:
-                return f"companion:{source.chat_id}"
-
-            def _evict_cached_agent(self, key: str) -> None:
-                evicted_keys.append(key)
-
-            async def _handle_reset_command(self, event: Any) -> None:
-                resets_called.append(event)
-
+    def test_engine_protocol_and_factory_override(self):
         class DummyAdapter:
-            def __init__(self):
-                self.gateway_runner = DummyRunner()
-
-            async def handle_message(self, event: Any) -> None:
-                events_handled.append(event)
+            pass
 
         adapter = DummyAdapter()
-        bridge = engine.build_engine(adapter, engine_name="hermes")
-        self.assertIsInstance(bridge, engine.AgentEngine)
-        self.assertEqual(bridge.name, "hermes")
-
-        asyncio.run(bridge.submit_turn("main", "你好", "t-1"))
-        asyncio.run(bridge.stop_turn("main"))
-        asyncio.run(bridge.handle_goal_control("main", "/goal pause"))
-        self.assertEqual([e.text for e in events_handled], ["你好", "/stop", "/goal pause"])
-
-        self.assertTrue(asyncio.run(bridge.renew_session("main")))
-        self.assertEqual(len(resets_called), 1)
-        self.assertEqual(resets_called[0].text, "/reset")
-
-        bridge.set_session_model_override("helper-1", {"provider": "m-ds", "model": "deepseek-chat"})
-        self.assertEqual(
-            adapter.gateway_runner._session_model_overrides["companion:helper-1"],
-            {"provider": "m-ds", "model": "deepseek-chat"},
-        )
-        self.assertEqual(evicted_keys, ["companion:helper-1"])
-
-        bridge.set_session_model_override("helper-1", None)
-        self.assertNotIn("companion:helper-1", adapter.gateway_runner._session_model_overrides)
-
-        # Native engine builds the default NativeAgentEngine out-of-the-box, and respects custom factory overrides
-        native_default = engine.build_engine(adapter, engine_name="native")
+        native_default = engine.build_engine(adapter)
         self.assertIsInstance(native_default, engine.AgentEngine)
         self.assertEqual(native_default.name, "native")
+        self.assertFalse(hasattr(engine, "HermesEngineBridge"))
 
-        sentinel = types.SimpleNamespace(name="native")
+        sentinel = types.SimpleNamespace(
+            name="native",
+            start=lambda: None,
+            stop=lambda: None,
+            submit_turn=lambda *a, **k: None,
+            stop_turn=lambda *a, **k: None,
+            handle_goal_control=lambda *a, **k: None,
+            renew_session=lambda *a, **k: None,
+            set_session_model_override=lambda *a, **k: None,
+            reload_mcp=lambda *a, **k: None,
+        )
         engine.register_native_engine_factory(lambda adapter=None: sentinel)  # type: ignore[arg-type,return-value]
         self.addCleanup(engine.register_native_engine_factory, None)
-        self.assertIs(engine.build_engine(adapter, engine_name="native"), sentinel)
+        self.assertIs(engine.build_engine(adapter), sentinel)
+        self.assertIsInstance(sentinel, engine.AgentEngine)
 
 
 if __name__ == "__main__":

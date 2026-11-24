@@ -14,7 +14,7 @@ data/
 muse.db
 muse.db-*
 
-# --- Hermes Agent (the engine): fetched by tools/fetch-hermes.sh, and its Python environment -------
+# --- Legacy v1.x local checkouts (ignored until cleaned via `musebot doctor --clean-legacy`) --------
 hermes/
 hermes-env/
 

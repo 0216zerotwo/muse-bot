@@ -624,7 +624,10 @@ class NativeApprovalCoordinator:
             ctx=ctx, skip_policy_gates=skip_policy_gates,
         )
         with turn_context(ctx):
-            return await self._exec_runner(call)
+            out = self._exec_runner(call)
+            if asyncio.iscoroutine(out) or isinstance(out, Awaitable):
+                out = await out
+            return str(out)
 
 
 _HANDED_APPROVAL_SUFFIX = "（确认卡片已放到用户正在看的聊天里，用户同意后主助理会在那边接着做。先把做到哪一步写出来。）"
@@ -827,3 +830,22 @@ class ToolInterceptorPipeline:
             skip_policy_gates=skip_policy_gates,
         )
         return await self.execute_invocation(inv)
+
+
+@dataclass
+class ExecApprovalPrompt:
+    """Structured prompt payload for held terminal execution approvals."""
+
+    chat_id: str
+    session_key: str
+    text: str
+    actions: list[tuple[str, str, str]]
+    command: str
+    description: str
+    smart_denied: bool = False
+    metadata: Optional[dict[str, Any]] = None
+
+    @property
+    def choices(self) -> list[str]:
+        return [choice for _, choice, _ in self.actions]
+

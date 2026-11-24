@@ -165,24 +165,19 @@ class ModelsConfigAndHealthTest(unittest.TestCase):
         sha_before = hashlib.sha256(state_db.read_bytes()).hexdigest()
 
         with muse_home_override(home):
-            # 1) MUSE_ENGINE=hermes -> reads state.db read-only and NEVER creates muse.db!
-            with mock.patch.dict(os.environ, {"MUSE_ENGINE": "hermes"}):
-                s_hermes = self.models.usage_summary("Asia/Shanghai")
-                self.assertEqual(s_hermes["today"]["by_model"][0]["calls"], 3)
-                self.assertFalse(muse_db.exists())
-
-            # 2) MUSE_ENGINE=native -> syncs state.db -> muse.db (0-byte change to state.db) and matches wire output!
-            with mock.patch.dict(os.environ, {"MUSE_ENGINE": "native"}):
-                s_native = self.models.usage_summary("Asia/Shanghai")
-                g_native = self.goals.goal_state("main")
-                self.assertEqual(s_native["today"], s_hermes["today"])
-                self.assertEqual(
-                    g_native,
-                    {"active": True, "status": "active", "objective": "交付 PR-2", "ui_summary": "测试全绿"},
-                )
-                self.assertEqual(self.goals._session_id("main"), "s1")
-                self.assertTrue(muse_db.exists())
-                self.assertEqual(hashlib.sha256(state_db.read_bytes()).hexdigest(), sha_before)
+            # Native engine syncs legacy state.db -> muse.db (0-byte change to state.db) and matches wire output!
+            s_native = self.models.usage_summary("Asia/Shanghai")
+            g_native = self.goals.goal_state("main")
+            self.assertEqual(s_native["today"]["by_model"][0]["calls"], 3)
+            self.assertEqual(s_native["today"]["by_model"][0]["input_tokens"], 1800)
+            self.assertEqual(s_native["today"]["by_model"][0]["output_tokens"], 400)
+            self.assertEqual(
+                g_native,
+                {"active": True, "status": "active", "objective": "交付 PR-2", "ui_summary": "测试全绿"},
+            )
+            self.assertEqual(self.goals._session_id("main"), "s1")
+            self.assertTrue(muse_db.exists())
+            self.assertEqual(hashlib.sha256(state_db.read_bytes()).hexdigest(), sha_before)
 
             # Both DB files must have zero open handles on Windows!
             os.unlink(muse_db)

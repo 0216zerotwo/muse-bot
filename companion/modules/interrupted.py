@@ -18,21 +18,11 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 _FRESH_S = 6 * 3600
-# Hermes's own resume of a cleanly stopped turn starts within its start-up drain (30 s at most).
-# Native Muse settles immediately after start-up, so a 3 s grace window suffices.
-_SETTLE_S = 45
 _NATIVE_SETTLE_S = 3
 
 
 def settle_seconds() -> int:
-    try:
-        from muse.paths import active_engine_name
-
-        if active_engine_name() == "native":
-            return _NATIVE_SETTLE_S
-    except ImportError:
-        pass
-    return _SETTLE_S
+    return _NATIVE_SETTLE_S
 
 
 def cut_off(events: list[dict[str, Any]], now_ms: int, started_ms: int) -> Optional[dict[str, Any]]:

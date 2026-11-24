@@ -1,4 +1,4 @@
-"""Agent execution engine seam (``AgentEngine``) and transitional ``HermesEngineBridge``."""
+"""Native agent execution engine interface (``AgentEngine``) and ``ChatTurnEngine``."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ import uuid
 from collections.abc import Callable
 from typing import Any, Optional, Protocol, runtime_checkable
 
-from .paths import EngineName, active_engine_name
+from .paths import EngineName
 
 
 @runtime_checkable
 class AgentEngine(Protocol):
-    """Unified interface implemented by both ``HermesEngineBridge`` and native ``MuseEngine``."""
+    """Unified interface implemented by the native Muse execution engine."""
 
     @property
     def name(self) -> EngineName: ...
@@ -24,103 +24,6 @@ class AgentEngine(Protocol):
     async def renew_session(self, chat_id: str) -> bool: ...
     def set_session_model_override(self, chat_id: str, override: Optional[dict[str, Any]]) -> None: ...
     async def reload_mcp(self) -> dict[str, Any]: ...
-
-
-class HermesEngineBridge(AgentEngine):
-    """Transitional ``AgentEngine`` implementation wrapping Hermes ``gateway_runner`` hooks."""
-
-    def __init__(self, adapter: Any = None, *, runner: Any = None) -> None:
-        self._adapter = adapter
-        self._explicit_runner = runner
-
-    @property
-    def name(self) -> EngineName:
-        return "hermes"
-
-    @property
-    def runner(self) -> Any:
-        return self._explicit_runner if self._explicit_runner is not None else getattr(self._adapter, "gateway_runner", None)
-
-    async def start(self) -> None:
-        return None
-
-    async def stop(self) -> None:
-        return None
-
-    def _build_event(self, chat_id: str, text: str, message_id: str, files: Optional[list[tuple[str, str]]] = None) -> Any:
-        if self._adapter is not None and hasattr(self._adapter, "_event"):
-            event = self._adapter._event(chat_id, text, message_id)
-        else:
-            src = type("BridgeSource", (), {"platform": "companion", "chat_id": chat_id})()
-            event = type("BridgeEvent", (), {"text": text, "message_id": message_id, "source": src,
-                                             "media_urls": [], "media_types": [], "media_text_inlined": []})()
-        if files:
-            event.media_urls = [p for p, _ in files]
-            event.media_types = [m for _, m in files]
-            event.media_text_inlined = [None if m.startswith(("image/", "audio/", "video/")) else False for _, m in files]
-            try:
-                from gateway.platforms.event import MessageType
-
-                if all(m.startswith("image/") for _, m in files):
-                    event.message_type = MessageType.PHOTO
-                elif not any(m.startswith(("image/", "audio/", "video/")) for _, m in files):
-                    event.message_type = MessageType.DOCUMENT
-            except ImportError:
-                pass
-        return event
-
-    async def submit_turn(self, chat_id: str, text: str, turn_id: str, files: Optional[list[tuple[str, str]]] = None) -> None:
-        if self._adapter is None:
-            raise RuntimeError("HermesEngineBridge requires a bound adapter to submit turns")
-        await self._adapter.handle_message(self._build_event(chat_id, text, turn_id, files=files))
-
-    async def stop_turn(self, chat_id: str) -> None:
-        if self._adapter is not None:
-            await self._adapter.handle_message(self._build_event(chat_id, "/stop", uuid.uuid4().hex))
-
-    async def handle_goal_control(self, chat_id: str, command: str) -> None:
-        if self._adapter is not None:
-            await self._adapter.handle_message(self._build_event(chat_id, command.strip(), uuid.uuid4().hex))
-
-    async def renew_session(self, chat_id: str) -> bool:
-        reset = getattr(self.runner, "_handle_reset_command", None)
-        if not chat_id or not callable(reset):
-            return False
-        await reset(self._build_event(chat_id, "/reset", uuid.uuid4().hex))
-        return True
-
-    def set_session_model_override(self, chat_id: str, override: Optional[dict[str, Any]]) -> None:
-        runner = self.runner
-        key_fn = getattr(runner, "_session_key_for_source", None)
-        overrides = getattr(runner, "_session_model_overrides", None)
-        if runner is None or not chat_id or not callable(key_fn) or not isinstance(overrides, dict):
-            return
-        key = key_fn(self._build_event(chat_id, "", "").source)
-        if override == overrides.get(key):
-            return
-        if override:
-            overrides[key] = override
-        else:
-            overrides.pop(key, None)
-        if callable(evict := getattr(runner, "_evict_cached_agent", None)):
-            evict(key)
-
-    async def reload_mcp(self) -> dict[str, Any]:
-        def _sync_reload() -> dict[str, Any]:
-            from tools import mcp_tool_discovery as discovery
-            from tools.mcp_oauth import suppress_interactive_oauth
-
-            with suppress_interactive_oauth():
-                result = discovery.reconcile_mcp_servers_with_config()
-                failed = discovery.mcp_servers_not_connected()
-            if callable(refresh := getattr(self.runner, "_mcp_reload_refresh_cached_agents", None)):
-                refresh(False, None)
-            return {
-                "ok": not failed, "message": "", "failed": list(failed),
-                **{k: list(v) for k, v in (result or {}).items() if isinstance(v, (list, tuple, set))},
-            }
-
-        return await asyncio.to_thread(_sync_reload)
 
 
 class ChatTurnEngine(AgentEngine):
@@ -449,88 +352,6 @@ class ChatTurnEngine(AgentEngine):
         return await self._ensure_mcp_manager().reload_mcp()
 
 
-def adapt_video_provider_for_hermes(provider: Any) -> Any:
-    """Wrap a Muse ``VideoGenProvider`` as a Hermes ``agent.video_gen_provider.VideoGenProvider``."""
-    try:
-        from agent.video_gen_provider import VideoGenProvider as HermesVideoGenProvider
-    except ImportError:
-        return provider
-    if isinstance(provider, HermesVideoGenProvider):
-        return provider
-
-    class _HermesVideoAdapter(HermesVideoGenProvider):
-        def __init__(self, inner: Any) -> None:
-            self._inner = inner
-
-        @property
-        def name(self) -> str:
-            return str(self._inner.name)
-
-        @property
-        def display_name(self) -> str:
-            return str(getattr(self._inner, "display_name", self._inner.name))
-
-        def is_available(self) -> bool:
-            return bool(self._inner.is_available())
-
-        def list_models(self) -> list[dict[str, Any]]:
-            return list(self._inner.list_models())
-
-        def default_model(self) -> Optional[str]:
-            return self._inner.default_model()
-
-        def capabilities(self) -> dict[str, Any]:
-            return dict(self._inner.capabilities())
-
-        def generate(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            return self._inner.generate(prompt, **kwargs)
-
-    return _HermesVideoAdapter(provider)
-
-
-def adapt_transcription_provider_for_hermes(provider: Any) -> Any:
-    """Wrap a Muse ``TranscriptionProvider`` as a Hermes ``agent.transcription_provider``."""
-    try:
-        from agent.transcription_provider import TranscriptionProvider as HermesSTTProvider
-    except ImportError:
-        return provider
-    if isinstance(provider, HermesSTTProvider):
-        return provider
-
-    class _HermesTranscriptionAdapter(HermesSTTProvider):
-        def __init__(self, inner: Any) -> None:
-            self._inner = inner
-
-        @property
-        def name(self) -> str:
-            return str(self._inner.name)
-
-        @property
-        def display_name(self) -> str:
-            return str(getattr(self._inner, "display_name", self._inner.name))
-
-        def is_available(self) -> bool:
-            return bool(self._inner.is_available())
-
-        def list_models(self) -> list[dict[str, Any]]:
-            return list(self._inner.list_models())
-
-        def default_model(self) -> Optional[str]:
-            return self._inner.default_model()
-
-        @property
-        def streaming_capable(self) -> bool:
-            return bool(getattr(self._inner, "streaming_capable", False))
-
-        def open_stream_session(self, **kwargs: Any) -> Any:
-            return self._inner.open_stream_session(**kwargs)
-
-        def transcribe(self, file_path: str, **kwargs: Any) -> dict[str, Any]:
-            return self._inner.transcribe(file_path, **kwargs)
-
-    return _HermesTranscriptionAdapter(provider)
-
-
 _NATIVE_ENGINE_FACTORY: Optional[Callable[..., AgentEngine]] = None
 
 
@@ -540,23 +361,18 @@ def register_native_engine_factory(factory: Optional[Callable[..., AgentEngine]]
 
 
 def build_engine(adapter: Any = None, *, runner: Any = None, engine_name: Optional[EngineName] = None) -> AgentEngine:
-    selected = engine_name or active_engine_name()
-    if selected == "native":
-        if _NATIVE_ENGINE_FACTORY is not None:
-            return _NATIVE_ENGINE_FACTORY(adapter=adapter)
-        from .runtime import create_native_engine
+    del runner, engine_name
+    if _NATIVE_ENGINE_FACTORY is not None:
+        return _NATIVE_ENGINE_FACTORY(adapter=adapter)
+    from .runtime import create_native_engine
 
-        return create_native_engine(adapter=adapter)
-    return HermesEngineBridge(adapter=adapter, runner=runner)
+    return create_native_engine(adapter=adapter)
 
 
 __all__ = [
     "AgentEngine",
     "ChatTurnEngine",
     "EngineName",
-    "HermesEngineBridge",
-    "adapt_transcription_provider_for_hermes",
-    "adapt_video_provider_for_hermes",
     "build_engine",
     "register_native_engine_factory",
 ]

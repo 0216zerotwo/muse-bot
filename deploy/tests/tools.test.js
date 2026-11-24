@@ -51,9 +51,6 @@ function findPython() {
   const candidates = [
     path.join(REPO_ROOT, ".venv", "bin", "python"),
     path.join(REPO_ROOT, ".venv", "Scripts", "python.exe"),
-    path.join(REPO_ROOT, "hermes-env", "bin", "python"),
-    path.join(REPO_ROOT, "hermes-env", "Scripts", "python.exe"),
-    "E:\\personal_bot\\hermes-env\\Scripts\\python.exe",
   ];
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;
@@ -167,14 +164,14 @@ test("companion-pair.py distinguishes HTTP 401 auth rejection from offline servi
   }
 });
 
-test("tools/*.sh pass bash -n, --help, setup.sh extras parity, and fetch-hermes.sh partial-tree recovery", (t) => {
+test("tools/*.sh pass bash -n, --help, delegate to native musebot/setup.py, and remove legacy Hermes files", (t) => {
   const bash = findGitBash();
   if (!bash) {
     t.skip("Git Bash not found on this Windows machine");
     return;
   }
 
-  for (const script of ["tools/fetch-hermes.sh", "tools/setup.sh", "tools/run-hermes-gateway.sh"]) {
+  for (const script of ["tools/setup.sh", "tools/run-hermes-gateway.sh"]) {
     const syn = childProcess.spawnSync(bash, ["-n", script], { cwd: REPO_ROOT, encoding: "utf8" });
     assert.equal(syn.status, 0, `bash -n failed on ${script}: ${syn.stderr}`);
 
@@ -183,49 +180,17 @@ test("tools/*.sh pass bash -n, --help, setup.sh extras parity, and fetch-hermes.
     assert.match(help.stdout, /Usage:/);
   }
 
-  // Verify setup.sh delegates cleanly to cross-platform tools/setup.py + root pyproject.toml
+  // Verify setup.sh & run-hermes-gateway.sh delegate cleanly to cross-platform tools/setup.py & musebot serve
   const setupSh = fs.readFileSync(path.join(REPO_ROOT, "tools", "setup.sh"), "utf8");
   assert.match(setupSh, /tools\/setup\.py/);
   assert.match(setupSh, /pyproject\.toml/);
+  const runGatewaySh = fs.readFileSync(path.join(REPO_ROOT, "tools", "run-hermes-gateway.sh"), "utf8");
+  assert.match(runGatewaySh, /musebot.*serve/);
   const pyproject = fs.readFileSync(path.join(REPO_ROOT, "pyproject.toml"), "utf8");
   assert.match(pyproject, /musebot\s*=\s*"muse\.cli:main"/);
 
-  // Verify fetch-hermes.sh repairs an interrupted partial directory (only pyproject.toml present)
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musebot-fetch-test-"));
-  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
-
-  const commit = "8f5693af418256b89da17ddda18a9242f113dcf6";
-  const upstreamTree = path.join(tmp, `hermes-agent-${commit}`);
-  fs.mkdirSync(path.join(upstreamTree, "apps"), { recursive: true });
-  fs.writeFileSync(path.join(upstreamTree, "pyproject.toml"), "[project]\nname='hermes-agent'\n", "utf8");
-  fs.writeFileSync(path.join(upstreamTree, "uv.lock"), "version = 1\n", "utf8");
-  fs.writeFileSync(path.join(upstreamTree, "hermes"), "#!/usr/bin/env python3\n", "utf8");
-  fs.writeFileSync(path.join(upstreamTree, "apps", "skip.txt"), "skip\n", "utf8");
-
-  const fakeArchive = path.join(tmp, "fake-hermes.tar.gz");
-  const tarBuild = childProcess.spawnSync("tar", ["-czf", path.basename(fakeArchive), path.basename(upstreamTree)], {
-    cwd: tmp,
-    encoding: "utf8",
-  });
-  assert.equal(tarBuild.status, 0, tarBuild.stderr);
-
-  const partialTarget = path.join(tmp, "hermes-target");
-  fs.mkdirSync(partialTarget, { recursive: true });
-  // Simulate an interrupted download that wrote pyproject.toml and died before uv.lock / hermes
-  fs.writeFileSync(path.join(partialTarget, "pyproject.toml"), "partial\n", "utf8");
-
-  const fetchRun = childProcess.spawnSync(bash, ["tools/fetch-hermes.sh"], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      MUSEBOT_HERMES_TARGET: toPosixPath(partialTarget),
-      MUSEBOT_HERMES_URL: pathToFileURL(fakeArchive).href,
-    },
-  });
-  assert.equal(fetchRun.status, 0, `fetch-hermes.sh failed: ${fetchRun.stderr}\n${fetchRun.stdout}`);
-  assert.equal(fs.existsSync(path.join(partialTarget, "uv.lock")), true);
-  assert.equal(fs.existsSync(path.join(partialTarget, "hermes")), true);
-  assert.equal(fs.existsSync(path.join(partialTarget, "apps")), false);
-  assert.equal(fs.readFileSync(path.join(partialTarget, ".musebot-hermes-commit"), "utf8").trim(), commit);
+  // Legacy Hermes fetch/plugin files must be removed in v2.0
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "tools", "fetch-hermes.sh")), false);
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "tools", "hermes-config.example.yaml")), false);
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "companion", "plugin.yaml")), false);
 });

@@ -260,14 +260,7 @@ def register(ctx: Any) -> None:
     provider = _build_provider()
     if provider is None:
         return
-    try:
-        from muse.media.stt import register_transcription_provider
-
-        register_transcription_provider(provider)
-    except Exception:
-        pass
+    register_native()
     reg_fn = getattr(ctx, "register_transcription_provider", None)
     if callable(reg_fn):
-        from muse.engine import adapt_transcription_provider_for_hermes
-
-        reg_fn(adapt_transcription_provider_for_hermes(provider))
+        reg_fn(provider)
