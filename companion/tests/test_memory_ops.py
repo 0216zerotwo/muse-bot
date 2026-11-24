@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import os
-import sys
 import time
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,8 +20,10 @@ class FakeDiskMemoryStore:
     def load_from_disk(self) -> None:
         pass
 
-    def _entries_for(self, target: str) -> list[str]:
+    def entries_for(self, target: str) -> list[str]:
         return list(self.data.get(target, []))
+
+    _entries_for = entries_for
 
     def add(self, target: str, content: str) -> dict[str, object]:
         self.data.setdefault(target, []).append(content)
@@ -76,12 +76,10 @@ class MemoryOpsTest(unittest.TestCase):
         self.mem_dir = self.folder / "memories"
         self.disk_store = FakeDiskMemoryStore(self.mem_dir)
 
-        tools_pkg = types.ModuleType("tools")
-        mem_tool = types.ModuleType("tools.memory_tool")
-        mem_tool.load_on_disk_store = lambda: self.disk_store
-        mem_tool.get_memory_dir = lambda: self.mem_dir
-        tools_pkg.memory_tool = mem_tool
-        self.enterContext(mock.patch.dict(sys.modules, {"tools": tools_pkg, "tools.memory_tool": mem_tool}))
+        import muse.tools.memory_store as mem_store
+
+        self.enterContext(mock.patch.object(mem_store, "load_on_disk_store", side_effect=lambda *a, **kw: self.disk_store))
+        self.enterContext(mock.patch.object(mem_store, "get_memory_dir", side_effect=lambda *a, **kw: self.mem_dir))
 
     def test_tidy_keeps_due_state_when_llm_fails_then_succeeds_on_retry(self):
         for i in range(self.tidy.NEW_ENTRIES_DUE):

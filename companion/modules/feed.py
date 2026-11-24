@@ -266,14 +266,14 @@ def _post(args: dict[str, Any], **_: Any) -> str:
 def _interests() -> list[str]:
     """What the user cares about, from memory, freshest first: each line with how long ago it last
     came up, the fading ones marked (``memory_fade``). How to talk to the user is not a topic."""
-    from .memory import _store
+    from .memory import _entries, _store
     from .memory_fade import freshness
     from .memory_tidy import _read_meta
 
     meta, now, store = _read_meta(), time.time(), _store()
     rows = []
     for target in ("user", "memory"):
-        for entry in store._entries_for(target):
+        for entry in _entries(store, target):
             entry = " ".join(entry.split())
             if not entry or entry.startswith("【相处方式】"):
                 continue

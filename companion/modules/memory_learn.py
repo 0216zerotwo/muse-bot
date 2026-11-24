@@ -30,7 +30,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .llm import ask_json
-from .memory import _LOCK, _store
+from .memory import _LOCK, _entries, _store
 from .memory_tidy import _CHANGES_KEPT, _META_LOCK, _read_meta, _write_meta, mark_seen
 
 logger = logging.getLogger(__name__)
@@ -229,8 +229,8 @@ def learn(chat_store: Any, force: bool = False) -> dict[str, Any]:
         if not conversation:
             return {"learned": 0}
         store = _store()
-        entries = [e for e in store._entries_for("user") if e.strip()]
-        notes = [e for e in store._entries_for("memory") if e.strip()]
+        entries = [e for e in _entries(store, "user") if e.strip()]
+        notes = [e for e in _entries(store, "memory") if e.strip()]
         protected = set(meta["user_written"])
         lines = "\n".join(f"{i}. {'【用户写的】' if e in protected else ''}{' '.join(e.split())}"
                           for i, e in enumerate(entries, 1))

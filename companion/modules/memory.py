@@ -20,11 +20,17 @@ _LOCK = threading.Lock()
 
 
 def _store():
-    from tools.memory_tool import load_on_disk_store
+    from muse.tools.memory_store import load_on_disk_store
 
     store = load_on_disk_store()
     store.load_from_disk()
     return store
+
+
+def _entries(store: Any, target: str) -> list[str]:
+    if callable(getattr(store, "entries_for", None)):
+        return list(store.entries_for(target))
+    return list(store._entries_for(target))
 
 
 def _item_id(file: str, entry: str) -> str:
@@ -37,7 +43,7 @@ def read_memory() -> dict[str, Any]:
     for file, (target, title) in _TARGETS.items():
         items = [
             {"id": _item_id(file, entry), "file": file, "line": entry, "text": " ".join(entry.split())}
-            for entry in store._entries_for(target) if entry.strip()
+            for entry in _entries(store, target) if entry.strip()
         ]
         if items:
             sections.append({"file": file, "title": title, "items": items})
@@ -60,7 +66,7 @@ def forget_memory(file: str, line: str) -> dict[str, Any]:
     target = _TARGETS[file][0]
     with _LOCK:
         store = _store()
-        if line not in store._entries_for(target):
+        if line not in _entries(store, target):
             raise ValueError("这条记忆已经不在了，刷新一下再试")
         error = _failed(store.remove(target, line, matched_entry=line))
     if error:
@@ -126,13 +132,13 @@ def _split(entry: str) -> tuple[str, str]:
 def read_memory_doc() -> dict[str, Any]:
     store = _store()
     groups: dict[str, list[str]] = {}
-    for entry in store._entries_for("user"):
+    for entry in _entries(store, "user"):
         if entry.strip():
             section, text = _split(entry.strip())
             groups.setdefault(section, []).append(text)
     parts = [f"## {section}\n\n" + "\n\n".join(groups[section])
              for section in (*_sections(), _OTHER) if groups.get(section)]
-    notes = [entry.strip() for entry in store._entries_for("memory") if entry.strip()]
+    notes = [entry.strip() for entry in _entries(store, "memory") if entry.strip()]
     if notes:
         parts.append(f"## {_TARGETS['MEMORY.md'][1]}\n\n" + "\n\n".join(notes))
     if not parts:
@@ -142,7 +148,7 @@ def read_memory_doc() -> dict[str, Any]:
 
 def _updated_at() -> int | None:
     """When USER.md or MEMORY.md last changed (ms), for the card's date."""
-    from tools.memory_tool import get_memory_dir
+    from muse.tools.memory_store import get_memory_dir
 
     times = []
     for name in _TARGETS:
@@ -198,7 +204,7 @@ def write_memory_doc(text: str) -> dict[str, Any]:
     with _LOCK:
         store = _store()
         for file, (target, _) in _TARGETS.items():
-            current = [entry for entry in store._entries_for(target) if entry.strip()]
+            current = [entry for entry in _entries(store, target) if entry.strip()]
             removed = [entry for entry in current if entry.strip() not in wanted[file]]
             ops = [{"action": "remove", "old_text": entry, "matched_entry": entry} for entry in removed]
             existing = {entry.strip() for entry in current}

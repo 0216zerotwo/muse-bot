@@ -243,6 +243,19 @@ def sanitize_subprocess_env(
     }
 
 
+_GLOBAL_SECRETS_LOCK = threading.RLock()
+_GLOBAL_REGISTERED_SECRETS: set[str] = set()
+
+
+def register_global_secret(secret: Optional[str]) -> None:
+    """Register a runtime secret (e.g. `browser_vault` password/OTP) across all `ToolResultBounder`s."""
+    if isinstance(secret, str):
+        trimmed = secret.strip()
+        if len(trimmed) >= 6:
+            with _GLOBAL_SECRETS_LOCK:
+                _GLOBAL_REGISTERED_SECRETS.add(trimmed)
+
+
 class ToolResultBounder:
     """Redacts known secrets, OAuth tokens, and `browser_vault` passwords to `[REDACTED]` and bounds size."""
 
@@ -254,12 +267,16 @@ class ToolResultBounder:
 
     def register_secret(self, secret: Optional[str]) -> None:
         if isinstance(secret, str) and len(secret.strip()) >= 6:
+            val = secret.strip()
             with self._lock:
-                self._registered.add(secret.strip())
+                self._registered.add(val)
+            register_global_secret(val)
 
     def _collect_known_secrets(self) -> list[str]:
+        with _GLOBAL_SECRETS_LOCK:
+            secrets_set = set(_GLOBAL_REGISTERED_SECRETS)
         with self._lock:
-            secrets_set = set(self._registered)
+            secrets_set.update(self._registered)
         for env_key, env_val in os.environ.items():
             if (env_key.upper() in _STRIP_SUBPROCESS_ENV_EXACT or _SECRET_KEY_NAME.search(env_key)) and len(env_val.strip()) >= 8:
                 secrets_set.add(env_val.strip())

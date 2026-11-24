@@ -85,26 +85,25 @@ def _save(vendor_id: str, kind: str, entry: dict[str, Any]) -> None:
 
 
 def _extract(urls: list[str]) -> list[tuple[str, str]]:
-    from model_tools import _run_async
-    from tools.web_tools import web_extract_tool
+    from muse.tools.web import web_extract_handler
 
     try:
-        raw = json.loads(_run_async(web_extract_tool(urls, format="markdown", char_limit=_PAGE_CHARS)))
+        raw = json.loads(web_extract_handler({"urls": urls, "max_chars": _PAGE_CHARS}))
     except Exception as exc:
-        logger.info("companion: reading pricing pages failed (%s)", exc)
+        logger.info("companion: reading pricing pages failed (%s)", type(exc).__name__)
         return []
     return [(str(r.get("url") or ""), str(r.get("content") or "")) for r in raw.get("results") or []
             if isinstance(r, dict) and not r.get("error") and len(str(r.get("content") or "")) > 200]
 
 
 def _search(entry: dict[str, Any], kind: str) -> list[str]:
-    from tools.web_tools import web_search_tool
+    from muse.tools.web import web_search_handler
 
     query = f"{entry['name']} API {_KIND_WORDS[kind]} 价格 模型 ID 官方"
     try:
-        raw = json.loads(web_search_tool(query, limit=5))
+        raw = json.loads(web_search_handler({"query": query, "max_results": 5}))
     except Exception as exc:
-        logger.info("companion: searching for pricing failed (%s)", exc)
+        logger.info("companion: searching for pricing failed (%s)", type(exc).__name__)
         return []
     rows = ((raw.get("data") or {}).get("web") or []) if isinstance(raw, dict) else []
     domain = str(entry.get("domain") or "")

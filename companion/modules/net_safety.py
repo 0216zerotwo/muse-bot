@@ -109,13 +109,7 @@ def _builtin_is_safe_url(url: str) -> bool:
 
 def is_safe_url(url: str) -> bool:
     """True when ``url`` is a public HTTP(S) URL safe for server-side fetching."""
-    if not is_safe_url_target(url):
-        return False
-    try:
-        from tools.url_safety import is_safe_url as hermes_is_safe_url
-    except Exception:
-        return _builtin_is_safe_url(url)
-    return bool(hermes_is_safe_url(url))
+    return _builtin_is_safe_url(url)
 
 
 def fetch_bytes(

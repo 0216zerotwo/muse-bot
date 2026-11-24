@@ -130,6 +130,14 @@ FORBIDDEN_LEGACY_IMPORTS: frozenset[str] = frozenset({
     "hermes_cli.runtime_provider",
     "agent.auxiliary_client",
     "agent.models_dev",
+    "agent.vault_store",
+    "tools.memory_tool",
+    "tools.memory_tool_store",
+    "tools.skill_manager_tool",
+    "tools.skills_tool",
+    "tools.browser_vault_tool",
+    "tools.url_safety",
+    "tools.web_tools",
 })
 
 

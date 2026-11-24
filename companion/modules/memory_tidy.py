@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .fs_atomic import atomic_write_json
-from .memory import _LOCK, _TARGETS, _store
+from .memory import _LOCK, _TARGETS, _entries, _store
 from .paths import get_webui_dir
 
 logger = logging.getLogger(__name__)
@@ -123,7 +123,7 @@ def drop_user_written(entries: Any) -> None:
 
 def _all_entries() -> dict[str, list[str]]:
     store = _store()
-    return {target: [e for e in store._entries_for(target) if e.strip()] for target, _ in _TARGETS.values()}
+    return {target: [e for e in _entries(store, target) if e.strip()] for target, _ in _TARGETS.values()}
 
 
 def due() -> bool:
@@ -298,7 +298,7 @@ def undo(change_id: str) -> None:
             raise ValueError("这条改动已经撤销过了")
         target = _TARGETS[change["file"]][0]
         with _LOCK:
-            current = _store()._entries_for(target)
+            current = _entries(_store(), target)
             ops = []
             if change["after"] is not None and change["after"] in current:
                 ops.append({"action": "remove", "old_text": change["after"], "matched_entry": change["after"]})
