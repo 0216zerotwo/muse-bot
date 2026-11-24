@@ -5,7 +5,7 @@
 #   bash install.sh                     # 没有域名：自动用 <服务器IP>.sslip.io
 #   bash install.sh --yes bot.example.com
 #
-# 装好后，所有功能都在服务器上：伙伴（Hermes + 伙伴插件，在 Docker 里）、它的浏览器（Chromium，无界面）、
+# 装好后，所有功能都在服务器上：伙伴（Muse 原生运行时，在 Docker 里）、它的浏览器（Chromium，无界面）、
 # 浏览器自动化（Node + Playwright）、语音转码（ffmpeg）、HTTPS（Caddy 自动申请证书）、开机自启。
 #
 # 这台服务器上会改动的：
@@ -21,6 +21,11 @@ APP="${MUSEBOT_APP_DIR:-/opt/companion}"
 DATA="$APP/data"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PORT="${COMPANION_PORT:-8766}"
+OS_RELEASE_FILE="${MUSEBOT_OS_RELEASE:-/etc/os-release}"
+HEALTH_ATTEMPTS="${MUSEBOT_HEALTH_ATTEMPTS:-90}"
+HTTPS_ATTEMPTS="${MUSEBOT_HTTPS_ATTEMPTS:-30}"
+[[ "$HEALTH_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || HEALTH_ATTEMPTS=90
+[[ "$HTTPS_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || HTTPS_ATTEMPTS=30
 CLI_DOMAIN=""
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -82,11 +87,26 @@ valid_domain() {
   [[ "$d" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]]
 }
 
+read_os_field() {
+  local key="$1"
+  awk -F= -v k="$key" '
+    $1 == k {
+      val = substr($0, index($0, "=") + 1)
+      gsub(/^["'\'' ]+|["'\'' \r]+$/, "", val)
+      print val
+      exit
+    }
+  ' "$OS_RELEASE_FILE"
+}
+
 # ---------- 检查（都通过才开始改动） ----------
 [ "$(id -u)" -eq 0 ] || die "请用 root 运行：sudo bash install.sh"
-[ -d "$HERE/hermes" ] && [ -d "$HERE/companion" ] && [ -f "$HERE/web/companion.html" ] && [ -f "$HERE/Dockerfile" ] \
+[ -d "$HERE/muse" ] && [ -d "$HERE/companion" ] && [ -f "$HERE/pyproject.toml" ] && [ -f "$HERE/uv.lock" ] && [ -f "$HERE/web/companion.html" ] && [ -f "$HERE/Dockerfile" ] && [ -f "$HERE/tools/companion-pair.py" ] \
   || die "安装包不完整：请在解压出来的目录里运行 install.sh"
-. /etc/os-release
+[ -r "$OS_RELEASE_FILE" ] || die "找不到系统版本文件：$OS_RELEASE_FILE"
+ID="$(read_os_field ID)"
+ID_LIKE="$(read_os_field ID_LIKE)"
+PRETTY_NAME="$(read_os_field PRETTY_NAME)"
 case " ${ID:-} ${ID_LIKE:-} " in *" debian "*|*" ubuntu "*) ;; *) die "只支持 Debian / Ubuntu（这台是 ${PRETTY_NAME:-未知}）" ;; esac
 case "$(uname -m)" in x86_64|aarch64) ;; *) die "不支持的 CPU 架构：$(uname -m)" ;; esac
 command -v systemctl >/dev/null || die "这台服务器没有 systemd"
@@ -170,7 +190,20 @@ printf 'data\ncaddy\n' > "$HERE/.dockerignore"
 docker build -t companion-hermes:next -f "$HERE/Dockerfile" "$HERE"
 
 cleanup_backups() {
-  rm -rf "$APP/hermes.prev" "$APP/muse.prev" "$DATA/plugins/companion.prev" "$DATA/companion-lib.prev" "$DATA/companion-web.prev" "$APP/VERSION.prev"
+  rm -rf \
+    "$APP/hermes.prev" \
+    "$APP/muse.prev" \
+    "$APP/companion.prev" \
+    "$APP/pyproject.toml.prev" \
+    "$APP/uv.lock.prev" \
+    "$APP/Dockerfile.prev" \
+    "$APP/docker-compose.yml.prev" \
+    "$APP/VERSION.prev" \
+    "$APP/LICENSE.prev" \
+    "$APP/NOTICE.prev" \
+    "$DATA/plugins/companion.prev" \
+    "$DATA/companion-lib.prev" \
+    "$DATA/companion-web.prev"
 }
 
 rollback_upgrade() {
@@ -183,8 +216,41 @@ rollback_upgrade() {
   fi
   if [ -d "$APP/muse.prev" ]; then
     rm -rf "$APP/muse" && mv "$APP/muse.prev" "$APP/muse"
+  else
+    rm -rf "$APP/muse"
+  fi
+  if [ -d "$APP/companion.prev" ]; then
+    rm -rf "$APP/companion" && mv "$APP/companion.prev" "$APP/companion"
+  else
+    rm -rf "$APP/companion"
+  fi
+  if [ -f "$APP/pyproject.toml.prev" ]; then
+    mv -f "$APP/pyproject.toml.prev" "$APP/pyproject.toml"
+  else
+    rm -f "$APP/pyproject.toml"
+  fi
+  if [ -f "$APP/uv.lock.prev" ]; then
+    mv -f "$APP/uv.lock.prev" "$APP/uv.lock"
+  else
+    rm -f "$APP/uv.lock"
+  fi
+  if [ -f "$APP/Dockerfile.prev" ]; then
+    mv -f "$APP/Dockerfile.prev" "$APP/Dockerfile"
+  fi
+  if [ -f "$APP/docker-compose.yml.prev" ]; then
+    mv -f "$APP/docker-compose.yml.prev" "$APP/docker-compose.yml"
+  fi
+  if [ -f "$APP/VERSION.prev" ]; then
+    mv -f "$APP/VERSION.prev" "$APP/VERSION"
+  fi
+  if [ -f "$APP/LICENSE.prev" ]; then
+    mv -f "$APP/LICENSE.prev" "$APP/LICENSE"
+  fi
+  if [ -f "$APP/NOTICE.prev" ]; then
+    mv -f "$APP/NOTICE.prev" "$APP/NOTICE"
   fi
   if [ -d "$DATA/plugins/companion.prev" ]; then
+    mkdir -p "$DATA/plugins"
     rm -rf "$DATA/plugins/companion" && mv "$DATA/plugins/companion.prev" "$DATA/plugins/companion"
   fi
   if [ -d "$DATA/companion-lib.prev" ]; then
@@ -193,45 +259,49 @@ rollback_upgrade() {
   if [ -d "$DATA/companion-web.prev" ]; then
     rm -rf "$DATA/companion-web" && mv "$DATA/companion-web.prev" "$DATA/companion-web"
   fi
-  if [ -f "$APP/VERSION.prev" ]; then
-    mv -f "$APP/VERSION.prev" "$APP/VERSION"
-  fi
   chown -R 10000:10000 "$DATA"
   (cd "$APP" && docker compose up -d --no-build) || true
 }
 
 # ---------- 原子放置程序（数据目录保留） ----------
 say "放置程序（数据目录不动）"
-mkdir -p "$APP" "$DATA/plugins"
+mkdir -p "$APP" "$DATA"
 chmod 755 "$APP"
 chmod 700 "$DATA"
 
 if [ "$UPGRADE" -eq 1 ]; then
   cleanup_backups
-  docker image inspect companion-hermes:latest >/dev/null 2>&1 && docker tag companion-hermes:latest companion-hermes:prev || true
-  [ -d "$APP/hermes" ] && cp -a "$APP/hermes" "$APP/hermes.prev"
-  [ -d "$APP/muse" ] && cp -a "$APP/muse" "$APP/muse.prev"
-  [ -d "$DATA/plugins/companion" ] && cp -a "$DATA/plugins/companion" "$DATA/plugins/companion.prev"
-  [ -d "$DATA/companion-lib" ] && cp -a "$DATA/companion-lib" "$DATA/companion-lib.prev"
-  [ -d "$DATA/companion-web" ] && cp -a "$DATA/companion-web" "$DATA/companion-web.prev"
-  [ -f "$APP/VERSION" ] && cp -a "$APP/VERSION" "$APP/VERSION.prev"
+  if docker image inspect companion-hermes:latest >/dev/null 2>&1; then
+    docker tag companion-hermes:latest companion-hermes:prev || true
+  fi
+  if [ -d "$APP/hermes" ]; then mv "$APP/hermes" "$APP/hermes.prev"; fi
+  if [ -d "$APP/muse" ]; then cp -a "$APP/muse" "$APP/muse.prev"; fi
+  if [ -d "$APP/companion" ]; then cp -a "$APP/companion" "$APP/companion.prev"; fi
+  if [ -f "$APP/pyproject.toml" ]; then cp -a "$APP/pyproject.toml" "$APP/pyproject.toml.prev"; fi
+  if [ -f "$APP/uv.lock" ]; then cp -a "$APP/uv.lock" "$APP/uv.lock.prev"; fi
+  if [ -f "$APP/Dockerfile" ]; then cp -a "$APP/Dockerfile" "$APP/Dockerfile.prev"; fi
+  if [ -f "$APP/docker-compose.yml" ]; then cp -a "$APP/docker-compose.yml" "$APP/docker-compose.yml.prev"; fi
+  if [ -f "$APP/VERSION" ]; then cp -a "$APP/VERSION" "$APP/VERSION.prev"; fi
+  if [ -f "$APP/LICENSE" ]; then cp -a "$APP/LICENSE" "$APP/LICENSE.prev"; fi
+  if [ -f "$APP/NOTICE" ]; then cp -a "$APP/NOTICE" "$APP/NOTICE.prev"; fi
+  if [ -d "$DATA/plugins/companion" ]; then mv "$DATA/plugins/companion" "$DATA/plugins/companion.prev"; fi
+  if [ -d "$DATA/companion-lib" ]; then mv "$DATA/companion-lib" "$DATA/companion-lib.prev"; fi
+  if [ -d "$DATA/companion-web" ]; then cp -a "$DATA/companion-web" "$DATA/companion-web.prev"; fi
 fi
 
 docker tag companion-hermes:next companion-hermes:latest
 docker rmi companion-hermes:next >/dev/null 2>&1 || true
 
-rm -rf "$APP/hermes.new" && cp -r "$HERE/hermes" "$APP/hermes.new" && rm -rf "$APP/hermes" && mv "$APP/hermes.new" "$APP/hermes"
-if [ -d "$HERE/muse" ]; then
-  rm -rf "$APP/muse.new" && cp -r "$HERE/muse" "$APP/muse.new" && rm -rf "$APP/muse" && mv "$APP/muse.new" "$APP/muse"
-  mkdir -p "$DATA/companion-lib.new" && cp -r "$HERE/muse" "$DATA/companion-lib.new/muse" && rm -rf "$DATA/companion-lib" && mv "$DATA/companion-lib.new" "$DATA/companion-lib"
-fi
-rm -rf "$DATA/plugins/companion.new" && cp -r "$HERE/companion" "$DATA/plugins/companion.new" && rm -rf "$DATA/plugins/companion" && mv "$DATA/plugins/companion.new" "$DATA/plugins/companion"
+rm -rf "$APP/muse.new" && cp -r "$HERE/muse" "$APP/muse.new" && rm -rf "$APP/muse" && mv "$APP/muse.new" "$APP/muse"
+rm -rf "$APP/companion.new" && cp -r "$HERE/companion" "$APP/companion.new" && rm -rf "$APP/companion" && mv "$APP/companion.new" "$APP/companion"
+cp "$HERE/pyproject.toml" "$APP/pyproject.toml.new" && mv -f "$APP/pyproject.toml.new" "$APP/pyproject.toml"
+cp "$HERE/uv.lock" "$APP/uv.lock.new" && mv -f "$APP/uv.lock.new" "$APP/uv.lock"
 rm -rf "$DATA/companion-web.new" && cp -r "$HERE/web" "$DATA/companion-web.new" && rm -rf "$DATA/companion-web" && mv "$DATA/companion-web.new" "$DATA/companion-web"
 mkdir -p "$APP/tools" && cp "$HERE/tools/companion-pair.py" "$APP/tools/"
 cp "$HERE/install.sh" "$HERE/uninstall.sh" "$HERE/README.md" "$HERE/Dockerfile" "$APP/"
-[ -f "$HERE/VERSION" ] && cp "$HERE/VERSION" "$APP/VERSION"
-[ -f "$HERE/LICENSE" ] && cp "$HERE/LICENSE" "$APP/LICENSE"
-[ -f "$HERE/NOTICE" ] && cp "$HERE/NOTICE" "$APP/NOTICE"
+if [ -f "$HERE/VERSION" ]; then cp "$HERE/VERSION" "$APP/VERSION"; fi
+if [ -f "$HERE/LICENSE" ]; then cp "$HERE/LICENSE" "$APP/LICENSE"; fi
+if [ -f "$HERE/NOTICE" ]; then cp "$HERE/NOTICE" "$APP/NOTICE"; fi
 printf '%s\n' "$DOMAIN" > "$APP/domain"
 
 if [ ! -f "$DATA/config.yaml" ]; then
@@ -242,16 +312,11 @@ if [ ! -f "$DATA/config.yaml" ]; then
     say "写初始配置（模型在 App 的 设置 → 模型 里添加）"
     cat > "$DATA/config.yaml" <<'YAML'
 # 伙伴服务器（install.sh 写的初始配置）。API 密钥放在同目录的 .env，不写在这里。
-plugins:
-  enabled:
-    - companion-platform
-  disabled: []
 streaming:
   enabled: true
   cursor: ""
 display:
   language: zh
-  file_mutation_verifier: false
 agent:
   max_turns: 100
 timezone: Asia/Shanghai
@@ -270,16 +335,18 @@ fi
 
 mkdir -p "$DATA/companion/mcp/browser"
 chmod 700 "$DATA"
-[ -d "$DATA/vault" ] && chmod 700 "$DATA/vault"
+if [ -d "$DATA/vault" ]; then chmod 700 "$DATA/vault"; fi
 for secret_file in \
   "$DATA/.env" \
   "$DATA/auth.json" \
+  "$DATA/muse.db" \
   "$DATA/state.db" \
   "$DATA/projects.db" \
   "$DATA/config.yaml" \
   "$DATA/companion/devices.json" \
-  "$DATA/companion/media.key"; do
-  [ -f "$secret_file" ] && chmod 600 "$secret_file"
+  "$DATA/companion/media.key" \
+  "$DATA/companion/vapid_private.pem"; do
+  if [ -f "$secret_file" ]; then chmod 600 "$secret_file"; fi
 done
 chown -R 10000:10000 "$DATA"  # the container runs as uid 10000 (see Dockerfile)
 
@@ -321,7 +388,7 @@ services:
       - COMPANION_WEB_DIST=/opt/data/companion-web
       - COMPANION_PUBLIC_URL=https://$DOMAIN
       - NO_PROXY=127.0.0.1,localhost
-    command: ["hermes", "gateway", "run"]
+    command: ["musebot", "serve"]
   caddy:
     image: caddy:2
     container_name: companion-caddy
@@ -335,13 +402,20 @@ COMPOSE
 # ---------- 启动并验证 ----------
 say "启动"
 cd "$APP"
-docker compose up -d --no-build
+if ! docker compose up -d --no-build; then
+  docker logs companion --tail 80 >&2 || true
+  if [ "$UPGRADE" -eq 1 ]; then
+    rollback_upgrade
+    die "新版本容器启动失败，已自动回滚到上一版本"
+  fi
+  die "伙伴容器启动失败。看日志：docker logs companion --tail 80"
+fi
 rm -f "$APP/.uninstalled"
 touch "$APP/.installed"
 
 say "等伙伴启动"
 STARTED=0
-for _ in $(seq 1 90); do
+for _ in $(seq 1 "$HEALTH_ATTEMPTS"); do
   boot_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/webui/bootstrap" || true)
   if [ "$boot_code" = "200" ] || [ "$boot_code" = "401" ]; then
     STARTED=1
@@ -358,15 +432,20 @@ if [ "$STARTED" -ne 1 ]; then
   die "伙伴没有启动起来。看日志：docker logs companion --tail 80"
 fi
 cleanup_backups
+rm -rf "$DATA/companion-lib"
+if [ -f "$DATA/muse.db" ]; then chmod 600 "$DATA/muse.db"; fi
+for wal_file in "$DATA/muse.db-wal" "$DATA/muse.db-shm"; do
+  if [ -f "$wal_file" ]; then chmod 600 "$wal_file"; fi
+done
 
 say "等 HTTPS 证书"
-for i in $(seq 1 30); do
+for i in $(seq 1 "$HTTPS_ATTEMPTS"); do
   # Through Caddy a request is not local, so an unpaired one gets 401 (or 200 if open): HTTPS works.
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "https://$DOMAIN/webui/bootstrap" || true)
   if [ "$code" = "401" ] || [ "$code" = "200" ]; then
     break
   fi
-  [ "$i" -eq 30 ] && warn "https://$DOMAIN 还打不开：确认域名已解析到这台服务器，云服务商的安全组放行了 80 和 443。证书申请好后会自动生效"
+  [ "$i" -eq "$HTTPS_ATTEMPTS" ] && warn "https://$DOMAIN 还打不开：确认域名已解析到这台服务器，云服务商的安全组放行了 80 和 443。证书申请好后会自动生效"
   sleep 4
 done
 

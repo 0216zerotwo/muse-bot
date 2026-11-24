@@ -246,8 +246,8 @@ def pack_server_bundle(
     try:
         with tarfile.open(tmp_archive, mode="w:gz", format=tarfile.PAX_FORMAT) as tf:
             # Core source packages & root lockfiles
-            _tar_add_tree(tf, root / "muse", f"{top}/muse")
-            _tar_add_tree(tf, root / "companion", f"{top}/companion")
+            _tar_add_tree(tf, root / "muse", f"{top}/muse", skip_rel_prefixes=("tests",))
+            _tar_add_tree(tf, root / "companion", f"{top}/companion", skip_rel_prefixes=("tests",))
             _tar_add_tree(tf, web, f"{top}/web")
             for rel_src, arc_rel in (
                 ("pyproject.toml", "pyproject.toml"),
@@ -568,14 +568,29 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 
+def _default_host() -> str:
+    return (os.environ.get("COMPANION_HOST") or "").strip() or "127.0.0.1"
+
+
+def _default_port() -> int:
+    raw = (os.environ.get("COMPANION_PORT") or "").strip()
+    try:
+        port = int(raw)
+        if 1 <= port <= 65535:
+            return port
+    except ValueError:
+        pass
+    return 8766
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="musebot", description="Muse Bot native server CLI")
     parser.add_argument("--version", action="version", version=f"musebot {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_serve = sub.add_parser("serve", help="Run the unified Muse Bot ASGI server")
-    p_serve.add_argument("--host", default="127.0.0.1")
-    p_serve.add_argument("--port", type=int, default=8766)
+    p_serve.add_argument("--host", default=_default_host())
+    p_serve.add_argument("--port", type=int, default=_default_port())
     p_serve.add_argument("--home", default=None)
     p_serve.add_argument("--engine", choices=("native", "hermes"), default=None)
     p_serve.set_defaults(func=_cmd_serve)

@@ -79,6 +79,10 @@ function writeFiles(baseDir, fileMap) {
   }
 }
 
+function sha256File(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
 function buildTarGz(stageDir, topFolder, archivePath) {
   const res = childProcess.spawnSync("tar", ["-czf", path.basename(archivePath), topFolder], {
     cwd: stageDir,
@@ -88,19 +92,20 @@ function buildTarGz(stageDir, topFolder, archivePath) {
 }
 
 const VALID_BUNDLE_FILES = {
-  "musebot-server-v1.0.0/install.sh": "#!/usr/bin/env bash\necho ok\n",
-  "musebot-server-v1.0.0/uninstall.sh": "#!/usr/bin/env bash\necho ok\n",
-  "musebot-server-v1.0.0/Dockerfile": "FROM debian:13-slim\n",
-  "musebot-server-v1.0.0/LICENSE": "MIT\n",
-  "musebot-server-v1.0.0/NOTICE": "Muse Bot\n",
-  "musebot-server-v1.0.0/hermes/pyproject.toml": "[project]\nname='hermes-agent'\n",
-  "musebot-server-v1.0.0/hermes/uv.lock": "version = 1\n",
-  "musebot-server-v1.0.0/hermes/.env.example": "OPENAI_API_KEY=\n",
-  "musebot-server-v1.0.0/hermes/.envrc": "dotenv_if_exists\n",
-  "musebot-server-v1.0.0/hermes/tools/data/readme.txt": "nested data folder inside hermes source\n",
-  "musebot-server-v1.0.0/companion/plugin.yaml": "name: companion-platform\n",
-  "musebot-server-v1.0.0/web/companion.html": "<!doctype html><title>Muse Bot</title>\n",
-  "musebot-server-v1.0.0/tools/companion-pair.py": "print('pair')\n",
+  "musebot-server-v2.0.0/install.sh": "#!/usr/bin/env bash\necho ok\n",
+  "musebot-server-v2.0.0/uninstall.sh": "#!/usr/bin/env bash\necho ok\n",
+  "musebot-server-v2.0.0/Dockerfile": "FROM debian:13-slim\n",
+  "musebot-server-v2.0.0/LICENSE": "MIT\n",
+  "musebot-server-v2.0.0/NOTICE": "Muse Bot\n",
+  "musebot-server-v2.0.0/pyproject.toml": "[project]\nname='muse-bot'\n",
+  "musebot-server-v2.0.0/uv.lock": "version = 1\n",
+  "musebot-server-v2.0.0/muse/__init__.py": "__version__ = '2.0.0'\n",
+  "musebot-server-v2.0.0/muse/.env.example": "OPENAI_API_KEY=\n",
+  "musebot-server-v2.0.0/muse/.envrc": "dotenv_if_exists\n",
+  "musebot-server-v2.0.0/muse/tools/data/readme.txt": "nested data folder inside muse source\n",
+  "musebot-server-v2.0.0/companion/server.py": "app = None\n",
+  "musebot-server-v2.0.0/web/companion.html": "<!doctype html><title>Muse Bot</title>\n",
+  "musebot-server-v2.0.0/tools/companion-pair.py": "print('pair')\n",
 };
 
 test("CLI --help and -h are non-destructive across every subcommand", (t) => {
@@ -172,67 +177,85 @@ test("CLI version prints installer version and optional installed server VERSION
   assert.equal(plain.status, 0);
   assert.equal(plain.stdout.trim(), PKG_VERSION);
 
-  fs.writeFileSync(path.join(installedApp, "VERSION"), "v1.2.3\n", "utf8");
+  fs.writeFileSync(path.join(installedApp, "VERSION"), "v2.0.0\n", "utf8");
   const withServer = runCli(["--version"], { MUSEBOT_APP_DIR: installedApp });
   assert.equal(withServer.status, 0);
-  assert.equal(withServer.stdout.trim(), `musebot-server ${PKG_VERSION} (server: v1.2.3)`);
+  assert.equal(withServer.stdout.trim(), `musebot-server ${PKG_VERSION} (server: v2.0.0)`);
 });
 
-test("check-bundle accepts clean bundle (including .env.example, .envrc, nested hermes data/) and rejects secrets or missing files", (t) => {
+test("check-bundle accepts clean v2.0 bundle and rejects secrets, DBs, homes, or missing files", (t) => {
   const tmp = makeTempDir("musebot-bundle-");
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
   writeFiles(tmp, VALID_BUNDLE_FILES);
   const cleanArchive = path.join(tmp, "clean.tar.gz");
-  buildTarGz(tmp, "musebot-server-v1.0.0", cleanArchive);
+  buildTarGz(tmp, "musebot-server-v2.0.0", cleanArchive);
 
   const okRes = runCli(["check-bundle", cleanArchive]);
   assert.equal(okRes.status, 0, okRes.stderr);
   assert.match(okRes.stdout, /安装包齐全，没有数据和密钥/);
 
-  // Missing LICENSE must fail
-  const missingDir = makeTempDir("musebot-missing-");
-  t.after(() => fs.rmSync(missingDir, { recursive: true, force: true }));
-  const withoutLicense = { ...VALID_BUNDLE_FILES };
-  delete withoutLicense["musebot-server-v1.0.0/LICENSE"];
-  writeFiles(missingDir, withoutLicense);
-  const missingArchive = path.join(missingDir, "missing.tar.gz");
-  buildTarGz(missingDir, "musebot-server-v1.0.0", missingArchive);
-  const missingRes = runCli(["check-bundle", missingArchive]);
-  assert.equal(missingRes.status, 1);
-  assert.match(missingRes.stderr, /缺 LICENSE/);
+  // Missing required v2.0 files must fail
+  for (const requiredRel of ["LICENSE", "pyproject.toml", "uv.lock", "muse/__init__.py", "companion/server.py"]) {
+    const missingDir = makeTempDir("musebot-missing-");
+    t.after(() => fs.rmSync(missingDir, { recursive: true, force: true }));
+    const withoutFile = { ...VALID_BUNDLE_FILES };
+    delete withoutFile[`musebot-server-v2.0.0/${requiredRel}`];
+    writeFiles(missingDir, withoutFile);
+    const missingArchive = path.join(missingDir, "missing.tar.gz");
+    buildTarGz(missingDir, "musebot-server-v2.0.0", missingArchive);
+    const missingRes = runCli(["check-bundle", missingArchive]);
+    assert.equal(missingRes.status, 1, `Expected check-bundle to fail when missing ${requiredRel}`);
+    assert.match(missingRes.stderr, new RegExp(`缺 ${requiredRel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  }
 
-  // Forbidden secret paths
+  // Forbidden secret, DB, and home paths
   const forbiddenCases = [
-    "musebot-server-v1.0.0/data/config.yaml",
-    "musebot-server-v1.0.0/.env",
-    "musebot-server-v1.0.0/companion/.env.local",
-    "musebot-server-v1.0.0/vault/items.json",
-    "musebot-server-v1.0.0/companion/media.key",
-    "musebot-server-v1.0.0/state.db",
-    "musebot-server-v1.0.0/projects.db",
-    "musebot-server-v1.0.0/signing/companion.jks",
-    "musebot-server-v1.0.0/signing/keystore-password.txt",
+    "musebot-server-v2.0.0/data/config.yaml",
+    "musebot-server-v2.0.0/muse-home/config.yaml",
+    "musebot-server-v2.0.0/hermes-home/config.yaml",
+    "musebot-server-v2.0.0/.env",
+    "musebot-server-v2.0.0/companion/.env.local",
+    "musebot-server-v2.0.0/muse/.env-prod",
+    "musebot-server-v2.0.0/vault/items.json",
+    "musebot-server-v2.0.0/companion/media.key",
+    "musebot-server-v2.0.0/companion/vapid_private.pem",
+    "musebot-server-v2.0.0/muse.db",
+    "musebot-server-v2.0.0/muse.db-wal",
+    "musebot-server-v2.0.0/muse.db-shm",
+    "musebot-server-v2.0.0/state.db",
+    "musebot-server-v2.0.0/state.db-wal",
+    "musebot-server-v2.0.0/state.db-shm",
+    "musebot-server-v2.0.0/projects.db",
+    "musebot-server-v2.0.0/signing/companion.jks",
+    "musebot-server-v2.0.0/signing/keystore-password.txt",
   ];
   for (const badPath of forbiddenCases) {
     const rel = badPath.replace(/^[^/]+\//, "");
     assert.equal(musebot.isForbiddenBundlePath(rel), true, `Expected forbidden: ${rel}`);
   }
-  assert.equal(musebot.isForbiddenBundlePath("hermes/.env.example"), false);
-  assert.equal(musebot.isForbiddenBundlePath("hermes/.envrc"), false);
-  assert.equal(musebot.isForbiddenBundlePath("hermes/tools/data/readme.txt"), false);
+  assert.equal(musebot.isForbiddenBundlePath("muse/.env.example"), false);
+  assert.equal(musebot.isForbiddenBundlePath("muse/.envrc"), false);
+  assert.equal(musebot.isForbiddenBundlePath("muse/tools/data/readme.txt"), false);
+  assert.equal(musebot.isForbiddenBundlePath("muse/db.py"), false);
 
-  const leakyDir = makeTempDir("musebot-leaky-");
-  t.after(() => fs.rmSync(leakyDir, { recursive: true, force: true }));
-  writeFiles(leakyDir, {
-    ...VALID_BUNDLE_FILES,
-    "musebot-server-v1.0.0/companion/.env.production": "SECRET=1\n",
-  });
-  const leakyArchive = path.join(leakyDir, "leaky.tar.gz");
-  buildTarGz(leakyDir, "musebot-server-v1.0.0", leakyArchive);
-  const leakyRes = runCli(["check-bundle", leakyArchive]);
-  assert.equal(leakyRes.status, 1);
-  assert.match(leakyRes.stderr, /不该公开的文件/);
+  for (const leakyEntry of [
+    "musebot-server-v2.0.0/companion/.env.production",
+    "musebot-server-v2.0.0/muse.db-wal",
+    "musebot-server-v2.0.0/muse-home/auth.json",
+  ]) {
+    const leakyDir = makeTempDir("musebot-leaky-");
+    t.after(() => fs.rmSync(leakyDir, { recursive: true, force: true }));
+    writeFiles(leakyDir, {
+      ...VALID_BUNDLE_FILES,
+      [leakyEntry]: "SECRET=1\n",
+    });
+    const leakyArchive = path.join(leakyDir, "leaky.tar.gz");
+    buildTarGz(leakyDir, "musebot-server-v2.0.0", leakyArchive);
+    const leakyRes = runCli(["check-bundle", leakyArchive]);
+    assert.equal(leakyRes.status, 1, `Expected check-bundle to reject ${leakyEntry}`);
+    assert.match(leakyRes.stderr, /不该公开的文件/);
+  }
 });
 
 test("Path traversal & SHA-256 checksum helpers enforce strict integrity", (t) => {
@@ -240,7 +263,7 @@ test("Path traversal & SHA-256 checksum helpers enforce strict integrity", (t) =
   assert.equal(musebot.isUnsafeArchiveEntry("musebot/../../etc/shadow"), true);
   assert.equal(musebot.isUnsafeArchiveEntry("/etc/passwd"), true);
   assert.equal(musebot.isUnsafeArchiveEntry("C:/Windows/win.ini"), true);
-  assert.equal(musebot.isUnsafeArchiveEntry("musebot-server-v1.0.0/install.sh"), false);
+  assert.equal(musebot.isUnsafeArchiveEntry("musebot-server-v2.0.0/install.sh"), false);
 
   const tmp = makeTempDir("musebot-sha-");
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -258,26 +281,36 @@ test("Path traversal & SHA-256 checksum helpers enforce strict integrity", (t) =
   assert.doesNotThrow(() => musebot.verifyArchiveSha256(sample, `${expected}  musebot-server.tar.gz\n`));
 });
 
-test("Dockerfile and VPS shell scripts enforce runtime, security, and upgrade invariants", () => {
+test("Dockerfile, VPS shell scripts, and host companion-pair.py enforce v2.0 invariants", () => {
   const dockerfile = fs.readFileSync(path.join(REPO_ROOT, "deploy", "vps", "Dockerfile"), "utf8");
   const installSh = fs.readFileSync(path.join(REPO_ROOT, "deploy", "vps", "install.sh"), "utf8");
   const uninstallSh = fs.readFileSync(path.join(REPO_ROOT, "deploy", "vps", "uninstall.sh"), "utf8");
+  const pairPy = fs.readFileSync(path.join(REPO_ROOT, "tools", "companion-pair.py"), "utf8");
 
-  // Dockerfile invariants
+  // Dockerfile invariants (v2.0 pure native runtime on Python 3.14)
   assert.match(dockerfile, /PYTHONUNBUFFERED=1/);
   assert.match(dockerfile, /@playwright\/mcp@0\.0\.83/);
-  assert.match(dockerfile, /uv sync --frozen --no-dev --inexact/);
+  assert.match(dockerfile, /uv python install 3\.14/);
+  assert.match(dockerfile, /uv sync --frozen --no-dev/);
+  assert.doesNotMatch(dockerfile, /--inexact/);
+  assert.doesNotMatch(dockerfile, /install-stamp\.json/);
+  assert.doesNotMatch(dockerfile, /COPY hermes\//);
   assert.match(dockerfile, /import py_vapid, http_ece, anthropic, sqlite3/);
   assert.match(dockerfile, /sqlite_version_info >= \(3, 51, 3\)/);
   assert.match(dockerfile, /tokenize=['"]?trigram/);
-  assert.match(dockerfile, /install-stamp\.json/);
   assert.match(dockerfile, /\/usr\/local\/bin\/gateway/);
-  assert.match(dockerfile, /CMD \["hermes", "gateway", "run"\]/);
+  assert.match(dockerfile, /exec \/opt\/venv\/bin\/musebot serve "\$@"/);
+  assert.match(dockerfile, /MUSE_HOME=\/opt\/data/);
+  assert.match(dockerfile, /HERMES_HOME=\/opt\/data/);
+  assert.match(dockerfile, /CMD \["musebot", "serve"\]/);
 
-  // install.sh invariants
-  assert.match(installSh, /command: \["hermes", "gateway", "run"\]/);
+  // install.sh invariants (v2.0 runtime + dual .prev rollback + muse.db 0600)
+  assert.match(installSh, /command: \["musebot", "serve"\]/);
   assert.match(installSh, /docker build -t companion-hermes:next/);
   assert.match(installSh, /rollback_upgrade/);
+  assert.match(installSh, /docker-compose\.yml\.prev/);
+  assert.match(installSh, /plugins\/companion\.prev/);
+  assert.match(installSh, /chmod 600 "\$DATA\/muse\.db"/);
   assert.match(installSh, /boot_code=.*"200".*"401"/s);
   assert.match(installSh, /chmod 700 "\$DATA"/);
   assert.match(installSh, /chmod 600 "\$secret_file"/);
@@ -286,13 +319,31 @@ test("Dockerfile and VPS shell scripts enforce runtime, security, and upgrade in
   assert.match(installSh, /ufw allow 443\/udp/);
   assert.match(installSh, /max_turns: 100/);
 
-  // uninstall.sh preserves caddy certs on non-purge and removes .installed
-  assert.match(uninstallSh, /rm -f "\$APP\/\.installed"/);
+  // uninstall.sh preserves caddy certs on non-purge and cleans all v2.0 build context + .prev files
+  assert.match(uninstallSh, /\$APP\/\.installed/);
   assert.match(uninstallSh, /touch "\$APP\/\.uninstalled"/);
+  for (const cleaned of [
+    '"$APP/muse"',
+    '"$APP/muse.prev"',
+    '"$APP/companion"',
+    '"$APP/companion.prev"',
+    '"$APP/pyproject.toml"',
+    '"$APP/pyproject.toml.prev"',
+    '"$APP/uv.lock"',
+    '"$APP/uv.lock.prev"',
+    '"$APP/docker-compose.yml.prev"',
+    '"$APP/LICENSE"',
+    '"$APP/NOTICE"',
+  ]) {
+    assert.equal(uninstallSh.includes(cleaned), true, `uninstall.sh missing non-purge cleanup for ${cleaned}`);
+  }
   assert.doesNotMatch(uninstallSh, /rm -rf "\$APP\/hermes" "\$APP\/caddy"/);
+
+  // tools/companion-pair.py MUST stay 100% Python stdlib-only (runs on VPS host outside container)
+  assert.doesNotMatch(pairPy, /^\s*(?:from|import)\s+(?:muse|companion|httpx|starlette|uvicorn|yaml|ruamel|requests)\b/m);
 });
 
-test("Shell syntax, --help flags, and end-to-end pack.sh (clean & --with-data) work in bash", (t) => {
+test("Shell syntax, --help flags, and end-to-end v2.0 pack.sh (clean & --with-data) work in bash", (t) => {
   const bash = findGitBash();
   if (!bash) {
     t.skip("Git Bash not found on this Windows machine");
@@ -311,39 +362,47 @@ test("Shell syntax, --help flags, and end-to-end pack.sh (clean & --with-data) w
   const tmp = makeTempDir("musebot-pack-e2e-");
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
-  const fakeHermes = path.join(tmp, "hermes");
   const fakeWeb = path.join(tmp, "web-dist");
   const outDir = path.join(tmp, "out");
-  writeFiles(fakeHermes, {
-    "pyproject.toml": "[project]\nname = 'hermes-agent'\nversion = '0.0.0'\n",
-    "uv.lock": "version = 1\n",
-    ".env.example": "OPENAI_API_KEY=\n",
-    "apps/desktop/ignore.txt": "excluded\n",
-  });
   writeFiles(fakeWeb, {
-    "companion.html": "<!doctype html><html><body>Muse Bot</body></html>\n",
+    "companion.html": "<!doctype html><html><body>Muse Bot v2.0</body></html>\n",
   });
 
-  // 1. Clean release pack + check-bundle (pass drive-letter slash path on Windows to exercise GNU tar --force-local)
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "pyproject.toml")), true, "Root pyproject.toml must exist");
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, "uv.lock")), true, "Root uv.lock must exist");
+
+  // 1. Clean v2.0 release pack + check-bundle + zero hermes/ + < 6 MB gate (using real root pyproject.toml + uv.lock)
   const cleanPack = childProcess.spawnSync(bash, ["deploy/vps/pack.sh"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     env: {
       ...process.env,
-      MUSEBOT_VERSION: "v9.9.9-test",
-      MUSEBOT_HERMES_SRC: toPosixPath(fakeHermes),
+      MUSEBOT_VERSION: "v2.0.0-test",
       MUSEBOT_WEB_DIST: toPosixPath(fakeWeb),
       MUSEBOT_OUT_DIR: outDir.replace(/\\/g, "/"),
     },
   });
   assert.equal(cleanPack.status, 0, `clean pack.sh failed: ${cleanPack.stderr}\n${cleanPack.stdout}`);
-  const cleanTar = path.join(outDir, "musebot-server-v9.9.9-test.tar.gz");
+  const cleanTar = path.join(outDir, "musebot-server-v2.0.0-test.tar.gz");
   assert.equal(fs.existsSync(cleanTar), true);
+  assert.equal(fs.statSync(cleanTar).size < 6 * 1024 * 1024, true, "v2.0 bundle must stay under 6 MB");
 
   const checkClean = runCli(["check-bundle", cleanTar]);
   assert.equal(checkClean.status, 0, `check-bundle failed on clean pack: ${checkClean.stderr}`);
 
-  // 2. --with-data pack: verifies ruamel.yaml/yaml config rewrite, SQLite backup, and stt/pylib exclusion
+  const cleanList = childProcess.spawnSync("tar", ["-tzf", path.basename(cleanTar)], {
+    cwd: outDir,
+    encoding: "utf8",
+  });
+  assert.equal(cleanList.status, 0, cleanList.stderr);
+  const entries = cleanList.stdout.split(/\r?\n/).filter(Boolean);
+  assert.equal(entries.some((e) => /^[^/]+\/hermes\//.test(e)), false, "v2.0 bundle must contain zero hermes/ files");
+  assert.equal(entries.some((e) => e.endsWith("/muse/__init__.py")), true);
+  assert.equal(entries.some((e) => e.endsWith("/companion/server.py")), true);
+  assert.equal(entries.some((e) => e.endsWith("/pyproject.toml")), true);
+  assert.equal(entries.some((e) => e.endsWith("/uv.lock")), true);
+
+  // 2. --with-data pack: verifies MUSE_HOME, config rewrite, online backup of BOTH muse.db (WAL) & state.db, and exclusions
   const py = findPython();
   if (!py) {
     assert.equal(Boolean(process.env.MUSEBOT_PYTHON), false, "MUSEBOT_PYTHON was requested, so Python cannot be skipped");
@@ -363,7 +422,7 @@ test("Shell syntax, --help flags, and end-to-end pack.sh (clean & --with-data) w
     return;
   }
 
-  const fakeHome = path.join(tmp, "custom-hermes-home");
+  const fakeHome = path.join(tmp, "custom-muse-home");
   writeFiles(fakeHome, {
     ".env": "COMPANION_KEY_TEST=sk-test-dummy\n",
     "SOUL.md": "You are Muse.\n",
@@ -372,20 +431,17 @@ test("Shell syntax, --help flags, and end-to-end pack.sh (clean & --with-data) w
     "companion/stt/pylib/win_only.pyd": "binary",
     "companion/mcp/browser/cookies.sqlite": "secret-cookie",
     "config.yaml": [
-      "plugins:",
-      "  enabled:",
-      "    - companion-platform",
       "security:",
       "  fake_ip_ranges:",
       "    - 198.18.0.0/15",
       "mcp_servers:",
       "  github:",
       "    command: npx",
-      "    cwd: 'E:\\\\personal_bot\\\\hermes-home\\\\companion\\\\mcp\\\\github'",
+      "    cwd: 'E:\\\\personal_bot\\\\muse-home\\\\companion\\\\mcp\\\\github'",
       "  browser:",
       "    command: npx",
       "    args: [-y, '@playwright/mcp@0.0.83', --browser, msedge]",
-      "    cwd: 'E:\\\\personal_bot\\\\hermes-home\\\\companion\\\\mcp\\\\browser'",
+      "    cwd: 'E:\\\\personal_bot\\\\muse-home\\\\companion\\\\mcp\\\\browser'",
       "",
     ].join("\n"),
   });
@@ -395,27 +451,39 @@ test("Shell syntax, --help flags, and end-to-end pack.sh (clean & --with-data) w
     [
       "-I",
       "-c",
-      "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute('CREATE TABLE t (v TEXT)'); c.execute(\"INSERT INTO t VALUES ('ok')\"); c.commit(); c.close()",
+      [
+        "import sqlite3, sys",
+        "for idx, tag in ((1, 'muse-wal'), (2, 'state-ro')):",
+        "    c = sqlite3.connect(sys.argv[idx])",
+        "    if idx == 1:",
+        "        c.execute('PRAGMA journal_mode=WAL')",
+        "    c.execute('CREATE TABLE t (v TEXT)')",
+        "    c.execute('INSERT INTO t VALUES (?)', (tag,))",
+        "    c.commit()",
+        "    c.close()",
+      ].join("\n"),
+      path.join(fakeHome, "muse.db"),
       path.join(fakeHome, "state.db"),
     ],
     { encoding: "utf8" }
   );
   assert.equal(dbInit.status, 0, dbInit.stderr);
+  const stateDbHashBefore = sha256File(path.join(fakeHome, "state.db"));
 
   const dataPack = childProcess.spawnSync(bash, ["deploy/vps/pack.sh", "--with-data"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
     env: {
       ...process.env,
-      HERMES_HOME: toPosixPath(fakeHome),
+      MUSE_HOME: toPosixPath(fakeHome),
       MUSEBOT_PYTHON: toPosixPath(py),
       MUSEBOT_VERSION: "priv-test",
-      MUSEBOT_HERMES_SRC: toPosixPath(fakeHermes),
       MUSEBOT_WEB_DIST: toPosixPath(fakeWeb),
       MUSEBOT_OUT_DIR: toPosixPath(outDir),
     },
   });
   assert.equal(dataPack.status, 0, `pack.sh --with-data failed: ${dataPack.stderr}\n${dataPack.stdout}`);
+  assert.equal(sha256File(path.join(fakeHome, "state.db")), stateDbHashBefore, "pack.sh must never mutate source state.db");
 
   const privTar = path.join(outDir, "musebot-server-priv-test.tar.gz");
   assert.equal(fs.existsSync(privTar), true);
@@ -439,7 +507,28 @@ test("Shell syntax, --help flags, and end-to-end pack.sh (clean & --with-data) w
   assert.equal(fs.existsSync(path.join(dataOut, "companion", "devices.json")), false);
   assert.equal(fs.existsSync(path.join(dataOut, "companion", "stt", "pylib")), false);
   assert.equal(fs.existsSync(path.join(dataOut, "companion", "mcp")), false);
+  assert.equal(fs.existsSync(path.join(dataOut, "muse.db")), true);
   assert.equal(fs.existsSync(path.join(dataOut, "state.db")), true);
+
+  // Verify BOTH backed-up SQLite databases are readable and intact
+  const dbCheck = childProcess.spawnSync(
+    py,
+    [
+      "-I",
+      "-c",
+      [
+        "import sqlite3, sys",
+        "for idx, expected in ((1, 'muse-wal'), (2, 'state-ro')):",
+        "    c = sqlite3.connect(sys.argv[idx])",
+        "    assert c.execute('SELECT v FROM t').fetchone() == (expected,)",
+        "    c.close()",
+      ].join("\n"),
+      path.join(dataOut, "muse.db"),
+      path.join(dataOut, "state.db"),
+    ],
+    { encoding: "utf8" }
+  );
+  assert.equal(dbCheck.status, 0, `SQLite backup verification failed: ${dbCheck.stderr}`);
 
   const migratedCfg = fs.readFileSync(path.join(dataOut, "config.yaml"), "utf8");
   assert.doesNotMatch(migratedCfg, /fake_ip_ranges/);
@@ -450,6 +539,320 @@ test("Shell syntax, --help flags, and end-to-end pack.sh (clean & --with-data) w
   assert.match(migratedCfg, /\/opt\/data\/companion\/mcp\/github/);
   assert.match(migratedCfg, /\/opt\/data\/companion\/mcp\/browser/);
   assert.match(migratedCfg, /http:\/\/127\.0\.0\.1:9333/);
+});
+
+function setupUpgradeTestHarness(tmpDir) {
+  const fakeBin = path.join(tmpDir, "fakebin");
+  const dockerState = path.join(tmpDir, "docker-state");
+  const appDir = path.join(tmpDir, "opt-companion");
+  const bundleDir = path.join(tmpDir, "bundle-v2");
+  const osRelease = path.join(tmpDir, "os-release");
+
+  fs.mkdirSync(fakeBin, { recursive: true });
+  fs.mkdirSync(path.join(dockerState, "images"), { recursive: true });
+  fs.writeFileSync(osRelease, 'ID=ubuntu\nID_LIKE=debian\nPRETTY_NAME="Ubuntu 24.04 LTS"\n', "utf8");
+
+  const writeExec = (name, body) => {
+    const p = path.join(fakeBin, name);
+    fs.writeFileSync(p, body.replace(/\r\n/g, "\n"), "utf8");
+    fs.chmodSync(p, 0o755);
+  };
+
+  writeExec("id", '#!/usr/bin/env bash\nif [ "${1:-}" = "-u" ]; then echo 0; exit 0; fi\nexec /usr/bin/id "$@"\n');
+  writeExec("systemctl", '#!/usr/bin/env bash\nexit 0\n');
+  writeExec("ss", '#!/usr/bin/env bash\nexit 0\n');
+  writeExec("ufw", '#!/usr/bin/env bash\necho "Status: inactive"\nexit 0\n');
+  writeExec("chown", '#!/usr/bin/env bash\nexit 0\n');
+  writeExec("sleep", '#!/usr/bin/env bash\nexit 0\n');
+  writeExec("python3", '#!/usr/bin/env bash\nexit 0\n');
+  writeExec(
+    "curl",
+    `#!/usr/bin/env bash
+url=""
+for a in "$@"; do url="$a"; done
+if [[ "$url" == *"/webui/bootstrap"* ]]; then
+  printf '%s' "\${FAKE_CURL_HEALTH_CODE:-200}"
+  exit 0
+fi
+exit 0
+`
+  );
+  writeExec(
+    "docker",
+    `#!/usr/bin/env bash
+set -euo pipefail
+STATE="$FAKE_DOCKER_STATE"
+IMG_DIR="$STATE/images"
+mkdir -p "$IMG_DIR"
+tag_file() { printf '%s/%s' "$IMG_DIR" "$(printf '%s' "$1" | tr ':/' '__')"; }
+
+case "\${1:-}" in
+  build)
+    shift
+    tag=""
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "-t" ]; then tag="$2"; shift 2; else shift; fi
+    done
+    printf '%s\n' "\${FAKE_BUILD_IMAGE_ID:-v2.0.0-img}" > "$(tag_file "$tag")"
+    echo "build:$tag" >> "$STATE/events.log"
+    ;;
+  image)
+    if [ "\${2:-}" = "inspect" ]; then
+      [ -f "$(tag_file "\${3:-}")" ]
+    fi
+    ;;
+  tag)
+    cp "$(tag_file "$2")" "$(tag_file "$3")"
+    echo "tag:$2->$3=$(cat "$(tag_file "$3")")" >> "$STATE/events.log"
+    ;;
+  rmi)
+    rm -f "$(tag_file "\${2:-}")"
+    echo "rmi:\${2:-}" >> "$STATE/events.log"
+    ;;
+  logs)
+    echo "fake container logs"
+    ;;
+  compose)
+    shift
+    case "\${1:-}" in
+      version)
+        echo "Docker Compose version v2.29.0"
+        ;;
+      up)
+        img="$(cat "$(tag_file companion-hermes:latest)" 2>/dev/null || echo missing)"
+        cmd_line="$(grep -E '^[[:space:]]*command:' "$PWD/docker-compose.yml" 2>/dev/null | tr -d '\r' || echo none)"
+        has_plugin="0"
+        [ -f "$PWD/data/plugins/companion/plugin.yaml" ] && has_plugin="1"
+        echo "compose-up|img=$img|plugin=$has_plugin|$cmd_line" >> "$STATE/events.log"
+        # Simulate v2.0 container creating muse.db with 0644 on healthy startup
+        if [[ "$cmd_line" == *"musebot"* ]] && [ "\${FAKE_CURL_HEALTH_CODE:-200}" = "200" ]; then
+          printf 'SQLite v2 placeholder\n' > "$PWD/data/muse.db"
+          chmod 644 "$PWD/data/muse.db" || true
+        fi
+        ;;
+      down)
+        echo "compose-down" >> "$STATE/events.log"
+        ;;
+    esac
+    ;;
+esac
+`
+  );
+
+  // Pre-populate realistic v1.1.0 installation in appDir
+  writeFiles(appDir, {
+    ".installed": "",
+    "VERSION": "v1.1.0\n",
+    "domain": "bot.example.com\n",
+    "Dockerfile": "FROM debian:13-slim\nCMD [\"hermes\", \"gateway\", \"run\"]\n",
+    "docker-compose.yml": [
+      "services:",
+      "  companion:",
+      "    image: companion-hermes:latest",
+      "    container_name: companion",
+      '    command: ["hermes", "gateway", "run"]',
+      "",
+    ].join("\n"),
+    "hermes/pyproject.toml": "[project]\nname = 'hermes-agent'\n",
+    "data/state.db": "SQLite format 3 v1.1.0 immutable payload\n",
+    "data/config.yaml": "agent:\n  max_turns: 100\n",
+    "data/.env": "OPENAI_API_KEY=sk-existing\n",
+    "data/plugins/companion/plugin.yaml": "name: companion-platform\nversion: 1.1.0\n",
+    "data/companion-lib/muse/__init__.py": "# obsolete v1 bridge dir\n",
+    "data/companion-web/companion.html": "<!doctype html><title>v1.1.0</title>\n",
+    "data/companion/devices.json": '[{"id":"iphone-1"}]\n',
+    "data/companion/media.key": "secret-media-key\n",
+    "caddy/acme.json": '{"cert":"preserved"}\n',
+  });
+  fs.writeFileSync(path.join(dockerState, "images", "companion-hermes_latest"), "v1.1.0-img\n", "utf8");
+
+  // Populate v2.0 server bundle using the real deploy/vps scripts
+  writeFiles(bundleDir, {
+    "install.sh": fs.readFileSync(path.join(REPO_ROOT, "deploy", "vps", "install.sh"), "utf8"),
+    "uninstall.sh": fs.readFileSync(path.join(REPO_ROOT, "deploy", "vps", "uninstall.sh"), "utf8"),
+    "README.md": fs.readFileSync(path.join(REPO_ROOT, "deploy", "vps", "README.md"), "utf8"),
+    "Dockerfile": fs.readFileSync(path.join(REPO_ROOT, "deploy", "vps", "Dockerfile"), "utf8"),
+    "LICENSE": "MIT\n",
+    "NOTICE": "Muse Bot v2.0\n",
+    "VERSION": "v2.0.0\n",
+    "pyproject.toml": "[project]\nname = 'muse-bot'\nversion = '2.0.0'\n",
+    "uv.lock": "version = 1\n",
+    "muse/__init__.py": "__version__ = '2.0.0'\n",
+    "companion/server.py": "# v2.0 companion server\n",
+    "web/companion.html": "<!doctype html><title>v2.0.0</title>\n",
+    "tools/companion-pair.py": fs.readFileSync(path.join(REPO_ROOT, "tools", "companion-pair.py"), "utf8"),
+  });
+
+  const makeEnv = (healthCode) => ({
+    ...process.env,
+    MUSEBOT_APP_DIR: toPosixPath(appDir),
+    MUSEBOT_OS_RELEASE: toPosixPath(osRelease),
+    MUSEBOT_HEALTH_ATTEMPTS: "2",
+    MUSEBOT_HTTPS_ATTEMPTS: "1",
+    FAKE_DOCKER_STATE: toPosixPath(dockerState),
+    FAKE_BUILD_IMAGE_ID: "v2.0.0-img",
+    FAKE_CURL_HEALTH_CODE: healthCode,
+  });
+
+  const runWithFakeBin = (bash, scriptPath, scriptArgs, cwd, healthCode) =>
+    childProcess.spawnSync(
+      bash,
+      ["-c", 'export PATH="$1:$PATH"; shift; exec bash "$@"', "_", toPosixPath(fakeBin), toPosixPath(scriptPath), ...scriptArgs],
+      {
+        cwd,
+        encoding: "utf8",
+        env: makeEnv(healthCode),
+      }
+    );
+
+  return { fakeBin, dockerState, appDir, bundleDir, makeEnv, runWithFakeBin };
+}
+
+test("install.sh upgrades v1.x -> v2.0 cleanly, preserves state.db/devices, and uninstall.sh cleans v2.0 build context", (t) => {
+  const bash = findGitBash();
+  if (!bash) {
+    t.skip("Git Bash not found on this Windows machine");
+    return;
+  }
+
+  const tmp = makeTempDir("musebot-upgrade-ok-");
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const { dockerState, appDir, bundleDir, runWithFakeBin } = setupUpgradeTestHarness(tmp);
+  const stateDbPath = path.join(appDir, "data", "state.db");
+  const stateDbShaBefore = sha256File(stateDbPath);
+
+  const res = runWithFakeBin(bash, path.join(bundleDir, "install.sh"), ["--yes"], bundleDir, "200");
+  assert.equal(res.status, 0, `v1.x -> v2.0 upgrade failed:\nSTDOUT:\n${res.stdout}\nSTDERR:\n${res.stderr}`);
+  assert.match(res.stdout, /升级好了：https:\/\/bot\.example\.com（版本：v2\.0\.0/);
+
+  // Full v2.0 build context present in /opt/companion
+  for (const rel of [
+    "muse/__init__.py",
+    "companion/server.py",
+    "pyproject.toml",
+    "uv.lock",
+    "Dockerfile",
+    "LICENSE",
+    "NOTICE",
+    "tools/companion-pair.py",
+    "VERSION",
+    "domain",
+    ".installed",
+  ]) {
+    assert.equal(fs.existsSync(path.join(appDir, rel)), true, `Expected ${rel} in upgraded APP dir`);
+  }
+
+  const composeYml = fs.readFileSync(path.join(appDir, "docker-compose.yml"), "utf8");
+  assert.match(composeYml, /command: \["musebot", "serve"\]/);
+  assert.match(composeYml, /image: companion-hermes:latest/);
+  assert.match(composeYml, /COMPANION_WEB_DIST=\/opt\/data\/companion-web/);
+
+  // Obsolete v1.x files and all .prev backups cleaned up after healthy boot
+  for (const gone of [
+    "hermes",
+    "hermes.prev",
+    "muse.prev",
+    "companion.prev",
+    "pyproject.toml.prev",
+    "uv.lock.prev",
+    "Dockerfile.prev",
+    "docker-compose.yml.prev",
+    "VERSION.prev",
+    "data/plugins/companion",
+    "data/plugins/companion.prev",
+    "data/companion-lib",
+    "data/companion-lib.prev",
+    "data/companion-web.prev",
+  ]) {
+    assert.equal(fs.existsSync(path.join(appDir, gone)), false, `Expected stale path removed: ${gone}`);
+  }
+
+  // Data invariants preserved verbatim
+  assert.equal(sha256File(stateDbPath), stateDbShaBefore, "state.db must remain byte-for-byte untouched");
+  assert.equal(fs.readFileSync(path.join(appDir, "data", "companion", "devices.json"), "utf8"), '[{"id":"iphone-1"}]\n');
+  assert.equal(fs.readFileSync(path.join(appDir, "data", "companion", "media.key"), "utf8"), "secret-media-key\n");
+  assert.match(fs.readFileSync(path.join(appDir, "data", "companion-web", "companion.html"), "utf8"), /v2\.0\.0/);
+  assert.equal(fs.readFileSync(path.join(dockerState, "images", "companion-hermes_latest"), "utf8").trim(), "v2.0.0-img");
+
+  if (process.platform !== "win32") {
+    const museDbMode = fs.statSync(path.join(appDir, "data", "muse.db")).mode & 0o777;
+    assert.equal(museDbMode, 0o600, `Expected muse.db mode 0600, got ${museDbMode.toString(8)}`);
+  }
+
+  // Non-purge uninstall.sh removes all v2.0 build context while keeping data, caddy certs, and domain
+  const unRes = runWithFakeBin(bash, path.join(appDir, "uninstall.sh"), [], appDir, "200");
+  assert.equal(unRes.status, 0, `uninstall.sh failed: ${unRes.stderr}`);
+  for (const removed of [
+    "muse",
+    "companion",
+    "pyproject.toml",
+    "uv.lock",
+    "Dockerfile",
+    "docker-compose.yml",
+    "LICENSE",
+    "NOTICE",
+    ".installed",
+  ]) {
+    assert.equal(fs.existsSync(path.join(appDir, removed)), false, `uninstall.sh should remove ${removed}`);
+  }
+  assert.equal(fs.existsSync(path.join(appDir, ".uninstalled")), true);
+  assert.equal(sha256File(stateDbPath), stateDbShaBefore);
+  assert.equal(fs.existsSync(path.join(appDir, "caddy", "acme.json")), true);
+  assert.equal(fs.readFileSync(path.join(appDir, "domain"), "utf8").trim(), "bot.example.com");
+});
+
+test("install.sh automatically rolls back v1.x -> v2.0 upgrade on /webui/bootstrap health failure", (t) => {
+  const bash = findGitBash();
+  if (!bash) {
+    t.skip("Git Bash not found on this Windows machine");
+    return;
+  }
+
+  const tmp = makeTempDir("musebot-upgrade-rollback-");
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const { dockerState, appDir, bundleDir, runWithFakeBin } = setupUpgradeTestHarness(tmp);
+  const stateDbPath = path.join(appDir, "data", "state.db");
+  const stateDbShaBefore = sha256File(stateDbPath);
+
+  const res = runWithFakeBin(bash, path.join(bundleDir, "install.sh"), ["--yes"], bundleDir, "000");
+  assert.equal(res.status, 1, "Expected install.sh to exit non-zero after health-check failure");
+  assert.match(res.stderr, /已自动回滚到上一版本/);
+
+  // Dual .prev rollback restored docker-compose.yml, plugins/companion, companion-lib, hermes, Dockerfile, VERSION, web, and image tag
+  const restoredCompose = fs.readFileSync(path.join(appDir, "docker-compose.yml"), "utf8");
+  assert.match(restoredCompose, /command: \["hermes", "gateway", "run"\]/);
+  assert.equal(fs.existsSync(path.join(appDir, "docker-compose.yml.prev")), false);
+
+  assert.equal(
+    fs.readFileSync(path.join(appDir, "data", "plugins", "companion", "plugin.yaml"), "utf8"),
+    "name: companion-platform\nversion: 1.1.0\n"
+  );
+  assert.equal(fs.existsSync(path.join(appDir, "data", "plugins", "companion.prev")), false);
+
+  assert.equal(fs.existsSync(path.join(appDir, "data", "companion-lib", "muse", "__init__.py")), true);
+  assert.equal(fs.existsSync(path.join(appDir, "data", "companion-lib.prev")), false);
+
+  assert.equal(fs.existsSync(path.join(appDir, "hermes", "pyproject.toml")), true);
+  assert.equal(fs.existsSync(path.join(appDir, "hermes.prev")), false);
+  assert.equal(fs.readFileSync(path.join(appDir, "VERSION"), "utf8").trim(), "v1.1.0");
+  assert.match(fs.readFileSync(path.join(appDir, "Dockerfile"), "utf8"), /CMD \["hermes", "gateway", "run"\]/);
+  assert.match(fs.readFileSync(path.join(appDir, "data", "companion-web", "companion.html"), "utf8"), /v1\.1\.0/);
+
+  // Newly added v2.0 build-context artifacts cleaned up during rollback to v1.x
+  for (const v2Only of ["muse", "companion", "pyproject.toml", "uv.lock"]) {
+    assert.equal(fs.existsSync(path.join(appDir, v2Only)), false, `Rollback to v1.x should remove v2-only ${v2Only}`);
+  }
+
+  // Image tag restored to v1.1.0-img and state.db untouched
+  assert.equal(fs.readFileSync(path.join(dockerState, "images", "companion-hermes_latest"), "utf8").trim(), "v1.1.0-img");
+  assert.equal(sha256File(stateDbPath), stateDbShaBefore, "state.db must remain untouched across rollback");
+
+  // Verify ordering: rollback restored docker-compose.yml, plugins/companion, AND companion-hermes:prev BEFORE docker compose up
+  const events = fs.readFileSync(path.join(dockerState, "events.log"), "utf8").trim().split(/\r?\n/);
+  const composeUps = events.filter((line) => line.startsWith("compose-up|"));
+  assert.equal(composeUps.length, 2, `Expected 2 compose-up calls (upgrade + rollback), got: ${events.join("; ")}`);
+  assert.match(composeUps[0], /img=v2\.0\.0-img\|plugin=0\|.*command: \["musebot", "serve"\]/);
+  assert.match(composeUps[1], /img=v1\.1\.0-img\|plugin=1\|.*command: \["hermes", "gateway", "run"\]/);
 });
 
 test("GitHub Actions workflows pin action SHAs, drop checkout credentials, and enforce CI/release gates", () => {
@@ -486,4 +889,3 @@ test("GitHub Actions workflows pin action SHAs, drop checkout credentials, and e
   const iosYml = fs.readFileSync(path.join(wfDir, "ios.yml"), "utf8");
   assert.doesNotMatch(iosYml, /continue-on-error:\s*true/);
 });
-
