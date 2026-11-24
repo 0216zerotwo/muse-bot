@@ -52,14 +52,14 @@ def _preset(name: str) -> Optional[dict[str, Any]]:
 
 
 def _servers() -> dict[str, Any]:
-    from hermes_cli.config import read_raw_config
+    from muse.config_store import read_raw_config
 
     servers = read_raw_config().get("mcp_servers")
     return dict(servers) if isinstance(servers, dict) else {}
 
 
 def _save_servers(servers: dict[str, Any]) -> None:
-    from hermes_cli.config import read_raw_config, save_config
+    from muse.config_store import read_raw_config, save_config
 
     config = read_raw_config()
     config["mcp_servers"] = servers
@@ -364,7 +364,7 @@ def _message(action: str, preset: dict[str, Any], ok: bool = True) -> dict[str, 
 
 def run_action(action: str, name: str, values: dict[str, Any]) -> dict[str, Any]:
     """``enable`` (connect, or resume a paused one), ``disable`` (pause), ``remove``, ``tools``."""
-    from hermes_cli.config import remove_env_value, save_env_value
+    from muse.config_store import remove_env_value, save_env_value
 
     preset = _preset(name)
     with _LOCK:
@@ -417,7 +417,7 @@ _SERVER_NAME = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 def add_custom(values: dict[str, Any]) -> dict[str, Any]:
     """A service the user adds themselves: a web address (optionally with a key, sent as a
     Bearer token) or a command that starts it (optionally with KEY=VALUE settings)."""
-    from hermes_cli.config import save_env_value
+    from muse.config_store import save_env_value
 
     name = str(values.get("name") or "").strip().lower()
     kind = values.get("kind")
@@ -475,7 +475,7 @@ def add_custom(values: dict[str, Any]) -> dict[str, Any]:
 
 
 def remove_custom_secrets(name: str) -> None:
-    from hermes_cli.config import remove_env_value
+    from muse.config_store import remove_env_value
 
     prefix = _env_name(name, "")
     for var in [k for k in os.environ if k.startswith(prefix)]:

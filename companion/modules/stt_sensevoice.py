@@ -105,7 +105,7 @@ def enable() -> bool:
     if lacking:
         logger.info("companion: local speech-to-text not on yet, it still needs %s", "、".join(lacking))
         return False
-    from hermes_cli.config import read_raw_config, save_config
+    from muse.config_store import read_raw_config, save_config
 
     config = read_raw_config()
     stt = config.setdefault("stt", {})
@@ -129,7 +129,7 @@ _CLOUD_PROVIDERS: dict[str, tuple[str, Optional[str]]] = {
 
 def _raw_stt_config() -> dict[str, Any]:
     try:
-        from hermes_cli.config import read_raw_config
+        from muse.config_store import read_raw_config
 
         raw = read_raw_config()
         stt = raw.get("stt") if isinstance(raw, dict) else None

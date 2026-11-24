@@ -97,9 +97,10 @@ class ModelsConfigAndHealthTest(unittest.TestCase):
         self.assertEqual(ant_calls[0][1].get("anthropic-version"), "2023-06-01")
 
     def test_usage_summary_and_goals_handle_missing_state_db_and_close_sqlite_handles(self):
+        from muse.paths import muse_home_override
+
         home_with_space = temp_dir("companion home 中文 ")
-        hc = type("HC", (), {"get_hermes_home": staticmethod(lambda: home_with_space)})
-        with mock.patch.dict("sys.modules", {"hermes_constants": hc}):
+        with muse_home_override(home_with_space):
             # 1) Missing state.db on fresh install -> returns empty today/week without raising.
             empty = self.models.usage_summary("Asia/Shanghai")
             self.assertEqual(empty["today"]["by_model"], [])

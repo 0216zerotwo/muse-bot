@@ -125,6 +125,16 @@ class CompanionAdapter(BasePlatformAdapter):
     def name(self) -> str:
         return "Companion"
 
+    @property
+    def engine(self) -> Any:
+        eng = getattr(self, "_engine", None)
+        if eng is None:
+            from muse.engine import build_engine
+
+            eng = build_engine(self)
+            self._engine = eng
+        return eng
+
     # -- lifecycle -------------------------------------------------------------------------------
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -241,12 +251,11 @@ class CompanionAdapter(BasePlatformAdapter):
     async def renew_session(self, chat_id: Optional[str]) -> None:
         """Start the chat's agent session afresh (Hermes's /reset, without its notice in the chat).
         The app's history stays; the agent keeps its long-term memory but not the old working context."""
-        reset = getattr(self.gateway_runner, "_handle_reset_command", None)
-        if not chat_id or not callable(reset) or chat_id in self._turns:
+        if not chat_id or chat_id in self._turns:
             return  # mid-turn: the next persona change (or restart) will catch up
         try:
-            await reset(self._event(chat_id, "/reset", uuid.uuid4().hex))
-            logger.info("Companion: started a new agent session for the new persona")
+            if await self.engine.renew_session(chat_id):
+                logger.info("Companion: started a new agent session for the new persona")
         except Exception:
             logger.exception("Companion: could not start a new agent session")
 
@@ -634,21 +643,11 @@ class CompanionAdapter(BasePlatformAdapter):
     def _use_helper_model(self, helper_chat: str) -> None:
         """The helper's own model for its turns (Hermes's per-session override), or the main
         assistant's when it has none."""
-        runner = self.gateway_runner
         helper = helpers.helper_for_chat(helper_chat)
-        if runner is None or helper is None:
+        if helper is None:
             return
         try:
-            key = runner._session_key_for_source(self._event(helper_chat, "", "").source)
-            override = helpers.model_override(helper)
-            overrides = runner._session_model_overrides
-            if override == overrides.get(key):
-                return
-            if override:
-                overrides[key] = override
-            else:
-                overrides.pop(key, None)
-            runner._evict_cached_agent(key)  # the next turn builds fresh with that model
+            self.engine.set_session_model_override(helper_chat, helpers.model_override(helper))
         except Exception:
             logger.exception("companion: could not set %s's model", helper.get("name"))
 

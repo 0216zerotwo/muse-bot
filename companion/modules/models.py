@@ -137,7 +137,7 @@ def short_error(text: str, name: str) -> str:
 
 
 def _service(provider: str) -> dict[str, Any]:
-    from hermes_cli.config import read_raw_config
+    from muse.config_store import read_raw_config
 
     service = (read_raw_config().get("providers") or {}).get(provider)
     if not isinstance(service, dict) or not service.get("base_url"):
@@ -230,7 +230,7 @@ async def check_models(names: Optional[list[str]] = None) -> dict[str, Any]:
 
 
 def _services() -> dict[str, Any]:
-    from hermes_cli.config import read_raw_config
+    from muse.config_store import read_raw_config
 
     return {k: v for k, v in (read_raw_config().get("providers") or {}).items()
             if isinstance(v, dict) and not k.startswith(_PROVIDER_PREFIX)}
@@ -441,7 +441,7 @@ def _service_for(base_url: str, api_key: str, key_env: Optional[str]) -> str:
     """The service entry (config.yaml ``providers``) for an address, made on first use; a new key
     replaces the saved one. ``key_env`` names the variable for a new service (the company's usual
     one, like DEEPSEEK_API_KEY); a service already set up keeps its own."""
-    from hermes_cli.config import read_raw_config, save_config, save_env_value
+    from muse.config_store import read_raw_config, save_config, save_env_value
 
     config = read_raw_config()
     services = config.setdefault("providers", {})
@@ -470,7 +470,7 @@ def _share_key(service: str, env: str) -> None:
     """Hermes's OpenRouter, xAI, fal and DeepInfra drawing/video backends read their company's usual
     variable (OPENROUTER_API_KEY, XAI_API_KEY, FAL_KEY, DEEPINFRA_API_KEY): make sure it holds the key
     this service uses."""
-    from hermes_cli.config import read_raw_config, save_env_value
+    from muse.config_store import read_raw_config, save_env_value
 
     own = str(((read_raw_config().get("providers") or {}).get(service) or {}).get("key_env") or "")
     if own and own != env and os.environ.get(own):
@@ -699,7 +699,7 @@ def hermes_settings(data: dict[str, Any], services: dict[str, Any]) -> dict[str,
 def apply_to_hermes(timezone: Optional[str] = None) -> bool:
     """Write the presets (and the companion's other Hermes settings) into config.yaml — only the
     parts the app owns. True if anything changed."""
-    from hermes_cli.config import read_raw_config, save_config
+    from muse.config_store import read_raw_config, save_config
 
     config = read_raw_config()
     before = json.dumps(config, sort_keys=True, default=str)
@@ -729,7 +729,7 @@ def apply_to_hermes(timezone: Optional[str] = None) -> bool:
         return False
     save_config(config)
     if timezone:
-        from hermes_time import reset_cache
+        from muse.time_utils import reset_cache
 
         reset_cache()
     return True
@@ -908,10 +908,10 @@ def _media_period(since: float, data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def usage_summary(timezone: Optional[str] = None) -> dict[str, Any]:
-    from hermes_constants import get_hermes_home
+    from muse.paths import get_legacy_state_db_path
 
     data = read_models()
-    path = Path(get_hermes_home()) / "state.db"
+    path = get_legacy_state_db_path()
     query = (
         "SELECT u.model, u.billing_base_url, u.task, s.source, SUM(u.api_call_count), "
         "SUM(u.input_tokens + u.cache_read_tokens + u.cache_write_tokens), SUM(u.output_tokens), "

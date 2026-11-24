@@ -25,9 +25,9 @@ _FRONT = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.S)
 
 
 def _root() -> Path:
-    from hermes_constants import get_hermes_home
+    from muse.paths import get_muse_home
 
-    return Path(get_hermes_home()) / "skills"
+    return get_muse_home() / "skills"
 
 
 def _bundled() -> set[str]:

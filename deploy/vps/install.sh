@@ -170,7 +170,7 @@ printf 'data\ncaddy\n' > "$HERE/.dockerignore"
 docker build -t companion-hermes:next -f "$HERE/Dockerfile" "$HERE"
 
 cleanup_backups() {
-  rm -rf "$APP/hermes.prev" "$DATA/plugins/companion.prev" "$DATA/companion-web.prev" "$APP/VERSION.prev"
+  rm -rf "$APP/hermes.prev" "$APP/muse.prev" "$DATA/plugins/companion.prev" "$DATA/companion-lib.prev" "$DATA/companion-web.prev" "$APP/VERSION.prev"
 }
 
 rollback_upgrade() {
@@ -181,8 +181,14 @@ rollback_upgrade() {
   if [ -d "$APP/hermes.prev" ]; then
     rm -rf "$APP/hermes" && mv "$APP/hermes.prev" "$APP/hermes"
   fi
+  if [ -d "$APP/muse.prev" ]; then
+    rm -rf "$APP/muse" && mv "$APP/muse.prev" "$APP/muse"
+  fi
   if [ -d "$DATA/plugins/companion.prev" ]; then
     rm -rf "$DATA/plugins/companion" && mv "$DATA/plugins/companion.prev" "$DATA/plugins/companion"
+  fi
+  if [ -d "$DATA/companion-lib.prev" ]; then
+    rm -rf "$DATA/companion-lib" && mv "$DATA/companion-lib.prev" "$DATA/companion-lib"
   fi
   if [ -d "$DATA/companion-web.prev" ]; then
     rm -rf "$DATA/companion-web" && mv "$DATA/companion-web.prev" "$DATA/companion-web"
@@ -204,7 +210,9 @@ if [ "$UPGRADE" -eq 1 ]; then
   cleanup_backups
   docker image inspect companion-hermes:latest >/dev/null 2>&1 && docker tag companion-hermes:latest companion-hermes:prev || true
   [ -d "$APP/hermes" ] && cp -a "$APP/hermes" "$APP/hermes.prev"
+  [ -d "$APP/muse" ] && cp -a "$APP/muse" "$APP/muse.prev"
   [ -d "$DATA/plugins/companion" ] && cp -a "$DATA/plugins/companion" "$DATA/plugins/companion.prev"
+  [ -d "$DATA/companion-lib" ] && cp -a "$DATA/companion-lib" "$DATA/companion-lib.prev"
   [ -d "$DATA/companion-web" ] && cp -a "$DATA/companion-web" "$DATA/companion-web.prev"
   [ -f "$APP/VERSION" ] && cp -a "$APP/VERSION" "$APP/VERSION.prev"
 fi
@@ -213,6 +221,10 @@ docker tag companion-hermes:next companion-hermes:latest
 docker rmi companion-hermes:next >/dev/null 2>&1 || true
 
 rm -rf "$APP/hermes.new" && cp -r "$HERE/hermes" "$APP/hermes.new" && rm -rf "$APP/hermes" && mv "$APP/hermes.new" "$APP/hermes"
+if [ -d "$HERE/muse" ]; then
+  rm -rf "$APP/muse.new" && cp -r "$HERE/muse" "$APP/muse.new" && rm -rf "$APP/muse" && mv "$APP/muse.new" "$APP/muse"
+  mkdir -p "$DATA/companion-lib.new" && cp -r "$HERE/muse" "$DATA/companion-lib.new/muse" && rm -rf "$DATA/companion-lib" && mv "$DATA/companion-lib.new" "$DATA/companion-lib"
+fi
 rm -rf "$DATA/plugins/companion.new" && cp -r "$HERE/companion" "$DATA/plugins/companion.new" && rm -rf "$DATA/plugins/companion" && mv "$DATA/plugins/companion.new" "$DATA/plugins/companion"
 rm -rf "$DATA/companion-web.new" && cp -r "$HERE/web" "$DATA/companion-web.new" && rm -rf "$DATA/companion-web" && mv "$DATA/companion-web.new" "$DATA/companion-web"
 mkdir -p "$APP/tools" && cp "$HERE/tools/companion-pair.py" "$APP/tools/"

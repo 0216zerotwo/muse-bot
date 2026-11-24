@@ -2,13 +2,9 @@
 for no value the notice isn't given (a missing one would stop it from showing at all)."""
 
 import string
-import sys
 import unittest
 
-from _loader import ROOT, load
-
-if (ROOT.parent / "hermes").is_dir() and str(ROOT.parent / "hermes") not in sys.path:
-    sys.path.insert(0, str(ROOT.parent / "hermes"))
+from _loader import load
 
 
 def _fields(text):

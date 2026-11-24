@@ -29,7 +29,7 @@ def _schedule(raw: Any) -> dict[str, Any]:
     schedule = raw if isinstance(raw, dict) else {}
     kind = schedule.get("kind")
     if kind == "cron":
-        from hermes_time import get_timezone_name
+        from muse.time_utils import get_timezone_name
 
         return {"kind": "cron", "expr": schedule.get("expr"), "tz": get_timezone_name() or None}
     if kind in ("interval", "every"):

@@ -41,9 +41,9 @@ _PRINCIPLES = """## 做事原则
 
 
 def soul_path() -> Path:
-    from hermes_constants import get_hermes_home
+    from muse.paths import get_muse_home
 
-    return Path(get_hermes_home()) / "SOUL.md"
+    return get_muse_home() / "SOUL.md"
 
 
 def soul_text() -> str:
@@ -234,7 +234,7 @@ def write_locale_overlay(lang: str = "zh") -> bool:
     import json
 
     from agent import i18n
-    from hermes_constants import get_hermes_home
+    from muse.paths import get_muse_home
 
     from .companion_state import read_companion_state
 
@@ -243,7 +243,7 @@ def write_locale_overlay(lang: str = "zh") -> bool:
     overlay = {key: _rebrand(text, name) for key, text in bundled.items() if _BRAND.search(text)}
     if lang == "zh":
         overlay.update(_COMPANION_ZH)
-    path = Path(get_hermes_home()) / "locales" / f"{lang}.yaml"
+    path = get_muse_home() / "locales" / f"{lang}.yaml"
     # JSON is valid YAML: one flat ``dotted.key: text`` mapping, which overlays accept.
     text = json.dumps(overlay, ensure_ascii=False, indent=0, sort_keys=True) + "\n"
     try:

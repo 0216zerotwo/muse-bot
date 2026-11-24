@@ -59,7 +59,7 @@ if [ "$PURGE" -eq 1 ]; then
   echo "已删除程序、证书和全部数据"
 else
   # 保留 $APP/data、$APP/caddy（避免重装时触发 Let's Encrypt 证书频率限制）和 $APP/domain
-  rm -rf "$APP/hermes" "$APP/hermes.prev" "$APP/tools"
+  rm -rf "$APP/hermes" "$APP/hermes.prev" "$APP/muse" "$APP/muse.prev" "$APP/tools"
   rm -f "$APP/.installed" "$APP/Dockerfile" "$APP/.dockerignore" "$APP/docker-compose.yml" "$APP/Caddyfile" "$APP/VERSION" "$APP/VERSION.prev"
   touch "$APP/.uninstalled"
   echo "已停掉并删除程序；数据保留在 $APP/data，HTTPS 证书保留在 $APP/caddy（再运行 install.sh 会接着用）"

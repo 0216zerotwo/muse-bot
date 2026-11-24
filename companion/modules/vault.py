@@ -111,7 +111,7 @@ def add_login(label: str, origin: str, identifier: str, password: str) -> dict[s
 
 
 def add_key(label: str, env: str, value: str) -> dict[str, Any]:
-    from hermes_cli.config import save_env_value
+    from muse.config_store import save_env_value
 
     env, value = str(env or "").strip().upper(), str(value or "").strip()
     if not _ENV.match(env):
@@ -133,7 +133,7 @@ def remove(kind: str, item: str) -> dict[str, Any]:
     if kind == "login":
         _store().remove_item(item)
     elif kind == "key":
-        from hermes_cli.config import remove_env_value
+        from muse.config_store import remove_env_value
 
         with _LOCK:
             rows = _read_keys()
