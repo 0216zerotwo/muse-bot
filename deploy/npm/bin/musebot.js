@@ -2,7 +2,7 @@
 /*
  * Muse Bot 服务器的一键安装和日常管理（npx musebot-server …）。
  *
- * 这个 npm 包只是安装器：安装包（Hermes + 伙伴插件 + 网页 + install.sh）由 GitHub Actions 在每次
+ * 这个 npm 包只是安装器：安装包（Muse 原生运行时 + 伙伴服务 + 网页 + install.sh）由 GitHub Actions 在每次
  * 打版本标签时构建，发在仓库的 Releases 里；install / update 下载最新的（或 --version 指定的）那个，
  * 并在存在 .sha256 文件时校验完整性。
  * install.sh 装 Docker（没有的话）、构建镜像（浏览器、Python、语音组件都在镜像里）、用 Caddy 申请
@@ -34,6 +34,8 @@ var FORBIDDEN_BASENAMES = [
   "auth.json",
   "devices.json",
   "media.key",
+  "vapid_private.pem",
+  "muse.db",
   "state.db",
   "projects.db",
   "keystore-password.txt"
@@ -45,9 +47,10 @@ var REQUIRED_BUNDLE_FILES = [
   "Dockerfile",
   "LICENSE",
   "NOTICE",
-  "hermes/pyproject.toml",
-  "hermes/uv.lock",
-  "companion/plugin.yaml",
+  "pyproject.toml",
+  "uv.lock",
+  "muse/__init__.py",
+  "companion/server.py",
   "web/companion.html",
   "tools/companion-pair.py"
 ];
@@ -185,12 +188,13 @@ function isUnsafeArchiveEntry(rawEntry) {
 function isForbiddenBundlePath(relPath) {
   if (!relPath) return false;
   if (relPath === "data/" || relPath.indexOf("data/") === 0) return true;
-  if (relPath === "hermes-home/" || relPath.indexOf("hermes-home/") === 0) return true;
+  if (/(?:^|\/)(?:muse-home|hermes-home)(?:\/|$)/i.test(relPath)) return true;
   if (relPath === "vault/" || relPath.indexOf("vault/") === 0) return true;
   if (relPath.slice(-1) === "/") return false;
   var base = path.posix.basename(relPath).toLowerCase();
   if (FORBIDDEN_BASENAMES.indexOf(base) !== -1) return true;
-  if (/^\.env\.(?!example$)/i.test(base)) return true;
+  if (/^(?:muse|state|projects)\.db(?:[-.].*)?$/i.test(base)) return true;
+  if (/^\.env(?:\.(?!example$)|[-_]).*$/i.test(base)) return true;
   if (/\.(?:jks|keystore|p12|pfx)$/i.test(base)) return true;
   return false;
 }

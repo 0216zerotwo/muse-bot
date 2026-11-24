@@ -1,9 +1,10 @@
 name: Release
 
-# Push a version tag (git tag v1.2.0 && git push origin v1.2.0) and this runs the server/web/deploy
-# test suites, builds the server bundle (Hermes at its pinned version + the companion plugin + the
-# built web app + install.sh + LICENSE/NOTICE), verifies no secrets are inside, generates its SHA-256
-# checksum, and publishes both to GitHub Releases. Servers pick it up with: sudo npx -y musebot-server update
+# Push a version tag (git tag v2.0.0 && git push origin v2.0.0) and this runs the server/web/deploy
+# test suites, builds the pure v2.0 server bundle (Muse native runtime + companion + built web app
+# + install.sh + LICENSE/NOTICE, zero hermes/, < 6 MB), verifies no secrets are inside, generates
+# its SHA-256 checksum, and publishes both to GitHub Releases. Servers pick it up with:
+# sudo npx -y musebot-server update
 on:
   push:
     tags: ["v*"]
@@ -59,6 +60,7 @@ jobs:
           (cd hermes && UV_PROJECT_ENVIRONMENT="$GITHUB_WORKSPACE/hermes-env" uv sync --frozen --no-dev --python 3.14 \
             --extra mcp --extra web --extra ddgs --extra doc-extract --extra computer-use --extra anthropic)
           uv pip install --python "$GITHUB_WORKSPACE/hermes-env/bin/python" py-vapid==1.9.6 http-ece==1.2.1
+          "$GITHUB_WORKSPACE/hermes-env/bin/python" -B -W error -m unittest discover -s muse/tests -t . -p "test_*.py"
           (cd companion/tests && "$GITHUB_WORKSPACE/hermes-env/bin/python" -B -m unittest discover -s . -p "test_*.py")
           MUSEBOT_PYTHON="$GITHUB_WORKSPACE/hermes-env/bin/python" node --test deploy/tests/*.test.js
       - name: Lint, test, and build the web app
@@ -72,6 +74,16 @@ jobs:
           bash deploy/vps/pack.sh
           mv "deploy/dist/musebot-server-$MUSEBOT_VERSION.tar.gz" musebot-server.tar.gz
           node deploy/npm/bin/musebot.js check-bundle musebot-server.tar.gz
+          if tar -tzf musebot-server.tar.gz | grep -q '^[^/]*/hermes/'; then
+            echo "ERROR: v2.0 release bundle must not include hermes/" >&2
+            exit 1
+          fi
+          SIZE_BYTES=$(stat -c%s musebot-server.tar.gz)
+          echo "Release bundle size: $SIZE_BYTES bytes"
+          if [ "$SIZE_BYTES" -ge $((6 * 1024 * 1024)) ]; then
+            echo "ERROR: release bundle exceeds 6 MB budget ($SIZE_BYTES bytes)" >&2
+            exit 1
+          fi
           sha256sum musebot-server.tar.gz > musebot-server.tar.gz.sha256
           sha256sum -c musebot-server.tar.gz.sha256
       - name: Publish the release

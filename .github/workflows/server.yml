@@ -107,7 +107,18 @@ jobs:
           set -euo pipefail
           (cd web && npm ci && npm run build)
           MUSEBOT_VERSION=ci-smoke bash deploy/vps/pack.sh
-          node deploy/npm/bin/musebot.js check-bundle deploy/dist/musebot-server-ci-smoke.tar.gz
+          BUNDLE="deploy/dist/musebot-server-ci-smoke.tar.gz"
+          node deploy/npm/bin/musebot.js check-bundle "$BUNDLE"
+          if tar -tzf "$BUNDLE" | grep -q '^[^/]*/hermes/'; then
+            echo "ERROR: v2.0 server bundle must not include hermes/" >&2
+            exit 1
+          fi
+          SIZE_BYTES=$(stat -c%s "$BUNDLE")
+          echo "Server bundle size: $SIZE_BYTES bytes"
+          if [ "$SIZE_BYTES" -ge $((6 * 1024 * 1024)) ]; then
+            echo "ERROR: server bundle exceeds 6 MB budget ($SIZE_BYTES bytes)" >&2
+            exit 1
+          fi
 
   windows-native:
     name: Windows native runtime & tests

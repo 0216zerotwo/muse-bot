@@ -296,6 +296,18 @@ class CliPackAndDoctorTest(unittest.TestCase):
             parsed = json.loads(buf.getvalue())
             self.assertEqual(parsed["sqlite"]["fts5_trigram"], True)
 
+    def test_serve_parser_honors_companion_host_and_port_env(self):
+        with mock.patch.dict(os.environ, {"COMPANION_HOST": "0.0.0.0", "COMPANION_PORT": "9876"}, clear=False):
+            args = muse_cli.build_parser().parse_args(["serve"])
+            self.assertEqual(args.host, "0.0.0.0")
+            self.assertEqual(args.port, 9876)
+            explicit = muse_cli.build_parser().parse_args(["serve", "--host", "127.0.0.1", "--port", "8766"])
+            self.assertEqual(explicit.host, "127.0.0.1")
+            self.assertEqual(explicit.port, 8766)
+        with mock.patch.dict(os.environ, {"COMPANION_PORT": "not-a-port"}, clear=False):
+            fallback = muse_cli.build_parser().parse_args(["serve"])
+            self.assertEqual(fallback.port, 8766)
+
 
 if __name__ == "__main__":
     unittest.main()
