@@ -1,5 +1,10 @@
-# Scripts run on Linux and in Git Bash: always LF. PowerShell scripts: CRLF.
+# Scripts and Python/config/lockfiles: always LF. PowerShell scripts: CRLF.
 * text=auto
 *.sh text eol=lf
+*.py text eol=lf
+pyproject.toml text eol=lf
+uv.lock text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
 Dockerfile text eol=lf
 *.ps1 text eol=crlf

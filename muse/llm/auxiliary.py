@@ -22,22 +22,10 @@ from muse.llm.types import LLMResponse, RetryPolicy, UsageInfo, collect_stream
 logger = logging.getLogger(__name__)
 Transport = Union[OpenAIChatTransport, OpenAIResponsesTransport, AnthropicMessagesTransport]
 
+from muse.runtime import get_runtime_loop, register_runtime_loop
+
 _LOOP_LOCK = threading.Lock()
-_runtime_loop: Optional[asyncio.AbstractEventLoop] = None
 _loop_clients: dict[int, httpx.AsyncClient] = {}
-
-
-def register_runtime_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
-    """Register (or clear) the main ASGI event loop so sync ``call_llm`` reuses its HTTP pool."""
-    global _runtime_loop
-    with _LOOP_LOCK:
-        _runtime_loop = loop
-
-
-def get_runtime_loop() -> Optional[asyncio.AbstractEventLoop]:
-    with _LOOP_LOCK:
-        loop = _runtime_loop
-    return loop if (loop is not None and not loop.is_closed() and loop.is_running()) else None
 
 
 def get_pooled_async_client(loop: Optional[asyncio.AbstractEventLoop] = None) -> Optional[httpx.AsyncClient]:
@@ -86,7 +74,7 @@ def _active_engine() -> str:
         from muse.paths import active_engine_name
         return str(active_engine_name())
     except ImportError:
-        return "native" if os.environ.get("MUSE_ENGINE", "hermes").strip().lower() == "native" else "hermes"
+        return "hermes" if os.environ.get("MUSE_ENGINE", "native").strip().lower() == "hermes" else "native"
 
 
 def _record_usage_best_effort(
@@ -99,11 +87,11 @@ def _record_usage_best_effort(
     if not (usage.input_tokens or usage.output_tokens or usage.cache_read_tokens or usage.cache_write_tokens):
         return
     try:
-        from muse.db import MuseDB
+        from muse.runtime import use_shared_db
     except ImportError:
         return
     try:
-        with MuseDB() as db:
+        with use_shared_db() as db:
             db.record_usage(
                 session_id or f"system:{task or 'aux'}",
                 model,

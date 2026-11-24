@@ -12,8 +12,11 @@ from test_stream import _adapter_module
 
 class RegenerateTest(unittest.TestCase):
     def setUp(self):
+        from muse.engine import HermesEngineBridge
+
         module = _adapter_module()
         adapter = object.__new__(module.CompanionAdapter)
+        adapter._engine = HermesEngineBridge(adapter)
         adapter._turns = {}
         adapter.store = chat_store(temp_dir("companion-regen-"))
         self.started = []

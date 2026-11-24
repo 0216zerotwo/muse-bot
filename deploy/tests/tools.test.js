@@ -49,6 +49,8 @@ function findPython() {
     return process.env.MUSEBOT_PYTHON;
   }
   const candidates = [
+    path.join(REPO_ROOT, ".venv", "bin", "python"),
+    path.join(REPO_ROOT, ".venv", "Scripts", "python.exe"),
     path.join(REPO_ROOT, "hermes-env", "bin", "python"),
     path.join(REPO_ROOT, "hermes-env", "Scripts", "python.exe"),
     "E:\\personal_bot\\hermes-env\\Scripts\\python.exe",
@@ -74,6 +76,7 @@ function toPosixPath(p) {
 test("All Python tools support --help cleanly without tracebacks", () => {
   const py = findPython();
   const scripts = [
+    "tools/setup.py",
     "tools/companion-pair.py",
     "tools/companion_api_probe.py",
     "tools/companion_ws_probe.py",
@@ -180,12 +183,12 @@ test("tools/*.sh pass bash -n, --help, setup.sh extras parity, and fetch-hermes.
     assert.match(help.stdout, /Usage:/);
   }
 
-  // Verify setup.sh extras match Dockerfile extras
+  // Verify setup.sh delegates cleanly to cross-platform tools/setup.py + root pyproject.toml
   const setupSh = fs.readFileSync(path.join(REPO_ROOT, "tools", "setup.sh"), "utf8");
-  for (const extra of ["mcp", "web", "ddgs", "doc-extract", "computer-use", "anthropic"]) {
-    assert.match(setupSh, new RegExp(`--extra ${extra}\\b`), `setup.sh missing --extra ${extra}`);
-  }
-  assert.match(setupSh, /CreateJunction/);
+  assert.match(setupSh, /tools\/setup\.py/);
+  assert.match(setupSh, /pyproject\.toml/);
+  const pyproject = fs.readFileSync(path.join(REPO_ROOT, "pyproject.toml"), "utf8");
+  assert.match(pyproject, /musebot\s*=\s*"muse\.cli:main"/);
 
   // Verify fetch-hermes.sh repairs an interrupted partial directory (only pyproject.toml present)
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musebot-fetch-test-"));

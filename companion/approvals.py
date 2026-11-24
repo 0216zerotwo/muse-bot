@@ -666,7 +666,11 @@ class Approvals:
             or coord is not None
             or callable(getattr(engine, "execute_approved", None))
         )
-        if not use_native:
+        has_native_runner = (
+            (coord is not None and getattr(coord, "_exec_runner", None) is not None)
+            or callable(getattr(engine, "execute_approved", None))
+        )
+        if not use_native or not has_native_runner:
             return await asyncio.to_thread(self._run, record)
         try:
             from .modules import computer
@@ -675,10 +679,8 @@ class Approvals:
                 await asyncio.to_thread(computer.ensure_browser)
             if coord is not None and getattr(coord, "_exec_runner", None) is not None:
                 raw = await coord.execute_approved(record, skip_policy_gates=True)
-            elif callable(exec_fn := getattr(engine, "execute_approved", None)):
-                raw = await exec_fn(record, skip_policy_gates=True)
             else:
-                return await asyncio.to_thread(self._run, record)
+                raw = await engine.execute_approved(record, skip_policy_gates=True)
         except Exception as exc:
             logger.exception("companion: native approved call %s failed", record.id)
             return f"Error: {exc}"

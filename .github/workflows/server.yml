@@ -37,6 +37,7 @@ jobs:
           done
           node --check deploy/npm/bin/musebot.js
           python3 -m py_compile \
+            tools/setup.py \
             tools/companion-pair.py \
             tools/companion_api_probe.py \
             tools/companion_ws_probe.py \
@@ -107,3 +108,43 @@ jobs:
           (cd web && npm ci && npm run build)
           MUSEBOT_VERSION=ci-smoke bash deploy/vps/pack.sh
           node deploy/npm/bin/musebot.js check-bundle deploy/dist/musebot-server-ci-smoke.tar.gz
+
+  windows-native:
+    name: Windows native runtime & tests
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0, node24
+        with:
+          persist-credentials: false
+      - name: Install uv
+        run: |
+          $ErrorActionPreference = "Stop"
+          irm https://astral.sh/uv/0.11.8/install.ps1 | iex
+          "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Cache uv packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0, node24
+        with:
+          path: ~\AppData\Local\uv\cache
+          key: uv-windows-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            uv-windows-
+      - name: Prepare native Python 3.14 environment (zero Git Bash, zero hermes/)
+        run: |
+          $ErrorActionPreference = "Stop"
+          uv sync --frozen --no-dev --python 3.14
+          .venv\Scripts\python.exe tools/setup.py --help
+          .venv\Scripts\musebot.exe --help
+      - name: Run muse unit tests (native Windows)
+        run: |
+          $ErrorActionPreference = "Stop"
+          .venv\Scripts\python.exe -B -W error -m unittest discover -s muse/tests -t . -p "test_*.py"
+      - name: Run companion unit tests (native Windows, standalone)
+        working-directory: companion/tests
+        run: |
+          $ErrorActionPreference = "Stop"
+          ..\..\.venv\Scripts\python.exe -B -W error -m unittest discover -s . -p "test_*.py"

@@ -11,14 +11,15 @@ def _session_id(chat_id: str) -> Optional[str]:
     from muse.paths import active_engine_name, get_legacy_state_db_path, get_muse_db_path
 
     if active_engine_name() == "native":
-        from muse.db import MuseDB, sync_from_legacy_state_db
+        from muse.db import sync_from_legacy_state_db
+        from muse.runtime import use_shared_db
 
         try:
             sync_from_legacy_state_db()
             muse_path = get_muse_db_path()
             if not muse_path.is_file():
                 return None
-            with MuseDB(muse_path) as db:
+            with use_shared_db(db_path=muse_path) as db:
                 sess = db.get_active_session(chat_id)
                 return sess["id"] if sess else None
         except (sqlite3.Error, OSError, ValueError):
@@ -45,14 +46,15 @@ def goal_state(chat_id: str) -> dict[str, Any]:
     from muse.paths import active_engine_name, get_muse_db_path
 
     if active_engine_name() == "native":
-        from muse.db import MuseDB, sync_from_legacy_state_db
+        from muse.db import sync_from_legacy_state_db
+        from muse.runtime import use_shared_db
 
         try:
             sync_from_legacy_state_db()
             muse_path = get_muse_db_path()
             if not muse_path.is_file():
                 return {"active": False}
-            with MuseDB(muse_path) as db:
+            with use_shared_db(db_path=muse_path) as db:
                 return db.get_goal_banner_state(chat_id)
         except (sqlite3.Error, OSError, ValueError):
             return {"active": False}

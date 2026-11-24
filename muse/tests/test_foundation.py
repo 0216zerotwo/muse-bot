@@ -111,14 +111,14 @@ class PathsFoundationTest(TempDirMixin, unittest.TestCase):
     def test_active_engine_name_feature_flag(self):
         clean_env = {k: v for k, v in os.environ.items() if k != "MUSE_ENGINE"}
         with mock.patch.dict(os.environ, clean_env, clear=True):
-            self.assertEqual(paths.active_engine_name(), "hermes")
+            self.assertEqual(paths.active_engine_name(), "native")
         for val, expected in (
-            ("hermes", "hermes"),
-            ("HERMES", "hermes"),
-            ("", "hermes"),
-            ("other", "hermes"),
             ("native", "native"),
             ("  NATIVE \n", "native"),
+            ("", "native"),
+            ("other", "native"),
+            ("hermes", "hermes"),
+            ("  HERMES \n", "hermes"),
         ):
             with mock.patch.dict(os.environ, {**clean_env, "MUSE_ENGINE": val}, clear=True):
                 self.assertEqual(paths.active_engine_name(), expected)
@@ -423,9 +423,10 @@ class NoticesAndEngineFoundationTest(TempDirMixin, unittest.TestCase):
         bridge.set_session_model_override("helper-1", None)
         self.assertNotIn("companion:helper-1", adapter.gateway_runner._session_model_overrides)
 
-        # Native engine raises cleanly until registered, and dispatches once registered
-        with self.assertRaises(NotImplementedError):
-            engine.build_engine(adapter, engine_name="native")
+        # Native engine builds the default NativeAgentEngine out-of-the-box, and respects custom factory overrides
+        native_default = engine.build_engine(adapter, engine_name="native")
+        self.assertIsInstance(native_default, engine.AgentEngine)
+        self.assertEqual(native_default.name, "native")
 
         sentinel = types.SimpleNamespace(name="native")
         engine.register_native_engine_factory(lambda adapter=None: sentinel)  # type: ignore[arg-type,return-value]

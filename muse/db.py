@@ -1038,6 +1038,11 @@ def sync_from_legacy_state_db(
 
 def close_all() -> None:
     """Close all open `MuseDB` connections in this process (ensuring Windows file handles release)."""
+    import sys
+
+    rt = sys.modules.get("muse.runtime")
+    if rt is not None and callable(getattr(rt, "close_all_shared_dbs", None)):
+        rt.close_all_shared_dbs()
     with _REGISTRY_LOCK:
         instances = list(_OPEN_INSTANCES)
     for db in instances:

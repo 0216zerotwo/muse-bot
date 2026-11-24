@@ -129,8 +129,11 @@ class StreamTest(unittest.TestCase):
 
 class TurnLifecycleAndSteeringTest(unittest.TestCase):
     def setUp(self):
+        from muse.engine import HermesEngineBridge
+
         self.module = _adapter_module()
         a = object.__new__(self.module.CompanionAdapter)
+        a._engine = HermesEngineBridge(a)
         a.platform = "companion"
         a.store = chat_store(temp_dir("companion-steer-"))
         a._subs = {}

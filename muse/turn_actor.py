@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from .context import (
-    ActorKind, CancelScope, ContextCompactor, PromptAssembler, TurnExecutionContext, turn_context_scope,
+    ActorKind, CancelScope, ContextCompactor, PromptAssembler, TurnExecutionContext, run_in_turn_thread,
+    turn_context_scope,
 )
 from .interceptors import scrub_url_secrets
 from .notices import render_notice
@@ -228,8 +229,9 @@ class ChatTurnActor:
             )
 
     async def handle_stop(self) -> str:
-        """P0 `/stop`: cancel active turn OR immediately emit `turn_end` when idle (iOS `stopGoal()`)."""
+        """P0 `/stop`: cancel active turn & queued inbox turns, OR emit `turn_end` when idle (iOS `stopGoal()`)."""
         self._steer_queue.clear()
+        queued = list(self.inbox)
         self.inbox.clear()
         if (pending := self._pending_clarify) is not None:
             self._pending_clarify = None
@@ -245,12 +247,20 @@ class ChatTurnActor:
             if self._runner_task is not None and not self._runner_task.done():
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(asyncio.shield(self._runner_task), timeout=1.0)
+            for item in queued:
+                if item.turn_id:
+                    await self._emit_turn_end(item.turn_id, outcome="cancelled", persist=True)
             await self._emit_turn_end(None, persist=False)
             return ""
 
         active_tid = self.active_turn_id
         if active_tid is None:
-            await self._emit_turn_end(None, persist=False)
+            if queued:
+                for item in queued:
+                    if item.turn_id:
+                        await self._emit_turn_end(item.turn_id, outcome="cancelled", persist=True)
+            else:
+                await self._emit_turn_end(None, persist=False)
             return ""
         if self._cancel_scope is not None:
             self._cancel_scope.cancel("user_stop")
@@ -261,6 +271,9 @@ class ChatTurnActor:
         if self.active_turn_id == active_tid:
             self._set_active_turn(None)
             await self._emit_turn_end(active_tid, outcome="cancelled", persist=True)
+        for item in queued:
+            if item.turn_id and item.turn_id != active_tid:
+                await self._emit_turn_end(item.turn_id, outcome="cancelled", persist=True)
         return active_tid
 
     async def _handle_goal_control(self, command: str) -> None:
@@ -449,9 +462,10 @@ class ChatTurnActor:
         session = self._active_session()
         session_id, current_turn_id = str(session["id"]), msg.turn_id
         self.db.heal_orphan_tool_calls(session_id)
+        user_msg_id: Optional[int] = None
         if not msg.is_retry:
             extra = {"files": [list(f) for f in msg.files]} if msg.files else None
-            self.db.append_message(session_id, self.chat_id, "user", msg.text, turn_id=current_turn_id, extra=extra)
+            user_msg_id = self.db.append_message(session_id, self.chat_id, "user", msg.text, turn_id=current_turn_id, extra=extra)
 
         scope = self._cancel_scope = CancelScope()
         if cur_task := asyncio.current_task():
@@ -465,6 +479,10 @@ class ChatTurnActor:
 
         try:
             with turn_context_scope(ctx):
+                prior_history = db_rows_to_llm_messages(self.db.get_messages(session_id, active_only=True))
+                pre_llm_context = await self._collect_pre_llm_context(
+                    msg.text, session_id, prior_history[:-1] if prior_history else [], internal=msg.internal,
+                )
                 for _ in range(self.max_iterations):
                     scope.check()
                     self._phase = "llm"
@@ -487,9 +505,10 @@ class ChatTurnActor:
                             session_id=session_id, chat_id=self.chat_id, db=self.db,
                             home=self.home, summary_checkpoint=t2.summary_checkpoint,
                         )
+                    wire_msgs = self._inject_pre_llm_context(llm_msgs, pre_llm_context, target_msg_id=user_msg_id)
 
                     raw_text, tool_calls, msg_extra, usage = await self._invoke_llm_with_overflow_retry(
-                        llm_msgs, sys_prompt, session_id, current_turn_id, streamer, scope,
+                        wire_msgs, sys_prompt, session_id, current_turn_id, streamer, scope,
                     )
                     self._record_usage(session_id, usage)
                     self.db.append_message(
@@ -570,6 +589,67 @@ class ChatTurnActor:
 
         self._set_active_turn(None)
         await self._emit_turn_end(current_turn_id, outcome="completed")
+
+    async def _collect_pre_llm_context(
+        self,
+        user_text: str,
+        session_id: str,
+        history: list[dict[str, Any]],
+        *,
+        internal: bool = False,
+    ) -> str:
+        """Build per-turn Companion helper identity/routing & presentation router hints without touching system prompt."""
+        parts: list[str] = []
+        with contextlib.suppress(Exception):
+            from companion.modules import helpers as comp_helpers
+
+            hctx = await run_in_turn_thread(comp_helpers.context_for, self.chat_id, user_text)
+            if isinstance(hctx, str) and hctx.strip():
+                parts.append(hctx.strip())
+        if not internal:
+            with contextlib.suppress(Exception):
+                from companion.modules import router as comp_router
+
+                res = await run_in_turn_thread(
+                    comp_router.on_pre_llm_call,
+                    platform="companion",
+                    session_id=session_id,
+                    user_message=user_text,
+                    conversation_history=history,
+                )
+                rctx = res.get("context") if isinstance(res, dict) else None
+                if isinstance(rctx, str) and rctx.strip():
+                    parts.append(rctx.strip())
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _inject_pre_llm_context(
+        messages: list[dict[str, Any]], extra: str, *, target_msg_id: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        if not extra or not messages:
+            return messages
+        out = list(messages)
+        target_idx: Optional[int] = None
+        if target_msg_id is not None:
+            for idx in range(len(out) - 1, -1, -1):
+                if out[idx].get("role") == "user" and out[idx].get("id") == target_msg_id:
+                    target_idx = idx
+                    break
+        if target_idx is None:
+            for idx in range(len(out) - 1, -1, -1):
+                if out[idx].get("role") == "user":
+                    target_idx = idx
+                    break
+        if target_idx is not None:
+            copy_msg = dict(out[target_idx])
+            content = copy_msg.get("content")
+            if isinstance(content, list):
+                copy_msg["content"] = [*content, {"type": "text", "text": f"\n\n{extra}"}]
+            else:
+                base = str(content or "")
+                copy_msg["content"] = f"{base}\n\n{extra}" if base else extra
+            out[target_idx] = copy_msg
+        return out
 
     async def _invoke_llm_with_overflow_retry(
         self, llm_msgs: list[dict[str, Any]], system_prompt: str, session_id: str,

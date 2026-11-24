@@ -9,6 +9,15 @@ for _cand in (_HERE.parent, _HERE.parent.parent / "companion-lib"):
         sys.path.insert(0, str(_cand))
         break
 
-from .adapter import register
+from typing import Any
+
+
+def __getattr__(name: str) -> Any:
+    if name == "register":
+        from .adapter import register
+
+        return register
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = ["register"]

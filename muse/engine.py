@@ -172,11 +172,24 @@ class ChatTurnEngine(AgentEngine):
                 lambda name, args, inv: execute_tool({"id": inv.call_id, "name": name, "arguments": args}, inv.ctx),
                 coordinator=self.approval_coordinator,
             )
+        emit_fn = getattr(sink, "emit", None)
+
+        async def _emit_chat_event(chat_id: str, event: dict[str, Any], persist: bool) -> None:
+            if callable(emit_fn):
+                await emit_fn(chat_id, event, persist=persist)
+
+        async def _wait_chat_idle(chat_id: str, timeout: float) -> None:
+            actor = self._actors.get(chat_id)
+            if actor is not None:
+                await actor.wait_idle(timeout=timeout)
+
         self.helper_orchestrator = HelperOrchestrator(
             self._run_child_actor_turn,
             store=getattr(sink, "store", None),
+            emit_chat_event_fn=_emit_chat_event if callable(emit_fn) else None,
             post_as_helper_fn=getattr(sink, "post_as_helper", None),
             submit_internal_fn=self.submit_internal,
+            wait_chat_idle_fn=_wait_chat_idle,
             set_model_override_fn=self.set_session_model_override,
             delete_desk_session_fn=self._cleanup_desk_actor,
         )
@@ -529,9 +542,11 @@ def register_native_engine_factory(factory: Optional[Callable[..., AgentEngine]]
 def build_engine(adapter: Any = None, *, runner: Any = None, engine_name: Optional[EngineName] = None) -> AgentEngine:
     selected = engine_name or active_engine_name()
     if selected == "native":
-        if _NATIVE_ENGINE_FACTORY is None:
-            raise NotImplementedError("MUSE_ENGINE=native requested before native MuseEngine runtime is registered.")
-        return _NATIVE_ENGINE_FACTORY(adapter=adapter)
+        if _NATIVE_ENGINE_FACTORY is not None:
+            return _NATIVE_ENGINE_FACTORY(adapter=adapter)
+        from .runtime import create_native_engine
+
+        return create_native_engine(adapter=adapter)
     return HermesEngineBridge(adapter=adapter, runner=runner)
 
 

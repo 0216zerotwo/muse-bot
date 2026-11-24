@@ -19,7 +19,20 @@ logger = logging.getLogger(__name__)
 
 _FRESH_S = 6 * 3600
 # Hermes's own resume of a cleanly stopped turn starts within its start-up drain (30 s at most).
+# Native Muse settles immediately after start-up, so a 3 s grace window suffices.
 _SETTLE_S = 45
+_NATIVE_SETTLE_S = 3
+
+
+def settle_seconds() -> int:
+    try:
+        from muse.paths import active_engine_name
+
+        if active_engine_name() == "native":
+            return _NATIVE_SETTLE_S
+    except ImportError:
+        pass
+    return _SETTLE_S
 
 
 def cut_off(events: list[dict[str, Any]], now_ms: int, started_ms: int) -> Optional[dict[str, Any]]:
@@ -58,7 +71,7 @@ def message(task: str) -> str:
 
 async def announce(adapter: Any, started_ms: int) -> None:
     """After start-up has settled: tell each chat whose task the last stop cut off."""
-    await asyncio.sleep(_SETTLE_S)
+    await asyncio.sleep(settle_seconds())
     try:
         chats = [chat_id for chat_id, meta in adapter.store._read_index().items()
                  if not meta.get("desk") and not meta.get("helper")]

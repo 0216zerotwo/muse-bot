@@ -229,12 +229,21 @@ _COMPANION_ZH = {
 
 
 def write_locale_overlay(lang: str = "zh") -> bool:
-    """Write ``<HERMES_HOME>/locales/<lang>.yaml`` so Hermes's system notices (restarts, interrupted
-    tasks, scheduled jobs …) speak as the companion instead of naming Hermes. True when it changed."""
+    """Write ``<HOME>/locales/<lang>.yaml`` for Hermes's legacy notice system when active.
+
+    In native Muse mode (`muse.notices` owns Chinese notices natively) or when `agent.i18n`
+    is not installed, this is a safe no-op returning ``False``.
+    """
     import json
 
-    from agent import i18n
-    from muse.paths import get_muse_home
+    from muse.paths import active_engine_name, get_muse_home
+
+    if active_engine_name() == "native":
+        return False
+    try:
+        from agent import i18n
+    except ImportError:
+        return False
 
     from .companion_state import read_companion_state
 
