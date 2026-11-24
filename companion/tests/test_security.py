@@ -66,10 +66,17 @@ class SecretsGuardTest(unittest.TestCase):
         self.assertFalse(self.guard.is_secret_path("https://example.com/cookies"))
         self.assertFalse(self.guard.is_secret_path("line1\n/opt/other\n" * 100))
         self.assertEqual(check("terminal", {"command": "hermes gateway restart"}), self.guard.SELF_CHANGE_MESSAGE)
+        self.assertEqual(check("terminal", {"command": "musebot serve"}), self.guard.SELF_CHANGE_MESSAGE)
         self.assertEqual(
             check("write_file", {"path": "hermes-home/config.yaml", "content": "model: test"}),
             self.guard.SELF_CHANGE_MESSAGE,
         )
+        self.assertEqual(
+            check("write_file", {"path": "muse-home/config.yaml", "content": "model: test"}),
+            self.guard.SELF_CHANGE_MESSAGE,
+        )
+        self.assertEqual(check("read_file", {"path": "muse-home/muse.db"}), self.guard.MESSAGE)
+        self.assertEqual(check("read_file", {"path": "hermes-home/state.db"}), self.guard.MESSAGE)
 
     def test_prevents_secret_exfiltration_via_media_widgets_creations_and_avatar_reference(self):
         env_file = self.folder / ".env"
@@ -123,7 +130,8 @@ class VaultEnvDenylistTest(unittest.TestCase):
     def test_rejects_system_and_runtime_env_vars(self):
         for bad in (
             "PATH", "PYTHONPATH", "PYTHONSTARTUP", "LD_PRELOAD", "HTTPS_PROXY", "HTTP_PROXY",
-            "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "HERMES_HOME", "COMPANION_AUTH_SECRET", "SSH_AUTH_SOCK",
+            "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "HERMES_HOME", "MUSE_HOME", "MUSE_ENGINE",
+            "MUSE_API_KEY", "MUSEBOT_PORT", "COMPANION_AUTH_SECRET", "SSH_AUTH_SOCK",
         ):
             with self.subTest(env=bad):
                 self.assertFalse(self.vault.is_allowed_env_name(bad))

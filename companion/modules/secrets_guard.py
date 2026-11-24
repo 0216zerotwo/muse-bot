@@ -1,11 +1,11 @@
 """Keep the model's shell, file, browser, and media paths away from files that hold secrets, and
-from changing the companion's own setup (Hermes's config, gateway restarts, webhooks, plugins).
+from changing the companion's own setup (config, service restarts, webhooks, plugins).
 
-API keys live in ``<HERMES_HOME>/.env`` (and ``auth.json``), the password vault in ``vault/``, the
-media signing key in ``companion/media.key``, paired devices/webhooks/push keys in ``companion/``,
-and the shared browser's sign-ins (cookies) in its profile. Hermes already masks secret-looking
-text in tool output; this layer sits in front of tool execution and file staging (``MEDIA:``,
-widgets, creations, avatar references) so protected files cannot be read, uploaded, or sent out.
+Covers both ``muse-home`` and legacy ``hermes-home``, ``muse.db`` and ``state.db``, ``.env*``
+(preserving ``.env.example`` / ``.sample`` / ``.template``), ``auth.json``, ``vault/``,
+``media.key``, ``devices.json``, ``triggers.json``, ``subscriptions.json``, ``vault-keys.json``,
+``approval-grants.json``, ``vapid_private.pem``, ``~/.codex/auth.json``, ``~/.ssh``, ``file://``,
+and self-modifying ``musebot`` / ``hermes`` commands.
 """
 
 from __future__ import annotations
@@ -15,12 +15,10 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-# Tools that touch the local disk or run code.
 _LOCAL_TOOLS = re.compile(
     r"^(?:terminal|execute_code|process|process_manage|run_cli_app|exec|exec_session|read_file|write_file|edit_file"
     r"|apply_patch|patch|search_files|list_dir|find_files|grep|rg|send_file|send_document)$|file"
 )
-# Browser tools (Playwright MCP ``mcp__browser__*`` / ``mcp_browser_*`` and Hermes ``browser_*``).
 _BROWSER_TOOLS = re.compile(r"^(?:browser_|mcp__?.+?__?browser_)", re.IGNORECASE)
 _FILE_URL = re.compile(r"(?:^|[\s'\"(=])file://", re.IGNORECASE)
 _HTTP_URL = re.compile(r"https?://[^\s'\"`()<>]+", re.IGNORECASE)
@@ -29,25 +27,26 @@ _WRITE_ONLY_TOOLS = frozenset({"write_file", "edit_file"})
 _WRITE_PATH_KEYS = frozenset({"path", "file_path", "filepath", "file", "filename", "target_file", "destination", "dest"})
 _BROWSER_LOCAL_KEYS = frozenset({"path", "paths", "file", "files", "file_path", "filepath", "code", "script"})
 
-# What a call or staged path may not name. ``.env.example`` / ``.env.sample`` / ``.env.template`` stay readable.
 _PROTECTED = re.compile(
     r"(?:^|[\s/\\'\"`=:(,@])\.env(?!(?:\.example|\.sample|\.template)\b)(?:\.[a-z0-9_-]+)?(?=$|[\s'\"`;|&)>,])"
     r"|(?:^|[\s/\\'\"`=:(@])(?:auth\.json|media\.key|vapid_private\.pem|devices\.json|triggers\.json"
-    r"|subscriptions\.json|vault-keys\.json|approval-grants\.json)(?=$|[\s/\\'\"`;|&)>,])"
-    r"|browser-profile|hermes-home[/\\]+vault|hermes_home[^\s]*[/\\]+vault"
+    r"|subscriptions\.json|vault-keys\.json|approval-grants\.json"
+    r"|(?:muse\.db|state\.db)(?:-(?:wal|shm|journal))?)(?=$|[\s'\"`;|&)>,])"
+    r"|browser-profile|(?:muse-home|hermes-home)[/\\]+vault|(?:muse_home|hermes_home)[^\s]*[/\\]+vault"
     r"|[/\\]vault(?:[/\\]|$)|[/\\](?:Login Data|Cookies|Web Data|Local State)\b"
     r"|[/\\]\.codex[/\\]+auth\.json\b"
-    r"|[/\\]\.ssh[/\\]+(?:id_[a-z0-9_]+|config|authorized_keys|known_hosts)\b"
-    r"|[/\\]\.aws[/\\]+credentials\b|[/\\]\.gnupg[/\\]|(?:^|[/\\])_?\.netrc\b",
+    r"|(?:^|[\s'\"`=:(])~[/\\]\.ssh(?:[/\\]|$|[\s'\"`;|&)>,])"
+    r"|[/\\]\.ssh(?:[/\\]+(?:id_[a-z0-9_]+|config|authorized_keys|known_hosts)\b|[/\\]|$)"
+    r"|[/\\]\.aws[/\\]+credentials\b|[/\\]\.gnupg(?:[/\\]|$)|(?:^|[/\\])_?\.netrc\b",
     re.IGNORECASE,
 )
 
-# Changing the companion's own setup: Hermes's config, its gateway (a restart cuts every chat
-# off mid-turn), webhooks, plugins. The user changes these in the app's settings.
 _SELF_CHANGE = re.compile(
     r"\bhermes(?:\.exe)?\s+(?:config\s+(?:set|edit|reset|unset)|gateway\s+(?:stop|restart|start|install|uninstall|run)"
     r"|webhook\s+(?:subscribe|unsubscribe|remove|delete)|plugins?\s+(?:install|enable|disable|remove|update)|update\b|setup\b)"
-    r"|hermes-home[/\\]+config\.yaml|hermes-home[/\\]+plugins[/\\]|webhook_subscriptions\.json",
+    r"|\bmusebot(?:\.exe)?\s+(?:serve\b|setup\b|pack\b|doctor\s+--clean-legacy|config\s+(?:set|edit|reset|unset)"
+    r"|gateway\s+(?:stop|restart|start|install|uninstall|run)|restart\b|stop\b|update\b|install\b|uninstall\b)"
+    r"|(?:muse-home|hermes-home)[/\\]+config\.yaml|(?:muse-home|hermes-home)[/\\]+plugins[/\\]|webhook_subscriptions\.json",
     re.IGNORECASE,
 )
 _READS = frozenset({"read_file", "search_files", "list_dir", "find_files", "grep", "rg"})
@@ -73,12 +72,18 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
-def _hermes_home() -> Optional[Path]:
+def _candidate_homes() -> list[Path]:
+    homes: list[Path] = []
     with contextlib.suppress(Exception):
-        from muse.paths import get_muse_home
+        from muse.paths import get_muse_home, get_repo_root
 
-        return get_muse_home().resolve()
-    return None
+        homes.append(get_muse_home().resolve())
+        repo = get_repo_root()
+        for folder in ("muse-home", "hermes-home"):
+            cand = (repo / folder).resolve()
+            if cand not in homes:
+                homes.append(cand)
+    return homes
 
 
 def _without_http_urls(text: str) -> str:
@@ -95,8 +100,7 @@ def is_secret_path(path_or_text: str | Path) -> bool:
         return False
     if lower.startswith("file://"):
         return True
-    cleaned = _without_http_urls(raw)
-    if _PROTECTED.search(cleaned):
+    if _PROTECTED.search(_without_http_urls(raw)):
         return True
     if "\n" in raw or "\r" in raw or len(raw) > 1024:
         return False
@@ -104,10 +108,15 @@ def is_secret_path(path_or_text: str | Path) -> bool:
         resolved = Path(raw).expanduser().resolve()
         if _PROTECTED.search(str(resolved)) or _PROTECTED.search(resolved.as_posix()):
             return True
-        home = _hermes_home()
-        if home is not None:
+        for home in _candidate_homes():
             protected_roots = (
                 home / ".env",
+                home / "muse.db",
+                home / "muse.db-wal",
+                home / "muse.db-shm",
+                home / "state.db",
+                home / "state.db-wal",
+                home / "state.db-shm",
                 home / "auth.json",
                 home / "vault",
                 home / "companion" / "media.key",
@@ -115,6 +124,7 @@ def is_secret_path(path_or_text: str | Path) -> bool:
                 home / "companion" / "triggers.json",
                 home / "companion" / "vault-keys.json",
                 home / "companion" / "approval-grants.json",
+                home / "companion" / "approvals",
                 home / "companion" / "push",
                 home / "companion" / "mcp" / "browser" / "browser-profile",
             )
@@ -124,12 +134,10 @@ def is_secret_path(path_or_text: str | Path) -> bool:
     return False
 
 
-def _targets_hermes_config(texts: list[str]) -> bool:
-    home = _hermes_home()
-    if home is None:
+def _targets_protected_config(texts: list[str]) -> bool:
+    homes = _candidate_homes()
+    if not homes:
         return False
-    config_file = home / "config.yaml"
-    plugins_dir = home / "plugins"
     for text in texts:
         raw = text.strip()
         if not raw or "\n" in raw or "\r" in raw or len(raw) > 1024:
@@ -138,8 +146,11 @@ def _targets_hermes_config(texts: list[str]) -> bool:
             continue
         with contextlib.suppress(OSError, RuntimeError, ValueError):
             resolved = Path(raw).expanduser().resolve()
-            if resolved == config_file or plugins_dir == resolved or plugins_dir in resolved.parents:
-                return True
+            for home in homes:
+                config_file = home / "config.yaml"
+                plugins_dir = home / "plugins"
+                if resolved == config_file or plugins_dir == resolved or plugins_dir in resolved.parents:
+                    return True
     return False
 
 
@@ -176,10 +187,9 @@ def check(tool_name: str, args: Any) -> Optional[str]:
             target_texts = extracted
     if any(_PROTECTED.search(_without_http_urls(text)) or is_secret_path(text) for text in target_texts):
         return MESSAGE
-    # Reading its own config is fine; running these commands or writing those files is not.
     if is_local and name not in _READS and (
         any(_SELF_CHANGE.search(_without_http_urls(text)) for text in target_texts)
-        or _targets_hermes_config(target_texts)
+        or _targets_protected_config(target_texts)
     ):
         return SELF_CHANGE_MESSAGE
     return None

@@ -124,7 +124,7 @@ class HermesEngineBridge(AgentEngine):
 
 
 class ChatTurnEngine(AgentEngine):
-    """Native ``AgentEngine`` wiring one shared ``MuseDB``, ``muse.llm`` streaming, and per-chat ``ChatTurnActor``s."""
+    """Native ``AgentEngine`` wiring shared ``MuseDB``, ``muse.llm``, middleware, helpers, and ``GoalLoopController``."""
 
     def __init__(
         self,
@@ -133,10 +133,15 @@ class ChatTurnEngine(AgentEngine):
         db: Any = None,
         stream_llm: Optional[Callable[..., Any]] = None,
         execute_tool: Optional[Callable[..., Any]] = None,
+        raw_tool_executor: Optional[Callable[..., Any]] = None,
+        use_interceptors: bool = False,
+        approvals: Any = None,
         on_goal_control: Optional[Callable[..., Any]] = None,
         tools_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
     ) -> None:
         from .context import ContextCompactor, PromptAssembler
+        from .helpers_orch import HelperOrchestrator
+        from .interceptors import NativeApprovalCoordinator, ToolInterceptorPipeline
 
         self._sink = sink
         self._db = db
@@ -148,10 +153,42 @@ class ChatTurnEngine(AgentEngine):
         self._assembler = PromptAssembler()
         self._compactor = ContextCompactor()
         self._actors: dict[str, Any] = {}
+        self._goal_controller: Any = None
+
+        resolved_approvals = approvals if approvals is not None else getattr(sink, "approvals", None)
+        self.approval_coordinator: Optional[NativeApprovalCoordinator] = (
+            NativeApprovalCoordinator(approvals=resolved_approvals, adapter=sink)
+            if resolved_approvals is not None
+            else None
+        )
+        self.pipeline: Optional[ToolInterceptorPipeline] = None
+        if raw_tool_executor is not None:
+            self.pipeline = ToolInterceptorPipeline(raw_tool_executor, coordinator=self.approval_coordinator)
+        elif use_interceptors and execute_tool is not None:
+            self.pipeline = ToolInterceptorPipeline(
+                lambda name, args, inv: execute_tool({"id": inv.call_id, "name": name, "arguments": args}, inv.ctx),
+                coordinator=self.approval_coordinator,
+            )
+        self.helper_orchestrator = HelperOrchestrator(
+            self._run_child_actor_turn,
+            store=getattr(sink, "store", None),
+            post_as_helper_fn=getattr(sink, "post_as_helper", None),
+            submit_internal_fn=self.submit_internal,
+            set_model_override_fn=self.set_session_model_override,
+            delete_desk_session_fn=self._cleanup_desk_actor,
+        )
 
     @property
     def name(self) -> EngineName:
         return "native"
+
+    @property
+    def goal_controller(self) -> Any:
+        if self._goal_controller is None:
+            from .goal_loop import GoalLoopController
+
+            self._goal_controller = GoalLoopController(db=self._ensure_db(), adapter=self._sink)
+        return self._goal_controller
 
     def _ensure_db(self) -> Any:
         if self._db is None:
@@ -162,6 +199,9 @@ class ChatTurnEngine(AgentEngine):
         return self._db
 
     async def start(self) -> None:
+        from .interceptors import install_privacy_hardening
+
+        install_privacy_hardening()
         db = self._ensure_db()
         if callable(getattr(db, "sync_from_legacy_state_db", None)):
             await asyncio.to_thread(db.sync_from_legacy_state_db)
@@ -170,6 +210,8 @@ class ChatTurnEngine(AgentEngine):
         for actor in list(self._actors.values()):
             if actor.active_turn_id is not None:
                 await actor.handle_stop()
+        if self._goal_controller is not None:
+            self._goal_controller.close()
         if self._owns_db and self._db is not None and callable(getattr(self._db, "close", None)):
             self._db.close()
             self._db = None
@@ -222,6 +264,81 @@ class ChatTurnEngine(AgentEngine):
         ):
             yield ev
 
+    async def _actor_execute_tool(self, tc: dict[str, Any], ctx: Any) -> str:
+        import json
+
+        if self.pipeline is not None:
+            fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+            name = str(fn.get("name") or tc.get("name") or "")
+            raw_args = fn.get("arguments") if "arguments" in fn else tc.get("arguments")
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) and raw_args.strip() else (dict(raw_args) if isinstance(raw_args, dict) else {})
+            except ValueError:
+                args = {}
+            call_id = str(tc.get("id") or f"call_{uuid.uuid4().hex[:8]}")
+            return await self.pipeline.execute(name, args, call_id=call_id, ctx=ctx)
+        if self._execute_tool is not None:
+            return await self._execute_tool(tc, ctx)
+        return json.dumps({"error": "No tool executor configured"})
+
+    async def _default_goal_control(self, chat_id: str, command: str) -> None:
+        await self.goal_controller.handle_control(chat_id, command)
+
+    async def _cleanup_desk_actor(self, desk_chat_id: str) -> None:
+        self._actors.pop(desk_chat_id, None)
+        if self._db is not None and callable(getattr(self._db, "get_active_session", None)):
+            sess = self._db.get_active_session(desk_chat_id, source="companion")
+            if sess and sess.get("id") and callable(getattr(self._db, "update_session", None)):
+                self._db.update_session(str(sess["id"]), active=False)
+
+    async def _run_child_actor_turn(
+        self, *, chat_id: str, prompt: str, turn_id: str, ctx: Any = None, model_override: Optional[dict[str, Any]] = None
+    ) -> str:
+        actor = self.get_actor(chat_id)
+        prev_facing, prev_kind, prev_helper_id = actor.facing_chat_id, actor.actor_kind, actor.helper_id
+        try:
+            if ctx is not None:
+                actor.facing_chat_id = str(getattr(ctx, "facing_chat_id", "") or chat_id)
+                actor.actor_kind = getattr(ctx, "actor_kind", prev_kind)
+                actor.helper_id = getattr(ctx, "helper_id", prev_helper_id)
+            actor.set_model_override(model_override)
+            await actor.submit(prompt, turn_id, emit_user_message=False)
+            await actor.wait_idle()
+        finally:
+            actor.facing_chat_id = prev_facing
+            actor.actor_kind = prev_kind
+            actor.helper_id = prev_helper_id
+        events = self._sink.store_events(chat_id)
+        return "\n\n".join(
+            str(e.get("text") or "").strip()
+            for e in events
+            if e.get("event") == "message" and e.get("turn_phase") == "answer" and e.get("turn_id") == turn_id and str(e.get("text") or "").strip()
+        )
+
+    async def execute_approved(self, record: Any, *, skip_policy_gates: bool = True) -> str:
+        if self.approval_coordinator is not None and self.pipeline is not None:
+            return await self.approval_coordinator.execute_approved(record, skip_policy_gates=skip_policy_gates)
+        if self._execute_tool is not None:
+            from .context import TurnExecutionContext
+
+            chat_id = str(getattr(record, "session_key", "") or "").split(":", 1)[-1]
+            ctx = TurnExecutionContext(chat_id=chat_id, facing_chat_id=chat_id, session_id=f"approved:{record.id}")
+            tc = {"id": record.call_id, "name": record.tool_name, "arguments": dict(record.arguments)}
+            return await self._execute_tool(tc, ctx)
+        raise RuntimeError("No approval executor configured on ChatTurnEngine")
+
+    @staticmethod
+    def _default_actor_identity(chat_id: str) -> tuple[Any, Optional[str]]:
+        try:
+            from companion.modules import helpers
+
+            row = helpers.helper_for_chat(chat_id)
+            if isinstance(row, dict) and row.get("id"):
+                return "helper", str(row["id"])
+        except Exception:
+            pass
+        return "companion", None
+
     def get_actor(self, chat_id: str) -> Any:
         from .turn_actor import ChatTurnActor
 
@@ -236,15 +353,24 @@ class ChatTurnEngine(AgentEngine):
                     async for ev in self._default_stream_llm(actor=actor, **kw):
                         yield ev
 
+            tool_fn = (
+                self._actor_execute_tool
+                if (self.pipeline is not None or self._execute_tool is not None)
+                else None
+            )
+            default_kind, default_helper_id = self._default_actor_identity(chat_id)
             actor = ChatTurnActor(
                 chat_id,
                 db=self._ensure_db(),
                 sink=self._sink,
                 stream_llm=_bound_stream,
-                execute_tool=self._execute_tool,
+                execute_tool=tool_fn,
                 assembler=self._assembler,
                 compactor=self._compactor,
-                on_goal_control=self._on_goal_control,
+                facing_chat_id=chat_id,
+                actor_kind=default_kind,
+                helper_id=default_helper_id,
+                on_goal_control=self._on_goal_control or self._default_goal_control,
             )
             self._actors[chat_id] = actor
         return actor
@@ -256,10 +382,14 @@ class ChatTurnEngine(AgentEngine):
         turn_id: str,
         files: Optional[list[tuple[str, str]]] = None,
     ) -> None:
-        await self.get_actor(chat_id).submit(text, turn_id, files=files, emit_user_message=False)
+        actor = self.get_actor(chat_id)
+        actor.facing_chat_id = self.helper_orchestrator.facing_chat(chat_id) or chat_id
+        await actor.submit(text, turn_id, files=files, emit_user_message=False)
 
     async def submit_internal(self, chat_id: str, text: str) -> str:
-        return await self.get_actor(chat_id).submit_internal(text)
+        actor = self.get_actor(chat_id)
+        actor.facing_chat_id = self.helper_orchestrator.facing_chat(chat_id) or chat_id
+        return await actor.submit_internal(text)
 
     async def stop_turn(self, chat_id: str) -> None:
         await self.get_actor(chat_id).handle_stop()
@@ -274,7 +404,9 @@ class ChatTurnEngine(AgentEngine):
         self.get_actor(chat_id).set_model_override(override)
 
     async def regenerate(self, chat_id: str, turn_id: str) -> str:
-        return await self.get_actor(chat_id).regenerate(turn_id)
+        actor = self.get_actor(chat_id)
+        actor.facing_chat_id = self.helper_orchestrator.facing_chat(chat_id) or chat_id
+        return await actor.regenerate(turn_id)
 
     async def deliver_proactive(
         self,
