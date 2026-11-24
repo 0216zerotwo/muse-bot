@@ -912,13 +912,14 @@ def usage_summary(timezone: Optional[str] = None) -> dict[str, Any]:
     periods = {label: _since(days, timezone) for label, days in (("today", 1), ("week", 7))}
     fetched: dict[str, list[tuple]] = {label: [] for label in periods}
     if active_engine_name() == "native":
-        from muse.db import MuseDB, sync_from_legacy_state_db
+        from muse.db import sync_from_legacy_state_db
+        from muse.runtime import use_shared_db
 
         try:
             sync_from_legacy_state_db()
             muse_path = get_muse_db_path()
             if muse_path.is_file():
-                with MuseDB(muse_path) as db:
+                with use_shared_db(db_path=muse_path) as db:
                     for label, since in periods.items():
                         fetched[label] = db.query_usage_since(since)
         except (sqlite3.Error, OSError, ValueError) as exc:

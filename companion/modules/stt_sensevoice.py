@@ -140,15 +140,16 @@ def _raw_stt_config() -> dict[str, Any]:
 
 def _cloud_ready(provider: str, stt: dict[str, Any]) -> bool:
     import importlib.util
+    import sys
 
-    try:
-        from muse.media import stt as transcription_tools
-
-        spec = getattr(transcription_tools, "_CLOUD_PROVIDER_SPECS", {}).get(provider)
-        if spec is not None and callable(spec[1]) and spec[1]():
-            return True
-    except Exception:
-        pass
+    transcription_tools = sys.modules.get("muse.media.stt")
+    if transcription_tools is not None:
+        try:
+            spec = getattr(transcription_tools, "_CLOUD_PROVIDER_SPECS", {}).get(provider)
+            if spec is not None and callable(spec[1]) and spec[1]():
+                return True
+        except Exception:
+            pass
     env_var, pkg = _CLOUD_PROVIDERS.get(provider, ("", None))
     if not env_var:
         return False
@@ -157,10 +158,18 @@ def _cloud_ready(provider: str, stt: dict[str, Any]) -> bool:
         if not (isinstance(section, dict) and section.get("api_key")):
             return False
     section = stt.get(provider)
+    env_val = os.environ.get(env_var)
+    if not env_val:
+        try:
+            from muse.config_store import get_env_value
+
+            env_val = get_env_value(env_var)
+        except Exception:
+            env_val = None
     key = (
         (section.get("api_key") if isinstance(section, dict) else None)
         or stt.get("api_key")
-        or os.environ.get(env_var)
+        or env_val
     )
     return bool(str(key or "").strip())
 

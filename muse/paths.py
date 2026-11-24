@@ -86,7 +86,7 @@ def get_env_path(home: Path | None = None) -> Path:
 
 
 def active_engine_name() -> EngineName:
-    return "native" if os.environ.get("MUSE_ENGINE", "hermes").strip().lower() == "native" else "hermes"
+    return "hermes" if os.environ.get("MUSE_ENGINE", "native").strip().lower() == "hermes" else "native"
 
 
 __all__ = [

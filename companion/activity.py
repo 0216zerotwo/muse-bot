@@ -55,9 +55,9 @@ def _chat_for_session(session_id: str) -> Optional[str]:
         db_path = get_muse_db_path()
         if session_id and db_path.is_file():
             with contextlib.suppress(Exception):
-                from muse.db import MuseDB
+                from muse.runtime import use_shared_db
 
-                with MuseDB(db_path) as mdb:
+                with use_shared_db(db_path=db_path) as mdb:
                     row = mdb.get_session(session_id)
                     if row and row.get("chat_id"):
                         cid = str(row["chat_id"])

@@ -1302,7 +1302,7 @@ def _idle_lifecycle_notices() -> set[str]:
 
 def check_requirements() -> bool:
     try:
-        import fastapi  # noqa: F401
+        import starlette  # noqa: F401
         import uvicorn  # noqa: F401
     except ImportError:
         return False
@@ -1363,7 +1363,7 @@ def register(ctx):
         validate_config=lambda config: True,
         is_connected=lambda config: True,
         required_env=[],
-        install_hint="Needs the web extra (fastapi, uvicorn)",
+        install_hint="Needs the web dependencies (starlette, uvicorn)",
         env_enablement_fn=_env_enablement,
         allowed_users_env="COMPANION_ALLOWED_USERS",
         # Scheduled tasks can deliver into the companion chat (deliver="companion:<chat_id>").

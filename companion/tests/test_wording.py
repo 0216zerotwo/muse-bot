@@ -13,15 +13,22 @@ def _fields(text):
 
 class WordingTest(unittest.TestCase):
     def test_every_rewording_fits_the_notice_it_replaces(self):
+        from muse import notices
+
+        _, (persona,) = load("persona")
+        for key, text in persona._COMPANION_ZH.items():
+            with self.subTest(key=key):
+                self.assertIn(key, notices.NOTICE_PLACEHOLDERS)
+                self.assertLessEqual(_fields(text), notices.NOTICE_PLACEHOLDERS[key])
+
+        # Also cross-check Hermes's bundled i18n catalog whenever available in the environment.
         try:
             from agent import i18n
         except ImportError:
-            self.skipTest("hermes agent.i18n not installed in standalone environment")
-
-        _, (persona,) = load("persona")
+            return
         bundled = i18n._load_bundled("zh")
         for key, text in persona._COMPANION_ZH.items():
-            with self.subTest(key=key):
+            with self.subTest(hermes_key=key):
                 self.assertIn(key, bundled)
                 self.assertLessEqual(_fields(text), _fields(bundled[key]))
 

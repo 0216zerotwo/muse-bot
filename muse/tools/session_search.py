@@ -63,7 +63,9 @@ def session_search_handler(
                 {"success": True, "query": query, "count": 0, "results": []},
                 ensure_ascii=False,
             )
-        with MuseDB(muse_db_path) as local_db:
+        from muse.runtime import use_shared_db
+
+        with use_shared_db(db_path=muse_db_path) as local_db:
             rows = local_db.search_messages(query, chat_id=chat_id, limit=limit)
 
     formatted = [
