@@ -21,9 +21,9 @@ _KEEP = 30
 
 
 def _jobs_file() -> Path:
-    from hermes_constants import get_hermes_home
+    from muse.paths import get_muse_home
 
-    return Path(get_hermes_home()) / "cron" / "jobs.json"
+    return get_muse_home() / "cron" / "jobs.json"
 
 
 def snapshot(source: Optional[Path] = None, folder: Optional[Path] = None, keep: int = _KEEP) -> Optional[Path]:

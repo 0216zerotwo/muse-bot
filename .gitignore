@@ -2,12 +2,17 @@
 # something downloaded, or something built.
 
 # --- Your server's data: API keys (.env), chats, memory, paired devices, browser logins -------------
+muse-home/
 hermes-home/
 data/
 *.env
 .env
 .env.*
 !.env.example
+.config.lock
+.env.lock
+muse.db
+muse.db-*
 
 # --- Hermes Agent (the engine): fetched by tools/fetch-hermes.sh, and its Python environment -------
 hermes/

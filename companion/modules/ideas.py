@@ -47,11 +47,11 @@ def _write_cache(data: dict[str, Any]) -> None:
 
 
 def _memory_text() -> str:
-    from hermes_constants import get_hermes_home
+    from muse.paths import get_muse_home
 
     parts = []
     for name in ("USER.md", "MEMORY.md"):
-        path = Path(get_hermes_home()) / "memories" / name
+        path = get_muse_home() / "memories" / name
         if path.is_file():
             parts.append(path.read_text(encoding="utf-8").replace("\n§\n", "\n"))
     return "\n\n".join(parts)[:_MEMORY_CHARS]

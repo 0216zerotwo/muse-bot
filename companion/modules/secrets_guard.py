@@ -75,9 +75,9 @@ def _strings(value: Any) -> list[str]:
 
 def _hermes_home() -> Optional[Path]:
     with contextlib.suppress(Exception):
-        from hermes_constants import get_hermes_home
+        from muse.paths import get_muse_home
 
-        return Path(get_hermes_home()).resolve()
+        return get_muse_home().resolve()
     return None
 
 

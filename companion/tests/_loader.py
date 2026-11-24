@@ -1,9 +1,9 @@
 """Loads the companion's modules for a test, cut off from the real data.
 
 Each call gets fresh copies of the modules in a package of its own whose ``paths`` module points at
-a new temporary folder, so nothing a test writes reaches ``hermes-home`` (``HERMES_HOME`` alone
-does not isolate a script: Hermes resolves its home in more than one way). Anything that would
-reach the scheduled jobs, the network or a model is stubbed by the test itself.
+a new temporary folder, and ``MUSE_HOME`` defaults to an isolated temporary directory so nothing a
+test writes reaches ``muse-home`` or ``hermes-home``. Anything that would reach the scheduled jobs,
+the network or a model is stubbed by the test itself.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import importlib
 import importlib.util
+import os
 import shutil
 import sys
 import tempfile
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = ROOT.parent
 _TEMP_DIRS: list[Path] = []
 
 
@@ -39,12 +41,34 @@ def temp_dir(prefix: str = "companion-test-") -> Path:
     return folder
 
 
-def ensure_hermes_stubs() -> None:
-    """Ensure ``gateway.*`` and ``hermes_constants`` are importable even in standalone CI runs
-    where a full Hermes checkout is not present alongside ``companion/``."""
-    hermes_dir = ROOT.parent / "hermes"
-    if hermes_dir.is_dir() and str(hermes_dir) not in sys.path:
+def find_hermes_dir() -> Optional[Path]:
+    """Locate a Hermes source tree in standard checkouts or via ``HERMES_SRC_DIR``."""
+    candidates: list[Path] = [REPO_ROOT / "hermes"]
+    env_dir = os.environ.get("HERMES_SRC_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir))
+    for cand in candidates:
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def _setup_test_paths() -> None:
+    hermes_dir = find_hermes_dir()
+    if hermes_dir is not None and str(hermes_dir) not in sys.path:
         sys.path.insert(0, str(hermes_dir))
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    os.environ.setdefault("MUSE_HOME", str(temp_dir("companion-muse-home-")))
+
+
+_setup_test_paths()
+
+
+def ensure_hermes_stubs() -> None:
+    """Ensure ``gateway.*`` is importable even in standalone CI runs where a full Hermes checkout
+    is not present alongside ``companion/``."""
+    _setup_test_paths()
     try:
         import gateway.config  # noqa: F401
         import gateway.platforms.base  # noqa: F401
@@ -159,12 +183,6 @@ def ensure_hermes_stubs() -> None:
     gw_event.MessageType = MessageType
     sys.modules["gateway.platforms.event"] = gw_event
     gw_plat.event = gw_event
-
-    if "hermes_constants" not in sys.modules:
-        hc = types.ModuleType("hermes_constants")
-        hc_root = temp_dir("companion-hermes-home-")
-        hc.get_hermes_home = lambda: hc_root
-        sys.modules["hermes_constants"] = hc
 
 
 def load(*names: str) -> tuple[Path, list[Any]]:

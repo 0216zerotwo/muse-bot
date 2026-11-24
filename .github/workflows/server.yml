@@ -94,6 +94,9 @@ jobs:
           (cd hermes && UV_PROJECT_ENVIRONMENT="$GITHUB_WORKSPACE/hermes-env" uv sync --frozen --no-dev --python 3.14 \
             --extra mcp --extra web --extra ddgs --extra doc-extract --extra computer-use --extra anthropic)
           uv pip install --python "$GITHUB_WORKSPACE/hermes-env/bin/python" py-vapid==1.9.6 http-ece==1.2.1
+      - name: Run muse unit tests
+        run: |
+          "$GITHUB_WORKSPACE/hermes-env/bin/python" -B -W error -m unittest discover -s muse/tests -t . -p "test_*.py"
       - name: Run companion unit tests
         working-directory: companion/tests
         run: |

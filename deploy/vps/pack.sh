@@ -91,7 +91,7 @@ tar -C "$HERMES_SRC" -cf - \
   . | tar -C "$B/hermes" -xf -
 
 echo "==> 伙伴插件和网页"
-tar -C "$ROOT" -cf - --exclude='__pycache__' --exclude='*.pyc' companion | tar -C "$B" -xf -
+tar -C "$ROOT" -cf - --exclude='__pycache__' --exclude='*.pyc' muse companion | tar -C "$B" -xf -
 mkdir -p "$B/web" && cp -r "$WEB/." "$B/web/"
 cp "$ROOT/tools/companion-pair.py" "$B/tools/"
 printf '%s\n' "$RELEASE" > "$B/VERSION"

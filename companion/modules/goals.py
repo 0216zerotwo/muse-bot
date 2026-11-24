@@ -9,9 +9,9 @@ from typing import Any, Optional
 
 
 def _session_id(chat_id: str) -> Optional[str]:
-    from hermes_constants import get_hermes_home
+    from muse.paths import get_legacy_state_db_path
 
-    path = Path(get_hermes_home()) / "state.db"
+    path = get_legacy_state_db_path()
     if not path.is_file():
         return None
     try:

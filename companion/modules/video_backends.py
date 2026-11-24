@@ -50,7 +50,7 @@ _DEADLINE_S = 900.0
 
 def _settings(backend: str) -> dict[str, Any]:
     try:
-        from hermes_cli.config import load_config
+        from muse.config_store import load_config
 
         section = (load_config().get("video_gen") or {}).get(backend)
     except Exception:
