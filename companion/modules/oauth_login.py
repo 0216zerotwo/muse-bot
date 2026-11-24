@@ -64,11 +64,11 @@ def _remember_source(kind: str, source: str) -> None:
 def signed_in(kind: str) -> bool:
     try:
         if kind == "chatgpt":
-            from hermes_cli.auth import get_codex_auth_status
+            from muse.llm.oauth import get_codex_auth_status
 
             return bool(get_codex_auth_status().get("logged_in"))
         if kind == "grok":
-            from hermes_cli.auth import _read_xai_oauth_tokens
+            from muse.llm.oauth import _read_xai_oauth_tokens
 
             _read_xai_oauth_tokens()
             return True
@@ -84,16 +84,13 @@ def _set(login_id: str, **changes: Any) -> None:
 
 
 def _codex_start() -> tuple[dict[str, Any], Any]:
-    from hermes_cli.auth_codex import (
-        _codex_exchange_authorization_code, _codex_poll_authorization_code, _codex_request_device_code,
-        _save_codex_tokens)
-    from hermes_cli.auth_constants import CODEX_OAUTH_CLIENT_ID
+    from muse.llm.oauth import (
+        CODEX_OAUTH_CLIENT_ID, _codex_exchange_authorization_code, _codex_poll_authorization_code,
+        _codex_request_device_code, _save_codex_tokens, _utc_now_z)
 
     device = _codex_request_device_code(_CODEX_ISSUER, CODEX_OAUTH_CLIENT_ID)
 
     def finish() -> None:
-        from hermes_cli.auth import _utc_now_z
-
         code = _codex_poll_authorization_code(
             _CODEX_ISSUER, device_auth_id=device["device_auth_id"], user_code=device["user_code"],
             poll_interval=device["interval"])
@@ -107,10 +104,9 @@ def _codex_start() -> tuple[dict[str, Any], Any]:
 
 def _grok_start() -> tuple[dict[str, Any], Any]:
     import httpx
-    from hermes_cli.auth import _utc_now_z, _xai_oauth_discovery
-    from hermes_cli.auth_xai import (
-        _save_xai_oauth_tokens, _token_pair, _xai_oauth_poll_device_token, _xai_oauth_request_device_code,
-        _xai_tokens_from_payload)
+    from muse.llm.oauth import (
+        _save_xai_oauth_tokens, _token_pair, _utc_now_z, _xai_oauth_discovery,
+        _xai_oauth_poll_device_token, _xai_oauth_request_device_code, _xai_tokens_from_payload)
 
     discovery = _xai_oauth_discovery(20.0)
     with httpx.Client(timeout=20.0, headers={"Accept": "application/json"}) as client:
@@ -174,7 +170,7 @@ def local_login(kind: str) -> bool:
     if kind != "chatgpt":
         return False
     try:
-        from hermes_cli.auth_codex import _import_codex_cli_tokens
+        from muse.llm.oauth import _import_codex_cli_tokens
 
         return _import_codex_cli_tokens() is not None
     except Exception:
@@ -182,10 +178,9 @@ def local_login(kind: str) -> bool:
 
 
 def import_local(kind: str) -> None:
-    """Use that sign-in here instead of signing in again (copied into Hermes's auth store, which
+    """Use that sign-in here instead of signing in again (copied into the auth store, which
     refreshes it from then on)."""
-    from hermes_cli.auth import _utc_now_z
-    from hermes_cli.auth_codex import _import_codex_cli_tokens, _save_codex_tokens
+    from muse.llm.oauth import _import_codex_cli_tokens, _save_codex_tokens, _utc_now_z
 
     tokens = _import_codex_cli_tokens() if kind == "chatgpt" else None
     if not tokens:
@@ -214,12 +209,9 @@ def keep_signed_in() -> bool:
 def models(kind: str) -> list[str]:
     """Model ids the signed-in plan offers (ChatGPT: asked live; Grok: xAI's catalog)."""
     if kind == "chatgpt":
-        from hermes_cli.codex_models import DEFAULT_CODEX_MODELS
+        from muse.llm.oauth import DEFAULT_CODEX_MODELS, get_codex_model_ids, resolve_codex_runtime_credentials
 
         try:
-            from hermes_cli.auth import resolve_codex_runtime_credentials
-            from hermes_cli.codex_models import get_codex_model_ids
-
             creds = resolve_codex_runtime_credentials()
             return get_codex_model_ids(creds.get("api_key"), creds.get("base_url")) or list(DEFAULT_CODEX_MODELS)
         except Exception:

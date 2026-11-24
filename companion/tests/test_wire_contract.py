@@ -122,6 +122,14 @@ FORBIDDEN_LEGACY_IMPORTS: frozenset[str] = frozenset({
     "hermes_constants",
     "hermes_time",
     "hermes_cli.config",
+    "hermes_cli.auth",
+    "hermes_cli.auth_codex",
+    "hermes_cli.auth_xai",
+    "hermes_cli.auth_constants",
+    "hermes_cli.codex_models",
+    "hermes_cli.runtime_provider",
+    "agent.auxiliary_client",
+    "agent.models_dev",
 })
 
 

@@ -100,7 +100,7 @@ def quick_choice(user_message: str) -> Optional[dict[str, str]]:
 
 def classify(user_message: str, history: list[Any]) -> Optional[dict[str, str]]:
     """``{"form", "kind"}`` for this turn, or None when the router can't say."""
-    from agent.auxiliary_client import call_llm
+    from muse.llm.auxiliary import call_llm
 
     from .models import quick_model, read_models, runtime_provider
 

@@ -367,11 +367,11 @@ def reset(store: Any, helper_id: str) -> dict[str, Any]:
 
 
 def model_override(helper: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """Hermes's per-session model override for a helper's own model (None: the main assistant's)."""
+    """Per-session model override for a helper's own model (None: the main assistant's)."""
     name = helper.get("model") or ""
     if not name:
         return None
-    from hermes_cli.runtime_provider import resolve_runtime_provider
+    from muse.llm.providers import resolve_runtime_provider
 
     from .models import read_models, runtime_provider
 

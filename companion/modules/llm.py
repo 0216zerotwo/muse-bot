@@ -22,7 +22,7 @@ def chat_target() -> dict[str, Any]:
 
 
 def ask(system: str, user: str, *, max_tokens: int = 2000, temperature: float = 0, timeout: int = 120) -> str:
-    from agent.auxiliary_client import call_llm
+    from muse.llm.auxiliary import call_llm
 
     response = call_llm(
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
