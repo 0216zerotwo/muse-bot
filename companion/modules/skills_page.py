@@ -12,30 +12,14 @@ user making the change is the approval), so its checks on names, size and conten
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 _FRONT = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.S)
-
-
-def _root() -> Path:
-    from muse.paths import get_muse_home
-
-    return get_muse_home() / "skills"
-
-
-def _bundled() -> set[str]:
-    try:
-        lines = (_root() / ".bundled_manifest").read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return set()
-    return {line.split(":", 1)[0].strip() for line in lines if line.strip()}
 
 
 def _meta(text: str) -> dict[str, str]:
@@ -49,62 +33,45 @@ def _meta(text: str) -> dict[str, str]:
 
 
 def list_skills() -> dict[str, Any]:
-    bundled = _bundled()
-    learned, builtin = [], []
-    for path in _root().glob("**/SKILL.md"):
-        if any(part.startswith(".") for part in path.relative_to(_root()).parts):
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        meta = _meta(text)
-        name = meta.get("name") or path.parent.name
-        row = {"name": name, "description": meta.get("description", "")[:200],
-               "category": path.parent.parent.name if path.parent.parent != _root() else "",
-               "updated_at": int(path.stat().st_mtime * 1000)}
-        (builtin if name in bundled or path.parent.name in bundled else learned).append(row)
-    learned.sort(key=lambda r: r["updated_at"], reverse=True)
-    builtin.sort(key=lambda r: r["name"])
-    return {"learned": learned, "bundled": builtin}
+    from muse.skills import SkillRegistry
+
+    return SkillRegistry().list_for_page()
 
 
 def read_skill(name: str) -> dict[str, Any]:
-    from tools.skill_manager_tool import _find_skill
+    from muse.skills import SkillRegistry
 
-    found = _find_skill(name)
-    if not found:
+    rec = SkillRegistry().find_skill(name)
+    if rec is None:
         raise ValueError("没有这个技能")
-    path = Path(found["path"])
-    path = path / "SKILL.md" if path.is_dir() else path
-    return {"name": name, "content": path.read_text(encoding="utf-8"), "bundled": name in _bundled()}
-
-
-def _manage(action: str, name: str, content: Optional[str] = None) -> dict[str, Any]:
-    from tools.skill_manager_tool import _skill_gate_bypass, skill_manage
-
-    token = _skill_gate_bypass.set(True)
-    try:
-        result = json.loads(skill_manage(action=action, name=name, content=content))
-    finally:
-        _skill_gate_bypass.reset(token)
-    if not result.get("success", False):
-        raise ValueError(str(result.get("error") or result.get("message") or "没有改成"))
-    return result
+    return {
+        "name": rec.name,
+        "content": rec.skill_file.read_text(encoding="utf-8-sig"),
+        "bundled": rec.bundled,
+    }
 
 
 def save_skill(name: str, content: str, new: bool = False) -> dict[str, Any]:
     if not content.strip():
         raise ValueError("技能内容是空的")
-    _manage("create" if new else "edit", name, content)
-    return list_skills()
+    from muse.skills import SkillRegistry
+
+    reg = SkillRegistry()
+    reg.save_skill(name, content, create=new, trusted_user=True)
+    return reg.list_for_page()
 
 
 def delete_skill(name: str) -> dict[str, Any]:
-    if name in _bundled():
+    from muse.skills import SkillRegistry
+
+    reg = SkillRegistry()
+    if name in reg.bundled_names():
         raise ValueError("自带的技能不能删")
-    _manage("delete", name)
-    return list_skills()
+    rec = reg.find_skill(name)
+    if rec is None:
+        raise ValueError("没有这个技能")
+    reg.delete_skill(name, forbid_bundled=True)
+    return reg.list_for_page()
 
 
 # ── 教它做: recorded steps → a skill draft ───────────────────────────────────────────────────────

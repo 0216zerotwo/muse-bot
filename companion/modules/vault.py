@@ -77,7 +77,7 @@ def _write_keys(rows: list[dict[str, Any]]) -> None:
 
 
 def _store():
-    from agent.vault_store import get_vault_store
+    from muse.tools.vault_cdp import get_vault_store
 
     return get_vault_store()
 
@@ -90,7 +90,7 @@ def payload() -> dict[str, Any]:
 
 
 def add_login(label: str, origin: str, identifier: str, password: str) -> dict[str, Any]:
-    from agent.vault_store import VaultError, normalize_origin
+    from muse.tools.vault_cdp import VaultError, normalize_origin
 
     identifier, password = str(identifier or "").strip(), str(password or "")
     if not identifier or not password:

@@ -19,7 +19,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-from .memory import _LOCK, _TARGETS, _store
+from .memory import _LOCK, _TARGETS, _entries, _store
 from .memory_tidy import (_CHANGES_KEPT, _META_LOCK, _failed, _only_source_words, _read_meta, _write_meta,
                           entry_key, seen_at)
 
@@ -113,7 +113,7 @@ def fade(force: bool = False) -> dict[str, Any]:
             if not force and now - meta["fade_pass_at"] < _EVERY_S:
                 return {"faded": 0, "forgot": 0}
             store = _store()
-            entries = {target: [e for e in store._entries_for(target) if e.strip()] for target, _ in _TARGETS.values()}
+            entries = {target: [e for e in _entries(store, target) if e.strip()] for target, _ in _TARGETS.values()}
             to_shorten, to_forget = plan(entries, meta, now)
             _write_meta(meta)  # the clocks started for lines seen for the first time
         files = {target: file for file, (target, _) in _TARGETS.items()}
@@ -159,7 +159,7 @@ def fade(force: bool = False) -> dict[str, Any]:
                 meta["seen_at"][entry_key(after)] = seen_at(meta, before) or now
                 faded.add(entry_key(after))
             live = {entry_key(e) for items in (
-                [e for e in _store()._entries_for(target) if e.strip()] for target, _ in _TARGETS.values()) for e in items}
+                [e for e in _entries(_store(), target) if e.strip()] for target, _ in _TARGETS.values()) for e in items}
             meta["seen_at"] = {k: v for k, v in meta["seen_at"].items() if k in live}
             meta["faded"] = sorted(faded & live)
             if short_ok or applied or newly_faded:
