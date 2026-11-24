@@ -276,19 +276,21 @@ def _summary(cfg: Optional[dict[str, Any]]) -> str:
 
 def _runtime() -> dict[str, dict[str, Any]]:
     try:
-        from tools.mcp_tool_discovery import get_mcp_status
+        from muse.mcp import get_mcp_manager
 
-        return {row["name"]: row for row in get_mcp_status() if isinstance(row, dict) and row.get("name")}
+        rows = get_mcp_manager().get_status()
+        return {row["name"]: row for row in rows if isinstance(row, dict) and row.get("name")}
     except Exception:
         return {}
 
 
 def _registered_tools(name: str) -> list[str]:
     try:
-        from tools.registry import registry
+        from muse.mcp import get_mcp_manager, mcp_toolset_name, safe_server_name
 
-        prefix = f"mcp__{re.sub(r'[^A-Za-z0-9_]', '_', name)}__"
-        return sorted(t[len(prefix):] for t in registry.get_tool_names_for_toolset(f"mcp-{name}") if t.startswith(prefix))
+        prefix = f"mcp__{safe_server_name(name)}__"
+        names = get_mcp_manager().get_tool_names_for_toolset(mcp_toolset_name(name))
+        return sorted(t[len(prefix):] for t in names if t.startswith(prefix))
     except Exception:
         return []
 
@@ -482,68 +484,105 @@ def remove_custom_secrets(name: str) -> None:
         remove_env_value(var)
 
 
-def apply_live(runner: Any) -> dict[str, Any]:
-    """Bring Hermes's running MCP servers in line with the config and refresh open chats' tools."""
-    from tools import mcp_tool_discovery as discovery
-    from tools.mcp_oauth import suppress_interactive_oauth
+def _run_coro_sync(coro: Any) -> Any:
+    """Run an async coroutine from synchronous callers without nesting event loops."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    from concurrent.futures import ThreadPoolExecutor
 
-    with suppress_interactive_oauth():
-        result = discovery.reconcile_mcp_servers_with_config()
-        failed = discovery.mcp_servers_not_connected()
-    refresh = getattr(runner, "_mcp_reload_refresh_cached_agents", None)
-    if callable(refresh):
-        refresh(False, None)
-    return {"ok": not failed, "message": "", "failed": list(failed),
-            **{k: list(v) for k, v in (result or {}).items() if isinstance(v, (list, tuple, set))}}
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
-def test_server(name: str) -> dict[str, Any]:
-    """Connect once, list every tool the service offers (also those not allowed yet), disconnect."""
-    from tools import mcp_tool_config as config
-    from tools import mcp_tool_discovery as discovery
-    from tools import mcp_tool_lifecycle as lifecycle
-    from tools import mcp_tool_loop as loop
+async def apply_live_async(engine: Any = None, runner: Any = None) -> dict[str, Any]:
+    """Bring running MCP servers in line with config on the active asyncio event loop."""
+    if engine is not None and callable(getattr(engine, "reload_mcp", None)):
+        return await engine.reload_mcp()
+    from muse.paths import active_engine_name
+
+    if active_engine_name() == "hermes" and runner is not None:
+        from muse.engine import HermesEngineBridge
+
+        return await HermesEngineBridge(runner=runner).reload_mcp()
+    from muse.mcp import get_mcp_manager
+
+    return await get_mcp_manager().reload_mcp()
+
+
+def apply_live(runner: Any = None, *, engine: Any = None) -> dict[str, Any]:
+    """Sync wrapper around :func:`apply_live_async` for legacy callers."""
+    return _run_coro_sync(apply_live_async(engine=engine, runner=runner))
+
+
+async def test_server_async(name: str) -> dict[str, Any]:
+    """Connect once on the active loop, list all offered tools, and disconnect cleanly."""
+    from muse.mcp import get_mcp_manager, load_mcp_servers, redact_error
 
     preset = _preset(name) or {"display_name": name}
-    with discovery._owner_secret_scope():
-        cfg = (config._load_mcp_config() or {}).get(name)
+    cfg = load_mcp_servers().get(name)
     checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
     if not cfg:
         raise ConnectionError_("还没有连接", 404)
-    found: dict[str, Any] = {}
 
-    async def run() -> None:
-        server = await asyncio.wait_for(discovery._connect_server(name, cfg), timeout=cfg.get("connect_timeout", 60))
-        try:
-            found["tools"] = sorted(t.name for t in server._tools)
-        finally:
-            await server.shutdown()
-
-    error = None
+    error: Optional[str] = None
     try:
         import importlib
 
         importlib.import_module("mcp.client.stdio")
-    except Exception as exc:  # say why the services can't start at all
+    except Exception as exc:
         mod = sys.modules.get("mcp")
         where = getattr(mod, "__path__", None) or getattr(mod, "__file__", None)
-        error = (f"MCP support failed to load: {type(exc).__name__}: {exc} (mcp={where!r}, "
-                 f"python={sys.executable}, path={[p for p in sys.path if 'site-packages' in p][:3]})")[:600]
-        _last_checks[name] = {"tool_names": [], "tool_count": 0, "checked_at": checked_at, "error": error}
-        return {"ok": False, "message": f"{preset['display_name']} 连不上", "tool_count": 0, "tool_names": [],
-                "checked_at": checked_at, "error": error}
-    loop._ensure_mcp_loop()
+        site = [p for p in sys.path if "site-packages" in p][:3]
+        error = (
+            f"MCP support failed to load: {type(exc).__name__}: {exc} "
+            f"(mcp={where!r}, python={sys.executable}, path={site})"
+        )[:600]
+        _last_checks[name] = {
+            "tool_names": [],
+            "tool_count": 0,
+            "checked_at": checked_at,
+            "error": error,
+        }
+        return {
+            "ok": False,
+            "message": f"{preset['display_name']} 连不上",
+            "tool_count": 0,
+            "tool_names": [],
+            "checked_at": checked_at,
+            "error": error,
+        }
+
+    tools: list[str] = []
     try:
-        loop._run_on_mcp_loop(run, timeout=120)
+        tools = await asyncio.wait_for(
+            get_mcp_manager().probe_server(name, cfg),
+            timeout=float(cfg.get("connect_timeout") or 60) + 15.0,
+        )
     except Exception as exc:
-        error = re.sub(r"(key|token|secret|password)=[^&\s]+", r"\1=***", str(exc) or type(exc).__name__, flags=re.I)[:300]
-    finally:
-        lifecycle._stop_mcp_loop_if_idle()
-    tools = found.get("tools") or []
-    _last_checks[name] = {"tool_names": tools, "tool_count": len(tools), "checked_at": checked_at, "error": error}
+        error = redact_error(str(exc) or type(exc).__name__)[:300]
+
+    _last_checks[name] = {
+        "tool_names": tools,
+        "tool_count": len(tools),
+        "checked_at": checked_at,
+        "error": error,
+    }
     ok = error is None
-    return {"ok": ok, "message": f"{preset['display_name']} {'可以用' if ok else '连不上'}", "tool_count": len(tools),
-            "tool_names": tools, "checked_at": checked_at, "error": error}
+    return {
+        "ok": ok,
+        "message": f"{preset['display_name']} {'可以用' if ok else '连不上'}",
+        "tool_count": len(tools),
+        "tool_names": tools,
+        "checked_at": checked_at,
+        "error": error,
+    }
+
+
+def test_server(name: str) -> dict[str, Any]:
+    """Sync wrapper around :func:`test_server_async`."""
+    return _run_coro_sync(test_server_async(name))
 
 
 # ---------- 按需连接: the companion asks for a service mid-task ----------

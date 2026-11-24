@@ -19,13 +19,19 @@ import httpx
 from . import net_safety
 
 try:
-    from agent.secret_scope import get_secret_str
+    from muse.media._common import get_secret as get_secret_str
 except ImportError:
     def get_secret_str(name: str) -> str:
         return os.environ.get(name, "")
 
 try:
-    from agent.video_gen_provider import VideoGenProvider, error_response, save_url_video, success_response
+    from muse.media.video import (
+        VideoGenProvider,
+        error_response,
+        register_video_gen_provider,
+        save_url_video,
+        success_response,
+    )
     _HAS_VIDEO_PROVIDER = True
 except ImportError:
     _HAS_VIDEO_PROVIDER = False
@@ -41,6 +47,9 @@ except ImportError:
 
     def save_url_video(url: str, *, prefix: str = "video") -> str:
         raise RuntimeError("video_gen_provider unavailable")
+
+    def register_video_gen_provider(provider: Any) -> None:
+        return None
 
 logger = logging.getLogger(__name__)
 
@@ -309,11 +318,27 @@ class WanVideo(_TaskVideo):
 BACKENDS = (MiniMaxVideo, ArkVideo, WanVideo)
 
 
-def register(ctx: Any) -> None:
+def register_native() -> None:
     if not _HAS_VIDEO_PROVIDER:
         return
     for backend in BACKENDS:
         try:
-            ctx.register_video_gen_provider(backend())
+            register_video_gen_provider(backend())
+        except Exception as exc:
+            logger.info("companion: could not add native %s video backend (%s)", backend.name, type(exc).__name__)
+
+
+def register(ctx: Any) -> None:
+    if not _HAS_VIDEO_PROVIDER:
+        return
+    register_native()
+    reg_fn = getattr(ctx, "register_video_gen_provider", None)
+    if not callable(reg_fn):
+        return
+    from muse.engine import adapt_video_provider_for_hermes
+
+    for backend in BACKENDS:
+        try:
+            reg_fn(adapt_video_provider_for_hermes(backend()))
         except Exception as exc:  # an older Hermes without video backends: the rest still works
-            logger.info("companion: could not add the %s video backend (%s)", backend.name, exc)
+            logger.info("companion: could not add the %s video backend (%s)", backend.name, type(exc).__name__)

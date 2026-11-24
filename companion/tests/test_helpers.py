@@ -220,21 +220,22 @@ class JobChatTest(unittest.TestCase):
 
 class HelperTriggersTest(unittest.TestCase):
     def test_a_trigger_set_up_by_a_helper_is_its_own(self):
-        import sys
-        import types
         from unittest import mock
+
+        import muse.cron.jobs as cron_jobs
 
         folder, (helpers, triggers) = load("helpers", "triggers")
         store = chat_store(folder)
         helpers._drop_jobs = lambda chat_id: None
-        # A stand-in for Hermes's scheduled jobs: never the real ones.
+        # A stand-in for Muse's scheduled jobs: never the real ones.
         jobs = []
-        cron = types.ModuleType("cron.jobs")
-        cron.create_job = lambda **job: jobs.append(job) or {"id": f"j{len(jobs)}"}
-        cron.remove_job = lambda job_id: jobs.append({"removed": job_id})
-        package = types.ModuleType("cron")
-        package.jobs = cron
-        self.enterContext(mock.patch.dict(sys.modules, {"cron": package, "cron.jobs": cron}))
+        self.enterContext(
+            mock.patch.multiple(
+                cron_jobs,
+                create_job=lambda **job: jobs.append(job) or {"id": f"j{len(jobs)}"},
+                remove_job=lambda job_id: jobs.append({"removed": job_id}),
+            )
+        )
         triggers.read_companion_state = lambda: {"chat_id": "main"}
 
         mail = helpers.create(store, {"name": "邮件分拣", "title": "分邮件"})

@@ -41,6 +41,18 @@ def register_skill_tools(registry: ToolRegistry) -> None:
     _reg_skills(registry)
 
 
+def register_media_tools(registry: ToolRegistry) -> None:
+    from muse.media import register_media_tools as _reg_media
+
+    _reg_media(registry)
+
+
+def register_cron_tools(registry: ToolRegistry) -> None:
+    from muse.cron import register_cron_tools as _reg_cron
+
+    _reg_cron(registry)
+
+
 def register_builtin_tools(registry: ToolRegistry) -> ToolRegistry:
     """Register all native built-in toolsets onto `registry`."""
     register_terminal_tools(registry)
@@ -51,6 +63,8 @@ def register_builtin_tools(registry: ToolRegistry) -> ToolRegistry:
     register_vault_tools(registry)
     register_session_search_tools(registry)
     register_clarify_tools(registry)
+    register_media_tools(registry)
+    register_cron_tools(registry)
     register_tool_search(registry)
     return registry
 
@@ -82,7 +96,9 @@ __all__ = [
     "normalize_otp_secret",
     "register_builtin_tools",
     "register_clarify_tools",
+    "register_cron_tools",
     "register_file_tools",
+    "register_media_tools",
     "register_memory_tools",
     "register_session_search_tools",
     "register_skill_tools",

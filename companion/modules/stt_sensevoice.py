@@ -142,7 +142,7 @@ def _cloud_ready(provider: str, stt: dict[str, Any]) -> bool:
     import importlib.util
 
     try:
-        from tools import transcription_tools
+        from muse.media import stt as transcription_tools
 
         spec = getattr(transcription_tools, "_CLOUD_PROVIDER_SPECS", {}).get(provider)
         if spec is not None and callable(spec[1]) and spec[1]():
@@ -181,7 +181,8 @@ def stt_available() -> bool:
         return True
     local_section = stt.get("local")
     local_cmd = bool(
-        os.environ.get("HERMES_LOCAL_STT_COMMAND")
+        os.environ.get("MUSE_LOCAL_STT_COMMAND")
+        or os.environ.get("HERMES_LOCAL_STT_COMMAND")
         or os.environ.get("HERMES_STT_COMMAND")
         or (local_section.get("command") if isinstance(local_section, dict) else None)
     )
@@ -200,11 +201,11 @@ def stt_available() -> bool:
     return faster_whisper or local_cmd or any(_cloud_ready(name, stt) for name in _CLOUD_PROVIDERS)
 
 
-def register(ctx: Any) -> None:
+def _build_provider() -> Any:
     try:
-        from agent.transcription_provider import TranscriptionProvider
+        from muse.media.stt import TranscriptionProvider
     except ImportError:
-        return
+        return None
 
     class SenseVoice(TranscriptionProvider):
         @property
@@ -221,8 +222,43 @@ def register(ctx: Any) -> None:
         def list_models(self) -> list[dict[str, Any]]:
             return [{"id": "sensevoice-small", "display": "SenseVoice-Small int8"}]
 
-        def transcribe(self, file_path: str, *, model: Optional[str] = None, language: Optional[str] = None,
-                       **extra: Any) -> dict[str, Any]:
+        def transcribe(
+            self,
+            file_path: str,
+            *,
+            model: Optional[str] = None,
+            language: Optional[str] = None,
+            **extra: Any,
+        ) -> dict[str, Any]:
             return transcribe(file_path)
 
-    ctx.register_transcription_provider(SenseVoice())
+    return SenseVoice()
+
+
+def register_native() -> None:
+    provider = _build_provider()
+    if provider is None:
+        return
+    try:
+        from muse.media.stt import register_transcription_provider
+
+        register_transcription_provider(provider)
+    except Exception:
+        pass
+
+
+def register(ctx: Any) -> None:
+    provider = _build_provider()
+    if provider is None:
+        return
+    try:
+        from muse.media.stt import register_transcription_provider
+
+        register_transcription_provider(provider)
+    except Exception:
+        pass
+    reg_fn = getattr(ctx, "register_transcription_provider", None)
+    if callable(reg_fn):
+        from muse.engine import adapt_transcription_provider_for_hermes
+
+        reg_fn(adapt_transcription_provider_for_hermes(provider))

@@ -238,18 +238,31 @@ def _finish(main: Optional[bytes], why: str, description: str, name: str) -> dic
     return {"avatar": avatars.avatar_value(meta), "moods": [m for m in pictures if m != "image"], "moving": moving}
 
 
+def _run_coro_sync(coro: Any) -> Any:
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 def _details_of(picture: str) -> str:
     """The character in a reference picture, described for drawing it again."""
-    from model_tools import _run_async
-    from tools.vision_tools import vision_analyze_tool
+    from muse.media.vision import vision_analyze_tool
 
-    ask = ("Describe the main character in this picture for an illustrator who must redraw it faithfully: "
-           "species or type, body shape, hair (color, style), eyes, face, outfit and its colors, accessories, "
-           "distinctive marks. English, one compact paragraph, no background, no guesses.")
+    ask = (
+        "Describe the main character in this picture for an illustrator who must redraw it faithfully: "
+        "species or type, body shape, hair (color, style), eyes, face, outfit and its colors, accessories, "
+        "distinctive marks. English, one compact paragraph, no background, no guesses."
+    )
     try:
-        result = json.loads(_run_async(vision_analyze_tool(image_url=picture, user_prompt=ask)))
+        result = json.loads(_run_coro_sync(vision_analyze_tool(image_url=picture, user_prompt=ask)))
     except Exception as exc:
-        logger.info("companion: could not look at the reference picture (%s)", exc)
+        logger.info("companion: could not look at the reference picture (%s)", type(exc).__name__)
         return ""
     text = result.get("analysis") if isinstance(result, dict) and result.get("success") else ""
     return " ".join(str(text or "").split())[:800]

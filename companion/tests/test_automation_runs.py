@@ -1,9 +1,8 @@
 """运行记录: a scheduled job's runs from Hermes's reports, and what one run answered."""
 
-import sys
-import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from _loader import load
 
@@ -12,6 +11,8 @@ REPORT = "# Cron Job: 动态更新{failed}\n\n**Job ID:** j1\n\n## Prompt\n\n写
 
 class AutomationRunsTest(unittest.TestCase):
     def setUp(self):
+        import muse.cron.jobs as cron_jobs
+
         self.folder, (self.automations,) = load("automations")
         self.output = Path(self.folder) / "cron-output"
         runs = self.output / "j1"
@@ -21,19 +22,8 @@ class AutomationRunsTest(unittest.TestCase):
         (runs / "2026-10-31_19-55-16.md").write_text(
             REPORT.format(failed=" (FAILED)", tail="## Error\n\nRuntimeError: cut off"), encoding="utf-8")
         (runs / "notes.md").write_text("not a run", encoding="utf-8")
-        # Only where Hermes keeps the reports: a temporary folder, never the real cron.
-        jobs = types.ModuleType("cron.jobs")
-        jobs.get_cron_output_dir = lambda: self.output
-        self.saved = {name: sys.modules.get(name) for name in ("cron", "cron.jobs")}
-        sys.modules["cron"] = types.ModuleType("cron")
-        sys.modules["cron.jobs"] = jobs
-
-    def tearDown(self):
-        for name, module in self.saved.items():
-            if module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = module
+        # Only where Muse keeps the reports: a temporary folder, never the real cron.
+        self.enterContext(mock.patch.object(cron_jobs, "get_cron_output_dir", lambda: self.output))
 
     def test_runs_are_listed_newest_first_with_failures_marked(self):
         runs = self.automations._runs("j1")

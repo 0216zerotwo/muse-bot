@@ -65,7 +65,8 @@ Available names ({len(SUBJECTS)}): {", ".join(SUBJECTS)}
 
 
 def _load_drawing():
-    sys.path.insert(0, str(ROOT / "hermes"))
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
     spec = importlib.util.spec_from_file_location("companion_drawing", ROOT / "companion" / "modules" / "drawing.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

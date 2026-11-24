@@ -409,7 +409,7 @@ def delete(store: Any, helper_id: str) -> None:
 def _drop_jobs(chat_id: str) -> None:
     """The scheduled jobs a helper set up from its chat (they report there) go with it."""
     try:
-        from cron.jobs import list_jobs, remove_job
+        from muse.cron.jobs import list_jobs, remove_job
 
         from .automations import job_chat
 

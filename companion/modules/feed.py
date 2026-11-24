@@ -101,7 +101,7 @@ def _prompt(instructions: str) -> str:
 
 
 def _sync_job(data: dict[str, Any]) -> None:
-    from cron.jobs import create_job, remove_job
+    from muse.cron.jobs import create_job, remove_job
 
     if data.get("job_id"):
         remove_job(data["job_id"])
@@ -116,7 +116,7 @@ def _sync_job(data: dict[str, Any]) -> None:
 
 def ensure_job() -> None:
     """Start-up: the daily run exists as set (made the first time, kept after a reset of cron)."""
-    from cron.jobs import get_job, update_job
+    from muse.cron.jobs import get_job, update_job
 
     with _LOCK:
         data = _read()
@@ -156,7 +156,7 @@ def update(changes: dict[str, Any]) -> dict[str, Any]:
 
 def write_now() -> dict[str, Any]:
     """Run it now (the daily run, or a one-off when the daily one is off)."""
-    from cron.jobs import create_job, trigger_job
+    from muse.cron.jobs import create_job, trigger_job
 
     with _LOCK:
         data = _read()

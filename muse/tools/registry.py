@@ -23,6 +23,11 @@ CORE_TOOLSETS = frozenset({
     "web",
     "skills",
     "browser",
+    "vision",
+    "image_gen",
+    "video_gen",
+    "tts",
+    "cronjob",
 })
 
 TOOL_SEARCH_SCHEMA: dict[str, Any] = {

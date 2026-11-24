@@ -130,13 +130,28 @@ FORBIDDEN_LEGACY_IMPORTS: frozenset[str] = frozenset({
     "hermes_cli.runtime_provider",
     "agent.auxiliary_client",
     "agent.models_dev",
+    "agent.secret_scope",
+    "agent.transcription_provider",
     "agent.vault_store",
+    "agent.video_gen_provider",
+    "cron",
+    "cron.jobs",
+    "tools.browser_vault_tool",
+    "tools.image_generation_tool",
+    "tools.mcp_oauth",
+    "tools.mcp_tool_config",
+    "tools.mcp_tool_discovery",
+    "tools.mcp_tool_lifecycle",
+    "tools.mcp_tool_loop",
     "tools.memory_tool",
     "tools.memory_tool_store",
+    "tools.registry",
     "tools.skill_manager_tool",
     "tools.skills_tool",
-    "tools.browser_vault_tool",
+    "tools.transcription_tools",
     "tools.url_safety",
+    "tools.video_generation_tool",
+    "tools.vision_tools",
     "tools.web_tools",
 })
 
@@ -258,10 +273,11 @@ class WireAndSeamContractTest(unittest.TestCase):
                         mod.startswith(prefix + ".") for prefix in FORBIDDEN_LEGACY_IMPORTS
                     ):
                         violations.append(f"{rel}:{node.lineno}: from {mod} import ...")
-                    elif mod == "hermes_cli":
+                    elif mod:
                         for alias in node.names:
-                            if alias.name == "config":
-                                violations.append(f"{rel}:{node.lineno}: from hermes_cli import config")
+                            full = f"{mod}.{alias.name}"
+                            if full in FORBIDDEN_LEGACY_IMPORTS:
+                                violations.append(f"{rel}:{node.lineno}: from {mod} import {alias.name}")
 
         self.assertEqual(violations, [], f"Forbidden legacy Hermes imports found in companion/:\n" + "\n".join(violations))
 
