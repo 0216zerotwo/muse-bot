@@ -111,7 +111,7 @@ def _parse(content: Optional[str]) -> list[dict[str, str]]:
 
 async def get_ideas(events: list[dict[str, Any]], *, refresh: bool) -> dict[str, Any]:
     """Cached ideas, regenerated when stale or when ``refresh`` is requested."""
-    from agent.auxiliary_client import async_call_llm
+    from muse.llm.auxiliary import async_call_llm
 
     from .llm import chat_target
 

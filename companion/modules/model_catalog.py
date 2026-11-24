@@ -183,30 +183,26 @@ def kinds_of(entry: dict[str, Any]) -> list[str]:
 
 
 def _backend_models(kind: str, backend: str) -> list[dict[str, Any]]:
-    """The models one of Hermes's drawing/video backends lists itself (fal's families, DeepInfra's
-    live catalog); empty when it cannot be loaded."""
-    import importlib
-
+    """Built-in FAL / DeepInfra media model catalog via ``muse.media.catalog``."""
     try:
-        module = importlib.import_module(f"plugins.{kind}_gen.{backend}")
-        provider = next(v() for v in vars(module).values()
-                        if isinstance(v, type) and v.__module__ == module.__name__ and hasattr(v, "list_models")
-                        and not getattr(v, "__abstractmethods__", None))
-        rows = provider.list_models()
+        from muse.media.catalog import backend_models
+
+        rows = backend_models(kind, backend)
     except Exception as exc:
-        logger.info("companion: %s %s models unavailable (%s)", backend, kind, exc)
+        logger.info("companion: %s %s models unavailable (%s)", backend, kind, type(exc).__name__)
         return []
-    return [{"id": str(row["id"]), "name": str(row.get("display") or row["id"]),
-             "note": str(row.get("strengths") or "")[:60]} for row in rows if isinstance(row, dict) and row.get("id")]
+    return [{"id": str(row["id"]), "name": str(row.get("display") or row.get("name") or row["id"]),
+             "note": str(row.get("strengths") or row.get("note") or "")[:60]}
+            for row in rows if isinstance(row, dict) and row.get("id")]
 
 
 def _registry() -> dict[str, Any]:
     try:
-        from agent.models_dev import fetch_models_dev
+        from muse.llm.models_dev import fetch_models_dev
 
         return fetch_models_dev(allow_network=False) or fetch_models_dev(allow_network=True) or {}
     except Exception as exc:
-        logger.info("companion: model registry unavailable (%s)", exc)
+        logger.info("companion: model registry unavailable (%s)", type(exc).__name__)
         return {}
 
 

@@ -161,6 +161,9 @@ class CompanionAdapter(BasePlatformAdapter):
             await asyncio.sleep(0.1)
         self._mark_connected()
         self.loop = asyncio.get_running_loop()
+        from muse.llm.auxiliary import register_runtime_loop
+
+        register_runtime_loop(self.loop)
         activity.bind(self, self.loop)
         self.sync_identity()
         triggers.set_base_url(self.host, self.port, _env("COMPANION_PUBLIC_URL"))
@@ -369,6 +372,11 @@ class CompanionAdapter(BasePlatformAdapter):
         if self._server_task is not None:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self._server_task, timeout=5)
+        with contextlib.suppress(Exception):
+            from muse.llm.auxiliary import close_shared_clients, register_runtime_loop
+
+            register_runtime_loop(None)
+            await close_shared_clients()
 
     # -- connections -----------------------------------------------------------------------------
 
@@ -500,7 +508,7 @@ class CompanionAdapter(BasePlatformAdapter):
         first = said[0]["content"][:300]
         title = ""
         try:
-            from agent.auxiliary_client import call_llm
+            from muse.llm.auxiliary import call_llm
 
             data = models.read_models()
             name = models.quick_model(data, list(data["presets"]))

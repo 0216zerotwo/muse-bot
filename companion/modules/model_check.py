@@ -144,7 +144,7 @@ def _pages(entry: dict[str, Any], kind: str) -> list[tuple[str, str]]:
 
 
 def _ask(pages: list[tuple[str, str]], kind: str) -> list[Any]:
-    from agent.auxiliary_client import call_llm
+    from muse.llm.auxiliary import call_llm
 
     from .models import read_models, runtime_provider
 

@@ -146,8 +146,8 @@ def _service(provider: str) -> dict[str, Any]:
 
 
 def _check_signed_in(name: str, preset: dict[str, Any]) -> None:
-    """A one-token request through Hermes's signed-in provider (the plan's tokens live there)."""
-    from agent.auxiliary_client import call_llm
+    """A one-token request through the signed-in provider (the plan's tokens live in auth.json)."""
+    from muse.llm.auxiliary import call_llm
 
     from .oauth_login import keep_signed_in
 
@@ -163,11 +163,9 @@ def _check_signed_in(name: str, preset: dict[str, Any]) -> None:
 
 
 def _is_anthropic_service(service: dict[str, Any]) -> bool:
-    mode = str(service.get("api_mode") or "").strip().lower()
-    if mode in ("anthropic", "anthropic-messages", "messages"):
-        return True
-    base = str(service.get("base_url") or "").strip().lower()
-    return "anthropic.com" in base and "/openai" not in base
+    from muse.llm.providers import _is_anthropic_endpoint
+
+    return _is_anthropic_endpoint(service.get("base_url"), service.get("api_mode"))
 
 
 async def check_models(names: Optional[list[str]] = None) -> dict[str, Any]:
