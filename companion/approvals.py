@@ -576,23 +576,20 @@ class Approvals:
             "不要重复调用这个工具，也不要说已经完成。用一句话告诉用户内容已准备好、请他确认。"
         )
 
-    # -- Hermes's own prompts (send_exec_approval) ----------------------------------------------------
+    # -- Held terminal execution prompts --------------------------------------------------------------
 
-    def hold_exec(self, chat_id: str, command: str, description: str, hermes_session: str,
+    def hold_exec(self, chat_id: str, command: str, description: str, session_key: str,
                   choices: list[str], *, expires_in_s: Optional[float] = None) -> ApprovalRecord:
         if expires_in_s is None:
             expires_in_s = 300.0
-            with contextlib.suppress(Exception):
-                from tools.approval_context import _get_approval_timeout
-
-                expires_in_s = float(_get_approval_timeout())
         now_ms = _now_ms()
         record = self.store.create(
             session_key=f"websocket:{chat_id}", call_id=f"exec_{uuid.uuid4().hex[:8]}",
             tool_name="terminal", action="run_command",
             arguments={"command": command, "reason": description},
             extra={
-                "hermes_session": hermes_session,
+                "native_exec": True,
+                "exec_session": session_key,
                 "choices": choices,
                 "expires_at_ms": now_ms + int(max(1.0, expires_in_s) * 1000),
             },
@@ -643,10 +640,6 @@ class Approvals:
             decided = self._answer_native_exec(record, approve, scope=scope)
             await self._emit_ws_async(decided)
             return decided
-        if record.extra.get("hermes_session"):
-            decided = self._answer_exec(record, approve)
-            await self._emit_ws_async(decided)
-            return decided
         if approve:
             result = await self._execute_record(record)
             record.status = FAILED if _failed(result) else EXECUTED
@@ -657,21 +650,8 @@ class Approvals:
         return record
 
     async def _execute_record(self, record: ApprovalRecord) -> str:
-        from muse.paths import active_engine_name
-
         coord = self._resolve_native_coordinator()
         engine = getattr(self.adapter, "_engine", None)
-        use_native = (
-            active_engine_name() == "native"
-            or coord is not None
-            or callable(getattr(engine, "execute_approved", None))
-        )
-        has_native_runner = (
-            (coord is not None and getattr(coord, "_exec_runner", None) is not None)
-            or callable(getattr(engine, "execute_approved", None))
-        )
-        if not use_native or not has_native_runner:
-            return await asyncio.to_thread(self._run, record)
         try:
             from .modules import computer
 
@@ -679,8 +659,16 @@ class Approvals:
                 await asyncio.to_thread(computer.ensure_browser)
             if coord is not None and getattr(coord, "_exec_runner", None) is not None:
                 raw = await coord.execute_approved(record, skip_policy_gates=True)
-            else:
+            elif callable(getattr(engine, "execute_approved", None)):
                 raw = await engine.execute_approved(record, skip_policy_gates=True)
+            else:
+                from muse.tools import create_default_tool_registry
+
+                raw = await create_default_tool_registry().dispatch(
+                    record.tool_name,
+                    dict(record.arguments),
+                    call_id=record.call_id,
+                )
         except Exception as exc:
             logger.exception("companion: native approved call %s failed", record.id)
             return f"Error: {exc}"
@@ -695,36 +683,6 @@ class Approvals:
             else False
         )
         if not resolved:
-            record.status = FAILED
-            record.result = "等待确认超时，这一步已经跳过了"
-        self.store.save(record)
-        return record
-
-    def _run(self, record: ApprovalRecord) -> str:
-        try:
-            from .modules import computer
-
-            if record.action in _BROWSER_ACTIONS or computer.is_browser_tool(record.tool_name):
-                computer.ensure_browser()
-            from model_tools import handle_function_call
-
-            result = handle_function_call(
-                record.tool_name, dict(record.arguments), tool_call_id=record.call_id,
-                skip_pre_tool_call_hook=True,
-            )
-        except Exception as exc:  # the card must show the failure, not hang
-            logger.exception("companion: approved call %s failed", record.id)
-            return f"Error: {exc}"
-        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
-
-    def _answer_exec(self, record: ApprovalRecord, approve: bool) -> ApprovalRecord:
-        from tools.approval import resolve_gateway_approval
-
-        # A standing yes also lets the rest of this run go on without asking again.
-        choice = ("session" if record.scope != "once" else "once") if approve else "deny"
-        resolved = resolve_gateway_approval(record.extra["hermes_session"], choice)
-        if not resolved:
-            # The agent stopped waiting (timed out or the turn ended): nothing ran.
             record.status = FAILED
             record.result = "等待确认超时，这一步已经跳过了"
         self.store.save(record)

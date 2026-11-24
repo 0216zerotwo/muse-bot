@@ -85,23 +85,20 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0, node24
         with:
           path: ~/.cache/uv
-          key: uv-linux-${{ hashFiles('tools/fetch-hermes.sh') }}
+          key: uv-linux-${{ hashFiles('pyproject.toml', 'uv.lock') }}
           restore-keys: |
             uv-linux-
-      - name: Fetch Hermes & prepare Python environment
+      - name: Prepare native Python 3.14 environment
         run: |
           set -euo pipefail
-          bash tools/fetch-hermes.sh
-          (cd hermes && UV_PROJECT_ENVIRONMENT="$GITHUB_WORKSPACE/hermes-env" uv sync --frozen --no-dev --python 3.14 \
-            --extra mcp --extra web --extra ddgs --extra doc-extract --extra computer-use --extra anthropic)
-          uv pip install --python "$GITHUB_WORKSPACE/hermes-env/bin/python" py-vapid==1.9.6 http-ece==1.2.1
+          uv sync --frozen --no-dev --python 3.14
       - name: Run muse unit tests
         run: |
-          "$GITHUB_WORKSPACE/hermes-env/bin/python" -B -W error -m unittest discover -s muse/tests -t . -p "test_*.py"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -B -W error -m unittest discover -s muse/tests -t . -p "test_*.py"
       - name: Run companion unit tests
         working-directory: companion/tests
         run: |
-          "$GITHUB_WORKSPACE/hermes-env/bin/python" -B -m unittest discover -s . -p "test_*.py"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -B -W error -m unittest discover -s . -p "test_*.py"
       - name: Smoke-test server release bundle
         run: |
           set -euo pipefail

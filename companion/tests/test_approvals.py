@@ -151,14 +151,14 @@ class ActivityEgressPrecedenceAndApprovalContractTest(unittest.TestCase):
             self.assertEqual(records[0].public()["context"]["egress"]["host"], "form.example")
 
     def test_exec_approval_routes_via_facing_chat_normalizes_fields_and_emits_ws_updates(self):
-        from gateway.platforms.base import ExecApprovalPrompt
+        from muse.interceptors import ExecApprovalPrompt, NativeApprovalCoordinator
 
         async def scenario():
             self.adapter.loop = asyncio.get_running_loop()
             # Desk -> Helper -> Main: exec prompt in desk-1 must land in "main", not hidden desk-1!
             prompt = ExecApprovalPrompt(
                 chat_id="desk-1",
-                session_key="hermes-sess-9",
+                session_key="native-sess-9",
                 text="Allow command?",
                 actions=[("允许", "once", "primary"), ("本轮允许", "session", ""), ("拒绝", "deny", "danger")],
                 command="rm -rf ./tmp_build",
@@ -200,14 +200,17 @@ class ActivityEgressPrecedenceAndApprovalContractTest(unittest.TestCase):
             self.assertEqual(del_rec.public()["arguments"]["email_ids"], ["101", "202"])
             self.assertIsNone(del_rec.public()["expires_at_ms"])
 
-            # Atomic claim_pending & WS broadcast on decide().
-            mod_tools = types.ModuleType("model_tools")
-            mod_tools.handle_function_call = lambda name, args, **kw: {"ok": True}
-            with mock.patch.dict(sys.modules, {"model_tools": mod_tools}):
-                r1, r2 = await asyncio.gather(
-                    self.adapter.approvals.decide(mail_rec.id, True, "24h"),
-                    self.adapter.approvals.decide(mail_rec.id, False, "once"),
-                )
+            # Atomic claim_pending & WS broadcast on decide() via NativeApprovalCoordinator.
+            coord = NativeApprovalCoordinator(
+                exec_runner=lambda _call: '{"ok": true}',
+                approvals=self.adapter.approvals,
+                adapter=self.adapter,
+            )
+            self.adapter.approvals.bind_native_coordinator(coord)
+            r1, r2 = await asyncio.gather(
+                self.adapter.approvals.decide(mail_rec.id, True, "24h"),
+                self.adapter.approvals.decide(mail_rec.id, False, "once"),
+            )
             winners = [r for r in (r1, r2) if r is not None]
             self.assertEqual(len(winners), 1)
             self.assertEqual(winners[0].status, "executed")
@@ -241,10 +244,15 @@ class ActivityEgressPrecedenceAndApprovalContractTest(unittest.TestCase):
         self.assertEqual(closed, [])
 
         # Approving the card ensures browser is running before executing the click.
-        mod_tools = types.ModuleType("model_tools")
-        mod_tools.handle_function_call = lambda name, args, **kw: {"clicked": True}
-        with mock.patch.dict(sys.modules, {"model_tools": mod_tools}):
-            decided = asyncio.run(self.adapter.approvals.decide(pending_id, True, "once"))
+        from muse.interceptors import NativeApprovalCoordinator
+
+        coord = NativeApprovalCoordinator(
+            exec_runner=lambda _call: '{"clicked": true}',
+            approvals=self.adapter.approvals,
+            adapter=self.adapter,
+        )
+        self.adapter.approvals.bind_native_coordinator(coord)
+        decided = asyncio.run(self.adapter.approvals.decide(pending_id, True, "once"))
         self.assertEqual(decided.status, "executed")
         self.assertEqual(len(ensured), 1)
 

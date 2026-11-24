@@ -481,8 +481,6 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     if args.home:
         os.environ["MUSE_HOME"] = str(Path(args.home).expanduser())
-    if args.engine:
-        os.environ["MUSE_ENGINE"] = args.engine
 
     from .app import create_app
 
@@ -592,7 +590,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--host", default=_default_host())
     p_serve.add_argument("--port", type=int, default=_default_port())
     p_serve.add_argument("--home", default=None)
-    p_serve.add_argument("--engine", choices=("native", "hermes"), default=None)
+    p_serve.add_argument("--engine", choices=("native",), default=None)
     p_serve.set_defaults(func=_cmd_serve)
 
     p_setup = sub.add_parser("setup", help="Initialize .venv, default config.yaml, and web/dist")

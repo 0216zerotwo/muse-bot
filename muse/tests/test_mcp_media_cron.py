@@ -866,34 +866,16 @@ class Phase2RewiringAndRegistryIntegrationTest(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_audit_fixes_hermes_adapters_jobs_schema_ctx_origin_lazy_sv_and_redact(self) -> None:
-        import abc
-        import types
-
+    def test_audit_fixes_native_providers_jobs_schema_ctx_origin_lazy_sv_and_redact(self) -> None:
         from companion.modules import stt_sensevoice, video_backends
         from muse.context import TurnExecutionContext
         from muse.cron import jobs as cron_jobs
         from muse.cron.scheduler import CronScheduler
         from muse.media import stt as stt_mod
+        from muse.media.video import VideoGenProvider
         from muse.tools import create_default_tool_registry
 
-        # 1) Hermes provider adapters satisfy isinstance() against Hermes ABCs.
-        class FakeHermesVideoABC(abc.ABC):
-            @abc.abstractmethod
-            def generate(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-                raise NotImplementedError
-
-        class FakeHermesSTTABC(abc.ABC):
-            @abc.abstractmethod
-            def transcribe(self, file_path: str, **kwargs: Any) -> dict[str, Any]:
-                raise NotImplementedError
-
-        fake_vg_mod = types.ModuleType("agent.video_gen_provider")
-        fake_vg_mod.VideoGenProvider = FakeHermesVideoABC
-        fake_stt_mod = types.ModuleType("agent.transcription_provider")
-        fake_stt_mod.TranscriptionProvider = FakeHermesSTTABC
-        fake_agent_pkg = types.ModuleType("agent")
-
+        # 1) Native video & SenseVoice providers satisfy Muse ABCs and register cleanly.
         registered_v: list[Any] = []
         registered_s: list[Any] = []
 
@@ -904,20 +886,12 @@ class Phase2RewiringAndRegistryIntegrationTest(unittest.TestCase):
             def register_transcription_provider(self, p: Any) -> None:
                 registered_s.append(p)
 
-        with mock.patch.dict(
-            sys.modules,
-            {
-                "agent": fake_agent_pkg,
-                "agent.video_gen_provider": fake_vg_mod,
-                "agent.transcription_provider": fake_stt_mod,
-            },
-        ):
-            video_backends.register(FakePluginCtx())
-            stt_sensevoice.register(FakePluginCtx())
+        video_backends.register(FakePluginCtx())
+        stt_sensevoice.register(FakePluginCtx())
         self.assertEqual(len(registered_v), 3)
-        self.assertTrue(all(isinstance(p, FakeHermesVideoABC) for p in registered_v))
+        self.assertTrue(all(isinstance(p, VideoGenProvider) for p in registered_v))
         self.assertEqual(len(registered_s), 1)
-        self.assertIsInstance(registered_s[0], FakeHermesSTTABC)
+        self.assertIsInstance(registered_s[0], stt_mod.TranscriptionProvider)
 
         with tempfile.TemporaryDirectory() as tmp:
             with muse_home_override(tmp):

@@ -112,7 +112,6 @@ class DualEngineParityTest(unittest.TestCase):
         async def run_hermes_branch(branch_home: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             CompanionAdapter = _load_hermes_companion_adapter_cls()
             adapter = object.__new__(CompanionAdapter)
-            adapter._engine = muse_engine.HermesEngineBridge(adapter)
             adapter.platform = "companion"
             adapter.store = ChatStore(branch_home / "companion")
             adapter._subs = {}
@@ -492,9 +491,9 @@ class DualEngineParityTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    # ── 7. Cutover defaults, Hermes rollback, 3s settle, shared MuseDB reuse ─
+    # ── 7. Native-only engine contract, 3s settle, shared MuseDB reuse ───────
 
-    def test_default_engine_cutover_hermes_rollback_and_shared_db_reuse(self) -> None:
+    def test_native_engine_contract_settle_and_shared_db_reuse(self) -> None:
         from companion.modules import goals, interrupted, models, persona
 
         clean_env = {k: v for k, v in os.environ.items() if k != "MUSE_ENGINE"}
@@ -507,11 +506,12 @@ class DualEngineParityTest(unittest.TestCase):
             self.assertIsInstance(eng, muse_runtime.NativeAgentEngine)
 
         with mock.patch.dict(os.environ, {**clean_env, "MUSE_ENGINE": "hermes"}, clear=True):
-            self.assertEqual(active_engine_name(), "hermes")
-            self.assertEqual(interrupted.settle_seconds(), 45)
-            eng_h = muse_engine.build_engine()
-            self.assertEqual(eng_h.name, "hermes")
-            self.assertIsInstance(eng_h, muse_engine.HermesEngineBridge)
+            self.assertEqual(active_engine_name(), "native")
+            self.assertEqual(interrupted.settle_seconds(), 3)
+            eng_n = muse_engine.build_engine()
+            self.assertEqual(eng_n.name, "native")
+            self.assertIsInstance(eng_n, muse_runtime.NativeAgentEngine)
+            self.assertFalse(hasattr(muse_engine, "HermesEngineBridge"))
 
         # Running NativeAgentEngine shares its open MuseDB handle with models.usage_summary & goals.goal_state
         async def check_shared_handle() -> None:

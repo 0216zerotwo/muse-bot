@@ -335,10 +335,8 @@ def register(ctx: Any) -> None:
     reg_fn = getattr(ctx, "register_video_gen_provider", None)
     if not callable(reg_fn):
         return
-    from muse.engine import adapt_video_provider_for_hermes
-
     for backend in BACKENDS:
         try:
-            reg_fn(adapt_video_provider_for_hermes(backend()))
-        except Exception as exc:  # an older Hermes without video backends: the rest still works
+            reg_fn(backend())
+        except Exception as exc:
             logger.info("companion: could not add the %s video backend (%s)", backend.name, type(exc).__name__)

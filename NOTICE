@@ -4,14 +4,17 @@ Copyright (c) 2026 Muse Bot contributors. Released under the MIT License (see LI
 Muse Bot is not affiliated with, endorsed by or sponsored by Meta Platforms (Muse) or xAI / SpaceX AI
 (Grok). Those names and marks belong to their owners.
 
-This project includes or builds on the following third-party software:
+This project runs on its self-contained first-party `muse/` native Python agent runtime alongside
+`companion/`, and includes, integrates with, or draws historical inspiration from the following
+open-source projects:
 
 - web/ began as the WebUI of nanobot (https://github.com/HKUDS/nanobot).
   MIT License. Copyright (c) 2025-present Xubin Ren and the nanobot contributors.
 
-- The server runs on Hermes Agent (https://github.com/NousResearch/hermes-agent), downloaded at a
-  fixed commit by tools/fetch-hermes.sh (not committed to this Git repository; bundled alongside
-  LICENSE and NOTICE in GitHub Release server archives).
+- Hermes Agent (https://github.com/NousResearch/hermes-agent) powered Muse Bot v1.x and informed
+  portions of the architecture and v1.x on-disk data-directory conventions (`config.yaml`,
+  `memories/`, `skills/`, `cron/`, and read-only `state.db` migration compatibility; no Hermes
+  source code is downloaded or bundled in v2.0+ releases).
   MIT License. Copyright (c) 2025 Nous Research.
 
 - Chart.js (https://www.chartjs.org), MIT License, and Leaflet (https://leafletjs.com), BSD 2-Clause
@@ -24,10 +27,10 @@ This project includes or builds on the following third-party software:
 - MarkdownUI (https://github.com/gonzalezreal/swift-markdown-ui), MIT License, used by the iPhone
   app as a Swift package.
 
-- Optional local speech-to-text (companion/modules/stt_sensevoice.py) integrates with
+- Optional local speech-to-text (muse/voice/ and companion/modules/stt_sensevoice.py) integrates with
   SenseVoice-Small (https://github.com/FunAudioLLM/SenseVoice, MIT License) and sherpa-onnx
   (https://github.com/k2-fsa/sherpa-onnx, Apache License 2.0) when installed by the user on the
   server (neither is included in this repository or release bundles).
 
-- The web app's npm dependencies (web/package.json) and the server's Python dependencies are
-  installed from their registries under their own licenses.
+- The web app's npm dependencies (web/package.json) and the server's Python dependencies
+  (pyproject.toml / uv.lock) are installed from their registries under their own licenses.

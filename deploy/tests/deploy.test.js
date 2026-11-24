@@ -37,9 +37,6 @@ function findPython() {
   const candidates = [
     path.join(REPO_ROOT, ".venv", "bin", "python"),
     path.join(REPO_ROOT, ".venv", "Scripts", "python.exe"),
-    path.join(REPO_ROOT, "hermes-env", "bin", "python"),
-    path.join(REPO_ROOT, "hermes-env", "Scripts", "python.exe"),
-    "E:\\personal_bot\\hermes-env\\Scripts\\python.exe",
   ];
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;

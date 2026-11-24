@@ -229,39 +229,6 @@ _COMPANION_ZH = {
 
 
 def write_locale_overlay(lang: str = "zh") -> bool:
-    """Write ``<HOME>/locales/<lang>.yaml`` for Hermes's legacy notice system when active.
-
-    In native Muse mode (`muse.notices` owns Chinese notices natively) or when `agent.i18n`
-    is not installed, this is a safe no-op returning ``False``.
-    """
-    import json
-
-    from muse.paths import active_engine_name, get_muse_home
-
-    if active_engine_name() == "native":
-        return False
-    try:
-        from agent import i18n
-    except ImportError:
-        return False
-
-    from .companion_state import read_companion_state
-
-    name = read_companion_state().get("name") or "伙伴"
-    bundled = i18n._load_bundled(lang)
-    overlay = {key: _rebrand(text, name) for key, text in bundled.items() if _BRAND.search(text)}
-    if lang == "zh":
-        overlay.update(_COMPANION_ZH)
-    path = get_muse_home() / "locales" / f"{lang}.yaml"
-    # JSON is valid YAML: one flat ``dotted.key: text`` mapping, which overlays accept.
-    text = json.dumps(overlay, ensure_ascii=False, indent=0, sort_keys=True) + "\n"
-    try:
-        if path.read_text(encoding="utf-8") == text:
-            return False
-    except OSError:
-        pass
-    atomic_write_text(path, text)
-    reset = getattr(i18n, "reset_language_cache", None)
-    if callable(reset):
-        reset()
-    return True
+    """Compatibility no-op: ``muse.notices`` and ``_COMPANION_ZH`` own Chinese notices natively."""
+    del lang
+    return False

@@ -114,14 +114,12 @@ def _user_agent(exe: str) -> Optional[str]:
 
 
 def _needs_sandbox_bypass() -> bool:
-    """Root, Docker, or Ubuntu's AppArmor rule: Chromium only starts with --no-sandbox there.
-    Hermes decides this for its own browser; the same answer holds for this one."""
-    try:
-        from tools.browser_tool_session import _needs_chromium_sandbox_bypass
-
-        return _needs_chromium_sandbox_bypass()
-    except Exception:
-        return hasattr(os, "geteuid") and os.geteuid() == 0
+    """Root or container environments where headless Chromium requires ``--no-sandbox``."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return True
+    if os.name == "posix" and (Path("/.dockerenv").exists() or os.environ.get("CONTAINER")):
+        return True
+    return False
 
 
 def _get_json(path: str, timeout: float = 1.5) -> Any:
@@ -328,11 +326,8 @@ def ensure_cdp_config() -> bool:
 
 
 def share_with_builtin_tools() -> None:
-    """Point Hermes's own browser tools (``browser_exec``, ``browser_navigate``…) at the shared browser
-    too, as a ``/browser connect`` would: in memory for this process, nothing written to config."""
-    from tools.browser_tool_cdp import set_live_cdp_override
-
-    set_live_cdp_override(cdp_url())
+    """Compatibility hook (native ``browser_vault`` reads ``cdp_url()`` directly)."""
+    return None
 
 
 # ── the hold ──────────────────────────────────────────────────────────────────────────────────────

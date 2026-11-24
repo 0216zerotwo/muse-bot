@@ -119,24 +119,23 @@ EXPECTED_MUTATIONS: frozenset[str] = frozenset({
 })
 
 FORBIDDEN_LEGACY_IMPORTS: frozenset[str] = frozenset({
+    "hermes",
+    "hermes_cli",
     "hermes_constants",
+    "hermes_state",
     "hermes_time",
-    "hermes_cli.config",
-    "hermes_cli.auth",
-    "hermes_cli.auth_codex",
-    "hermes_cli.auth_xai",
-    "hermes_cli.auth_constants",
-    "hermes_cli.codex_models",
-    "hermes_cli.runtime_provider",
-    "agent.auxiliary_client",
-    "agent.models_dev",
-    "agent.secret_scope",
-    "agent.transcription_provider",
-    "agent.vault_store",
-    "agent.video_gen_provider",
+    "gateway",
+    "agent",
     "cron",
-    "cron.jobs",
+    "model_tools",
+    "run_agent",
+    "pm",
+    "tools.approval",
+    "tools.approval_context",
+    "tools.browser_tool_cdp",
+    "tools.browser_tool_session",
     "tools.browser_vault_tool",
+    "tools.clarify_gateway",
     "tools.image_generation_tool",
     "tools.mcp_oauth",
     "tools.mcp_tool_config",
@@ -153,6 +152,46 @@ FORBIDDEN_LEGACY_IMPORTS: frozenset[str] = frozenset({
     "tools.video_generation_tool",
     "tools.vision_tools",
     "tools.web_tools",
+})
+
+ALLOWED_EXTERNAL_TOP_MODULES: frozenset[str] = frozenset({
+    "muse",
+    "companion",
+    "_loader",
+    "test_auth_devices",
+    "test_stream",
+    "contact_sheet",
+    "starlette",
+    "uvicorn",
+    "websockets",
+    "multipart",
+    "httpx",
+    "httpcore",
+    "truststore",
+    "openai",
+    "anthropic",
+    "mcp",
+    "pydantic",
+    "ruamel",
+    "dotenv",
+    "cryptography",
+    "croniter",
+    "psutil",
+    "tzdata",
+    "PIL",
+    "pillow_heif",
+    "py_vapid",
+    "http_ece",
+    "ddgs",
+    "pypdf",
+    "yaml",
+    "edge_tts",
+    "docx",
+    "openpyxl",
+    "pptx",
+    "faster_whisper",
+    "sherpa_onnx",
+    "numpy",
 })
 
 
@@ -252,23 +291,33 @@ class WireAndSeamContractTest(unittest.TestCase):
             )
             self.assertEqual(cached.status_code, 304)
 
-    def test_ast_zero_forbidden_hermes_config_time_constants_imports_in_companion(self):
+    def test_ast_zero_hermes_imports_across_muse_companion_and_tools(self):
+        import sys
+
+        repo_root = ROOT.parent
+        stdlib = sys.stdlib_module_names
         violations: list[str] = []
-        py_files = sorted(ROOT.rglob("*.py"))
-        self.assertGreater(len(py_files), 30)
+        py_files: list[Path] = []
+        for top_dir in ("muse", "companion", "tools"):
+            py_files.extend(sorted((repo_root / top_dir).rglob("*.py")))
+        self.assertGreater(len(py_files), 80)
 
         for py_file in py_files:
-            rel = py_file.relative_to(ROOT).as_posix()
+            rel = py_file.relative_to(repo_root).as_posix()
             tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=rel)
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
+                        top = alias.name.split(".", 1)[0]
                         if alias.name in FORBIDDEN_LEGACY_IMPORTS or any(
                             alias.name.startswith(prefix + ".") for prefix in FORBIDDEN_LEGACY_IMPORTS
                         ):
                             violations.append(f"{rel}:{node.lineno}: import {alias.name}")
-                elif isinstance(node, ast.ImportFrom):
+                        elif top not in stdlib and top not in ALLOWED_EXTERNAL_TOP_MODULES:
+                            violations.append(f"{rel}:{node.lineno}: unapproved import {alias.name}")
+                elif isinstance(node, ast.ImportFrom) and node.level == 0:
                     mod = node.module or ""
+                    top = mod.split(".", 1)[0] if mod else ""
                     if mod in FORBIDDEN_LEGACY_IMPORTS or any(
                         mod.startswith(prefix + ".") for prefix in FORBIDDEN_LEGACY_IMPORTS
                     ):
@@ -278,8 +327,45 @@ class WireAndSeamContractTest(unittest.TestCase):
                             full = f"{mod}.{alias.name}"
                             if full in FORBIDDEN_LEGACY_IMPORTS:
                                 violations.append(f"{rel}:{node.lineno}: from {mod} import {alias.name}")
+                        if top not in stdlib and top not in ALLOWED_EXTERNAL_TOP_MODULES:
+                            violations.append(f"{rel}:{node.lineno}: unapproved from {mod} import ...")
 
-        self.assertEqual(violations, [], f"Forbidden legacy Hermes imports found in companion/:\n" + "\n".join(violations))
+        self.assertEqual(
+            violations,
+            [],
+            "Forbidden or unapproved imports found in muse/, companion/, or tools/:\n" + "\n".join(violations),
+        )
+
+    def test_muse_core_sloc_budget_and_removed_legacy_artifacts(self):
+        repo_root = ROOT.parent
+        muse_root = repo_root / "muse"
+
+        def count_sloc(path: Path) -> int:
+            return sum(
+                1
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            )
+
+        # 1) muse/ core kernel (top-level muse/*.py) must stay strictly under 8,000 SLOC.
+        kernel_files = sorted(muse_root.glob("*.py"))
+        self.assertGreaterEqual(len(kernel_files), 15)
+        kernel_sloc = sum(count_sloc(p) for p in kernel_files)
+        self.assertLess(kernel_sloc, 8000, f"muse/ core kernel SLOC ({kernel_sloc}) exceeds 8,000 budget")
+
+        # 2) Every production module across muse/ must stay strictly under 1,000 SLOC.
+        oversized: list[str] = []
+        for py_file in sorted(muse_root.rglob("*.py")):
+            if "tests" in py_file.parts:
+                continue
+            sloc = count_sloc(py_file)
+            if sloc >= 1000:
+                oversized.append(f"{py_file.relative_to(repo_root).as_posix()} ({sloc} SLOC)")
+        self.assertEqual(oversized, [], "Oversized muse/ modules (>= 1,000 SLOC):\n" + "\n".join(oversized))
+
+        # 3) Legacy Hermes bootstrap/plugin files must be removed in v2.0.
+        for removed_rel in ("companion/plugin.yaml", "tools/fetch-hermes.sh", "tools/hermes-config.example.yaml"):
+            self.assertFalse((repo_root / removed_rel).exists(), f"Legacy file should be deleted: {removed_rel}")
 
     def test_persona_notices_stay_in_sync_with_muse_notices(self):
         from _loader import load

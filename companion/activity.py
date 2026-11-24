@@ -38,67 +38,32 @@ def bind(adapter: "CompanionAdapter", loop: asyncio.AbstractEventLoop) -> None:
 
 
 def _chat_for_session(session_id: str) -> Optional[str]:
-    """The companion chat a session (or its subagent's parent chain) belongs to."""
-    from muse.paths import active_engine_name, get_muse_db_path
+    """The companion chat a session belongs to."""
+    from muse.context import get_turn_context
+    from muse.paths import get_muse_db_path
 
-    if active_engine_name() == "native":
-        from muse.context import get_turn_context
+    ctx = get_turn_context()
+    if ctx is not None and ctx.chat_id and (not session_id or ctx.session_id == session_id):
+        return ctx.chat_id
+    if session_id.startswith("companion:"):
+        return session_id.split(":", 1)[1] or None
+    cached_native = _chat_by_session.get(session_id)
+    if cached_native:
+        return cached_native
+    db_path = get_muse_db_path()
+    if session_id and db_path.is_file():
+        with contextlib.suppress(Exception):
+            from muse.runtime import use_shared_db
 
-        ctx = get_turn_context()
-        if ctx is not None and ctx.chat_id and (not session_id or ctx.session_id == session_id):
-            return ctx.chat_id
-        if session_id.startswith("companion:"):
-            return session_id.split(":", 1)[1] or None
-        cached_native = _chat_by_session.get(session_id)
-        if cached_native:
-            return cached_native
-        db_path = get_muse_db_path()
-        if session_id and db_path.is_file():
-            with contextlib.suppress(Exception):
-                from muse.runtime import use_shared_db
-
-                with use_shared_db(db_path=db_path) as mdb:
-                    row = mdb.get_session(session_id)
-                    if row and row.get("chat_id"):
-                        cid = str(row["chat_id"])
-                        _chat_by_session[session_id] = cid
-                        return cid
-        return None
-
-    cached = _chat_by_session.get(session_id)
-    if cached:
-        return cached
-    chat_id = None
-    db = None
-    try:
-        from hermes_state import SessionDB
-
-        try:
-            db = SessionDB(read_only=True)
-        except TypeError:
-            db = SessionDB()
-        current, seen = session_id, set()
-        while current and current not in seen:
-            seen.add(current)
-            row = db.get_session(current) or {}
-            if row.get("source") == "companion" and row.get("chat_id"):
-                chat_id = str(row["chat_id"])
-                break
-            current = row.get("parent_session_id")
-    except Exception as exc:  # the activity line is a nicety; never break a tool call over it
-        logger.debug("companion: could not resolve session %s: %s", session_id, exc)
-        return None
-    finally:
-        close = getattr(db, "close", None)
-        if callable(close):
-            with contextlib.suppress(Exception):
-                close()
-    if chat_id:
-        # Only hits are cached: a session's row may not exist yet on its first tool call.
-        if len(_chat_by_session) >= _MAX_SESSION_CACHE:
-            _chat_by_session.pop(next(iter(_chat_by_session)), None)
-        _chat_by_session[session_id] = chat_id
-    return chat_id
+            with use_shared_db(db_path=db_path) as mdb:
+                row = mdb.get_session(session_id)
+                if row and row.get("chat_id"):
+                    cid = str(row["chat_id"])
+                    if len(_chat_by_session) >= _MAX_SESSION_CACHE:
+                        _chat_by_session.pop(next(iter(_chat_by_session)), None)
+                    _chat_by_session[session_id] = cid
+                    return cid
+    return None
 
 
 def _text(value: Any) -> Optional[str]:
