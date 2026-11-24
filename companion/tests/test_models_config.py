@@ -133,6 +133,63 @@ class ModelsConfigAndHealthTest(unittest.TestCase):
             os.unlink(db_path)
             self.assertFalse(db_path.exists())
 
+    def test_engine_routing_never_creates_muse_db_in_hermes_and_syncs_cleanly_in_native(self):
+        import hashlib
+        import json
+        from muse.paths import muse_home_override
+
+        home = temp_dir("companion engine route 中文 ")
+        state_db = home / "state.db"
+        muse_db = home / "muse.db"
+        now = time.time()
+
+        with contextlib.closing(sqlite3.connect(state_db)) as conn:
+            conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, chat_id TEXT, started_at REAL)")
+            conn.execute(
+                "CREATE TABLE session_model_usage ("
+                "session_id TEXT, model TEXT, billing_base_url TEXT, task TEXT, api_call_count INT, "
+                "input_tokens INT, cache_read_tokens INT, cache_write_tokens INT, output_tokens INT, last_seen REAL)"
+            )
+            conn.execute("CREATE TABLE state_meta (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute("INSERT INTO sessions VALUES ('s1', 'companion', 'main', ?)", (now,))
+            conn.execute(
+                "INSERT INTO session_model_usage VALUES ('s1', 'deepseek-chat', 'https://api.deepseek.com', '', 3, 1500, 300, 0, 400, ?)",
+                (now,),
+            )
+            conn.execute(
+                "INSERT INTO state_meta VALUES ('goal:s1', ?)",
+                (json.dumps({"goal": "交付 PR-2", "status": "active", "last_reason": "测试全绿", "created_at": now}),),
+            )
+            conn.commit()
+
+        sha_before = hashlib.sha256(state_db.read_bytes()).hexdigest()
+
+        with muse_home_override(home):
+            # 1) MUSE_ENGINE=hermes -> reads state.db read-only and NEVER creates muse.db!
+            with mock.patch.dict(os.environ, {"MUSE_ENGINE": "hermes"}):
+                s_hermes = self.models.usage_summary("Asia/Shanghai")
+                self.assertEqual(s_hermes["today"]["by_model"][0]["calls"], 3)
+                self.assertFalse(muse_db.exists())
+
+            # 2) MUSE_ENGINE=native -> syncs state.db -> muse.db (0-byte change to state.db) and matches wire output!
+            with mock.patch.dict(os.environ, {"MUSE_ENGINE": "native"}):
+                s_native = self.models.usage_summary("Asia/Shanghai")
+                g_native = self.goals.goal_state("main")
+                self.assertEqual(s_native["today"], s_hermes["today"])
+                self.assertEqual(
+                    g_native,
+                    {"active": True, "status": "active", "objective": "交付 PR-2", "ui_summary": "测试全绿"},
+                )
+                self.assertEqual(self.goals._session_id("main"), "s1")
+                self.assertTrue(muse_db.exists())
+                self.assertEqual(hashlib.sha256(state_db.read_bytes()).hexdigest(), sha_before)
+
+            # Both DB files must have zero open handles on Windows!
+            os.unlink(muse_db)
+            os.unlink(state_db)
+            self.assertFalse(muse_db.exists())
+            self.assertFalse(state_db.exists())
+
     def test_fs_atomic_retries_permission_error_and_leaves_no_tmp_files(self):
         target = self.folder / "nested" / "state.json"
         real_replace = os.replace
