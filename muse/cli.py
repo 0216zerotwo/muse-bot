@@ -376,6 +376,55 @@ def _find_chromium() -> Optional[str]:
     return None
 
 
+def _parse_bundled_manifest(raw_text: str) -> list[tuple[str, str]]:
+    text = (raw_text or "").strip()
+    if not text:
+        return []
+    if text.startswith("{"):
+        with contextlib.suppress(Exception):
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                skills_map = parsed.get("skills") if isinstance(parsed.get("skills"), dict) else parsed
+                return [
+                    (str(k).strip(), str(v).strip().lower())
+                    for k, v in skills_map.items()
+                    if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip()
+                ]
+    entries: list[tuple[str, str]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        name, _, digest = line.partition(":")
+        if name.strip() and digest.strip():
+            entries.append((name.strip(), digest.strip().lower()))
+    return entries
+
+
+def _skill_matches_expected_hash(target: Path, expected_hash: str) -> bool:
+    expected = expected_hash.strip().lower()
+    if not expected:
+        return False
+    skill_file = target / "SKILL.md" if target.is_dir() else target
+    if not skill_file.is_file():
+        return False
+    if len(expected) == 64 and hashlib.sha256(skill_file.read_bytes()).hexdigest() == expected:
+        return True
+    if target.is_dir() and len(expected) == 32:
+        files = sorted(p for p in target.rglob("*") if p.is_file())
+        for sep in ("/", "\\"):
+            md5 = hashlib.md5()
+            for fpath in files:
+                rel = fpath.relative_to(target).as_posix()
+                md5.update((rel if sep == "/" else rel.replace("/", "\\")).encode("utf-8"))
+                md5.update(fpath.read_bytes())
+            if md5.hexdigest() == expected:
+                return True
+    if len(expected) == 32 and hashlib.md5(skill_file.read_bytes()).hexdigest() == expected:
+        return True
+    return False
+
+
 def _clean_legacy_artifacts(repo_root: Path, home: Path, db_report: dict[str, Any]) -> dict[str, Any]:
     """Remove legacy ~900MB dirs and unmodified `.bundled_manifest` skills once `muse.db` is healthy."""
     if not db_report.get("healthy"):
@@ -396,36 +445,49 @@ def _clean_legacy_artifacts(repo_root: Path, home: Path, db_report: dict[str, An
 
     skills_dir = home / "skills"
     manifest_path = skills_dir / ".bundled_manifest"
-    if manifest_path.is_file():
+    if skills_dir.is_dir() and manifest_path.is_file():
+        skills_root = skills_dir.resolve()
+        touched_parents: set[Path] = set()
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except Exception:
-            manifest = {}
-        entries = manifest.get("skills") if isinstance(manifest, dict) and isinstance(manifest.get("skills"), dict) else (
-            manifest if isinstance(manifest, dict) else {}
-        )
-        for rel_skill, expected_hash in list(entries.items()):
-            if not isinstance(rel_skill, str) or not isinstance(expected_hash, str):
+            raw_manifest = manifest_path.read_text(encoding="utf-8-sig")
+        except OSError:
+            raw_manifest = ""
+        for rel_skill, expected_hash in _parse_bundled_manifest(raw_manifest):
+            if rel_skill in ("", ".", "..") or os.path.isabs(rel_skill) or _WIN_DRIVE_RE.match(rel_skill):
                 continue
-            target = (skills_dir / rel_skill).resolve()
-            try:
-                target.relative_to(skills_dir.resolve())
-            except ValueError:
-                continue
-            if not target.exists():
-                continue
-            skill_file = target / "SKILL.md" if target.is_dir() else target
-            if not skill_file.is_file():
-                continue
-            digest = hashlib.sha256(skill_file.read_bytes()).hexdigest()
-            if digest == expected_hash.strip().lower():
-                if target.is_dir():
-                    shutil.rmtree(target)
+            candidates: list[Path] = []
+            direct = (skills_dir / rel_skill).resolve()
+            if direct != skills_root and skills_root in direct.parents and direct.exists():
+                candidates.append(direct)
+            elif "/" not in rel_skill and "\\" not in rel_skill:
+                for cat in sorted(skills_dir.iterdir()):
+                    if not cat.is_dir() or cat.name.startswith("."):
+                        continue
+                    cand = (cat / rel_skill).resolve()
+                    if cand != skills_root and skills_root in cand.parents and cand.exists():
+                        candidates.append(cand)
+            for target in candidates:
+                if target == skills_root or skills_root not in target.parents or not target.exists():
+                    continue
+                skill_file = target / "SKILL.md" if target.is_dir() else target
+                if not skill_file.is_file():
+                    continue
+                if _skill_matches_expected_hash(target, expected_hash):
+                    parent = target.parent.resolve()
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+                    removed.append(str(target))
+                    if parent != skills_root and skills_root in parent.parents:
+                        touched_parents.add(parent)
                 else:
-                    target.unlink()
-                removed.append(str(target))
-            else:
-                preserved_skills.append(rel_skill)
+                    preserved_skills.append(rel_skill)
+        for cat_dir in sorted(touched_parents, key=lambda p: len(p.parts), reverse=True):
+            if cat_dir != skills_root and skills_root in cat_dir.parents and cat_dir.is_dir():
+                if not any(cat_dir.iterdir()):
+                    with contextlib.suppress(OSError):
+                        cat_dir.rmdir()
 
     return {
         "executed": True,
@@ -482,8 +544,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     if args.home:
         os.environ["MUSE_HOME"] = str(Path(args.home).expanduser())
 
-    from .app import create_app
+    from .app import create_app, load_home_dotenv
 
+    load_home_dotenv(args.home)
     app = create_app(host=args.host, port=args.port, home=args.home)
     uvicorn.run(
         app,

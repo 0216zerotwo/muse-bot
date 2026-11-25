@@ -789,37 +789,9 @@ class RealAdapterAndEngineIntegrationTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def _make_real_adapter(self) -> tuple[Any, list[dict[str, Any]]]:
-        comp_tests = Path(__file__).resolve().parents[2] / "companion" / "tests"
-        if str(comp_tests) not in sys.path:
-            sys.path.insert(0, str(comp_tests))
-        import _loader
+        from muse.app import NativeCompanionAdapter
 
-        _loader.ensure_hermes_stubs()
-        mod_name = "companion_pr4_adapter_test"
-        comp_root = Path(__file__).resolve().parents[2] / "companion"
-        if mod_name not in sys.modules:
-            spec = importlib.util.spec_from_file_location(
-                mod_name, comp_root / "__init__.py", submodule_search_locations=[str(comp_root)],
-            )
-            assert spec is not None
-            sys.modules[mod_name] = importlib.util.module_from_spec(spec)
-        adapter_mod = importlib.import_module(f"{mod_name}.adapter")
-        from companion.media import MediaStore
-
-        adapter = object.__new__(adapter_mod.CompanionAdapter)
-        webui = self.home / "companion"
-        adapter.store = ChatStore(webui)
-        adapter.media = MediaStore(webui)
-        adapter._subs = {}
-        adapter._turns = {}
-        adapter._chain_root = {}
-        adapter._inband_active = set()
-        adapter._pending_turns = {}
-        adapter._turn_output = set()
-        adapter._drafts = {}
-        adapter._last_reply = {}
-        adapter._turn_idle = {}
-        adapter._internal_locks = {}
+        adapter = NativeCompanionAdapter(home=self.home, start_background_services=False)
         ws_sent: list[dict[str, Any]] = []
 
         class FakeSocket:
@@ -864,8 +836,8 @@ class RealAdapterAndEngineIntegrationTest(unittest.TestCase):
                 self.assertEqual(adapter.store.events(chat_id), [])
                 self.assertEqual(ws_sent[-1]["event"], "turn_end")
 
-                # Clarify across turn_A -> turn_B -> regenerate(turn_B) via real CompanionAdapter!
-                with patch("companion_pr4_adapter_test.adapter.router.prefetch", lambda *a, **k: None):
+                # Clarify across turn_A -> turn_B -> regenerate(turn_B) via real NativeCompanionAdapter!
+                with patch("companion.modules.router.prefetch", lambda *a, **k: None):
                     await adapter.submit(chat_id, "推荐一杯咖啡", "turn_A")
                     actor = engine.get_actor(chat_id)
                     for _ in range(50):
@@ -886,6 +858,7 @@ class RealAdapterAndEngineIntegrationTest(unittest.TestCase):
                 payload = adapter.store.thread_payload(chat_id)
                 self.assertTrue(any(e.get("turn_id") == "turn_A" and "```card" in e.get("text", "") for e in payload["events"]))
                 self.assertTrue(any(e.get("turn_id") == "turn_B" and e.get("text") == "重新生成的拿铁推荐！" for e in payload["events"]))
+                await adapter.shutdown()
 
         asyncio.run(run())
 

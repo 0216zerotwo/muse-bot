@@ -447,16 +447,25 @@ class GoalLoopController:
             if gate_cmd:
                 state.gates.append(GoalGate(command=gate_cmd))
                 self.save_state(chat_id, state)
+                await self._sync_ui(chat_id)
             return state
-        if low == "/goal gate clear" and state is not None:
-            state.gates.clear()
-            self.save_state(chat_id, state)
+        if low == "/goal gate clear":
+            if state is not None:
+                state.gates.clear()
+                self.save_state(chat_id, state)
+                await self._sync_ui(chat_id)
             return state
-        if low.startswith("/subgoal ") and state is not None:
+        if low.startswith("/subgoal "):
+            if state is None or state.status not in ("active", "paused"):
+                raise RuntimeError("当前没有进行中的目标")
             sub = cmd[len("/subgoal ") :].strip()
             if sub:
                 state.subgoals.append(sub)
                 self.save_state(chat_id, state)
+                await self._sync_ui(chat_id)
+            return state
+        if low in ("/goal", "/goal status"):
+            await self._sync_ui(chat_id)
             return state
         if low.startswith("/goal "):
             body = cmd[len("/goal ") :].strip()
@@ -465,6 +474,53 @@ class GoalLoopController:
         return state
 
     handle_command = handle_control
+
+    async def execute_typed_command(
+        self, chat_id: str, stripped: str, *, control_fn: Optional[Callable[[str, str], Awaitable[Any]]] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Execute a typed `/goal ...` or `/subgoal ...` message; returns `(direct_reply, kick_prompt)`."""
+        low = stripped.lower()
+        invoke = control_fn or self.handle_control
+        if low in ("/goal", "/goal status"):
+            st = self.load_state(chat_id)
+            if st is None or st.status in ("cleared", "inactive"):
+                return "当前没有进行中的目标。发送 `/goal <目标描述>` 可开启自动推进目标。", None
+            lines = [f"当前目标：{st.goal}", f"状态：{st.status}（第 {st.turns_used}/{st.max_turns} 步）"]
+            if st.subgoals:
+                lines.append("子目标：" + "；".join(st.subgoals))
+            if st.gates:
+                lines.append("验收门禁：" + "；".join(f"`{g.command}`" for g in st.gates))
+            return "\n".join(lines), None
+        if low == "/goal gate" or low.startswith("/goal gate "):
+            try:
+                if low.startswith("/goal gate add "):
+                    gcmd = stripped[len("/goal gate add ") :].strip()
+                    await invoke(chat_id, stripped)
+                    return (f"已添加验收门禁：`{gcmd}`" if gcmd else "用法：`/goal gate add <命令>`"), None
+                if low == "/goal gate clear":
+                    await invoke(chat_id, stripped)
+                    return "已清空当前目标的验收门禁。", None
+                return "用法：`/goal gate add <命令>` 或 `/goal gate clear`。", None
+            except RuntimeError as exc:
+                return str(exc), None
+        if low == "/subgoal" or low.startswith("/subgoal "):
+            sub = stripped[len("/subgoal") :].strip()
+            if not sub:
+                return "用法：`/subgoal <子目标内容>`", None
+            try:
+                await invoke(chat_id, stripped)
+                return f"已添加子目标：{sub}", None
+            except RuntimeError as exc:
+                return str(exc), None
+        if low.startswith("/goal "):
+            await invoke(chat_id, stripped)
+            st = self.load_state(chat_id)
+            body = stripped[len("/goal ") :].strip()
+            kick = st.goal if (st is not None and st.goal) else body
+            if st is not None and not st.contract.is_empty():
+                kick = f"{kick}\n\nCompletion contract:\n{st.contract.render_block()}"
+            return None, kick
+        return None, None
 
     # ── Judge & Multi-Turn Loop ───────────────────────────────────────────────
 

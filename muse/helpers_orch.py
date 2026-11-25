@@ -35,21 +35,36 @@ def resolve_helper_model_override(helper: dict[str, Any], *, models_mod: Any = N
     if not preset_name:
         return None
     models = _comp_mod(models_mod, "models")
-    preset = ((models.read_models() or {}).get("presets") or {}).get(preset_name)
+    data = models.read_models() or {}
+    preset = (data.get("presets") or {}).get(preset_name)
     if not isinstance(preset, dict) or not preset.get("model"):
         return None
     provider = models.runtime_provider(preset_name, preset)
+    is_oauth = bool(preset.get("auth")) or str(provider).strip().lower() in ("openai-codex", "xai-oauth")
     runtime: dict[str, Any] = {}
     with contextlib.suppress(Exception):
         from muse.llm.providers import resolve_runtime_provider  # type: ignore[import-not-found]
 
-        runtime = resolve_runtime_provider(requested=provider, target_model=preset["model"])
-    return {
-        "model": preset["model"], "provider": provider, "api_key": runtime.get("api_key"),
+        runtime = resolve_runtime_provider(
+            requested=provider, target_model=preset["model"], allow_oauth_refresh=False,
+        )
+    rmodels = ((data.get("router") or {}).get("models") or {}) if isinstance(data.get("router"), dict) else {}
+    info = rmodels.get(preset_name) if isinstance(rmodels, dict) else None
+    vision = bool(info.get("vision")) if isinstance(info, dict) and "vision" in info else True
+    out: dict[str, Any] = {
+        "preset": preset_name,
+        "model": preset["model"],
+        "provider": provider,
         "base_url": runtime.get("base_url") or preset.get("base_url"),
         "api_mode": runtime.get("api_mode") or preset.get("api_mode"),
-        "request_overrides": {}, "capabilities": {},
+        "vision": vision,
+        "reasoning_effort": preset.get("reasoning_effort") if "reasoning_effort" in preset else runtime.get("reasoning_effort"),
+        "request_overrides": {},
+        "capabilities": {"vision": vision},
     }
+    if not is_oauth and runtime.get("api_key"):
+        out["api_key"] = runtime["api_key"]
+    return out
 
 
 ChildTurnRunner = Callable[..., Awaitable[str]]

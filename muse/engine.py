@@ -3,11 +3,59 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 import uuid
 from collections.abc import Callable
 from typing import Any, Optional, Protocol, runtime_checkable
 
+from .config_store import load_config
 from .paths import EngineName
+
+
+def _build_reasoning_config(effort: Any) -> Optional[dict[str, Any]]:
+    if isinstance(effort, dict):
+        return dict(effort)
+    raw = str(effort or "").strip().lower()
+    if not raw:
+        return None
+    if raw in ("none", "off", "disabled", "false"):
+        return {"enabled": False, "effort": "none"}
+    return {"enabled": True, "effort": raw}
+
+
+def _resolve_chat_vision(ov: dict[str, Any], runtime: dict[str, Any], cfg: dict[str, Any]) -> bool:
+    if "vision" in ov and ov["vision"] is not None:
+        return bool(ov["vision"])
+    prov_id = str(runtime.get("provider") or "").strip()
+    mod_name = str(runtime.get("model") or "").strip()
+    providers_cfg = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
+    p_entry = providers_cfg.get(prov_id) or providers_cfg.get(prov_id.lower())
+    if isinstance(p_entry, dict) and "vision" in p_entry and p_entry["vision"] is not None:
+        return bool(p_entry["vision"])
+    model_cfg = cfg.get("model")
+    if isinstance(model_cfg, dict) and "vision" in model_cfg and model_cfg["vision"] is not None:
+        return bool(model_cfg["vision"])
+    with contextlib.suppress(Exception):
+        from companion.modules import models as comp_models
+
+        data = comp_models.read_models() or {}
+        presets = data.get("presets") if isinstance(data.get("presets"), dict) else {}
+        rmodels = ((data.get("router") or {}).get("models") or {}) if isinstance(data.get("router"), dict) else {}
+        preset_name = str(ov.get("preset") or "").strip()
+        if not preset_name:
+            active = comp_models.chat_preset(data)
+            if active and active in presets and presets[active].get("model") == mod_name and comp_models.runtime_provider(active, presets[active]) == prov_id:
+                preset_name = active
+        if not preset_name:
+            preset_name = next(
+                (n for n, p in presets.items() if isinstance(p, dict) and comp_models.runtime_provider(n, p) == prov_id and p.get("model") == mod_name),
+                "",
+            ) or next((n for n, p in presets.items() if isinstance(p, dict) and p.get("model") == mod_name), "")
+        info = rmodels.get(preset_name) if preset_name else rmodels.get(mod_name)
+        if isinstance(info, dict) and "vision" in info:
+            return bool(info["vision"])
+    return True
 
 
 @runtime_checkable
@@ -127,8 +175,13 @@ class ChatTurnEngine(AgentEngine):
 
     async def stop(self) -> None:
         for actor in list(self._actors.values()):
-            if actor.active_turn_id is not None:
+            if actor.active_turn_id is not None or getattr(actor, "_pending_clarify", None) is not None:
                 await actor.handle_stop()
+            elif (rt := getattr(actor, "_runner_task", None)) is not None and not rt.done():
+                rt.cancel()
+                await asyncio.wait({rt}, timeout=1.0)
+                if rt.done() and not rt.cancelled():
+                    _ = rt.exception()
         if self._mcp_active and self._mcp_manager is not None:
             await self._mcp_manager.shutdown()
             self._mcp_active = False
@@ -146,45 +199,94 @@ class ChatTurnEngine(AgentEngine):
         cancel_scope: Any = None,
         actor: Any = None,
     ) -> Any:
+        from .helpers_orch import resolve_helper_model_override
         from .llm.auxiliary import create_transport, describe_images_if_blind, get_pooled_async_client
         from .llm.providers import resolve_runtime_provider
 
         del cancel_scope
-        ov = model_override or {}
-        runtime = await asyncio.to_thread(
-            resolve_runtime_provider,
-            ov.get("provider"),
-            target_model=ov.get("model"),
-            base_url=ov.get("base_url"),
-            api_key=ov.get("api_key"),
-            api_mode=ov.get("api_mode"),
-        )
-        if actor is not None:
-            actor.model_name = str(runtime.get("model") or actor.model_name)
-            actor.provider_name = str(runtime.get("provider") or actor.provider_name)
-            actor.base_url = str(runtime.get("base_url") or actor.base_url)
-            if isinstance(ctx_len := runtime.get("context_length"), int) and ctx_len > 0:
-                actor.context_window = ctx_len
-        chat_vision = bool(ov.get("vision", True))
-        prepared = await describe_images_if_blind(messages, chat_vision=chat_vision)
-        transport = create_transport(
-            api_mode=str(runtime.get("api_mode") or "chat_completions"),
-            base_url=str(runtime.get("base_url") or ""),
-            api_key=str(runtime.get("api_key") or ""),
-            provider=str(runtime.get("provider") or ""),
-            default_headers=runtime.get("extra_headers") or None,
-            client=get_pooled_async_client(),
-        )
+        ov = dict(model_override) if model_override else {}
+        if not ov and actor is not None and getattr(actor, "actor_kind", "") == "helper":
+            _, _, hrow = self._resolve_actor_helper(actor.chat_id)
+            if hrow is not None:
+                ov = resolve_helper_model_override(hrow) or {}
+
+        cfg = await asyncio.to_thread(load_config)
+        candidates: list[dict[str, Any]] = [ov]
+        raw_fallbacks = cfg.get("fallback_providers")
+        if isinstance(raw_fallbacks, list):
+            for fb in raw_fallbacks:
+                if isinstance(fb, dict) and (fb.get("provider") or fb.get("model")):
+                    candidates.append(dict(fb))
+                elif isinstance(fb, str) and fb.strip():
+                    candidates.append({"provider": fb.strip()})
+
+        seen_targets: set[tuple[str, str, str]] = set()
+        last_exc: Optional[BaseException] = None
         tools = self._tools_provider() if self._tools_provider is not None else None
-        async for ev in transport.stream(
-            model=str(runtime.get("model") or ""),
-            messages=prepared,
-            tools=tools,
-            max_tokens=runtime.get("max_tokens"),
-            temperature=runtime.get("temperature"),
-            extra_body=runtime.get("extra_body") or None,
-        ):
-            yield ev
+
+        for idx, cand in enumerate(candidates):
+            runtime = await asyncio.to_thread(
+                resolve_runtime_provider,
+                cand.get("provider"),
+                target_model=cand.get("model"),
+                config=cfg,
+                base_url=cand.get("base_url"),
+                api_key=cand.get("api_key"),
+                api_mode=cand.get("api_mode"),
+            )
+            sig = (str(runtime.get("provider") or ""), str(runtime.get("model") or ""), str(runtime.get("base_url") or ""))
+            if idx > 0 and sig in seen_targets:
+                continue
+            seen_targets.add(sig)
+
+            if actor is not None:
+                actor.model_name = str(runtime.get("model") or actor.model_name)
+                actor.provider_name = str(runtime.get("provider") or actor.provider_name)
+                actor.base_url = str(runtime.get("base_url") or actor.base_url)
+                if isinstance(ctx_len := runtime.get("context_length"), int) and ctx_len > 0:
+                    actor.context_window = ctx_len
+
+            chat_vision = _resolve_chat_vision(cand, runtime, cfg)
+            prepared = await describe_images_if_blind(messages, chat_vision=chat_vision, config=cfg)
+            effort = cand.get("reasoning_effort") if "reasoning_effort" in cand and cand.get("reasoning_effort") is not None else runtime.get("reasoning_effort")
+            reasoning_config = _build_reasoning_config(effort)
+            transport = create_transport(
+                api_mode=str(runtime.get("api_mode") or "chat_completions"),
+                base_url=str(runtime.get("base_url") or ""),
+                api_key=str(runtime.get("api_key") or ""),
+                provider=str(runtime.get("provider") or ""),
+                default_headers=runtime.get("extra_headers") or None,
+                client=get_pooled_async_client(),
+            )
+            emitted_output = False
+            try:
+                stream_kw: dict[str, Any] = {
+                    "model": str(runtime.get("model") or ""),
+                    "messages": prepared,
+                    "tools": tools,
+                    "max_tokens": runtime.get("max_tokens"),
+                    "temperature": runtime.get("temperature"),
+                    "extra_body": runtime.get("extra_body") or None,
+                }
+                if reasoning_config is not None:
+                    stream_kw["reasoning_config"] = reasoning_config
+                async for ev in transport.stream(**stream_kw):
+                    if type(ev).__name__ in (
+                        "TextDelta", "ReasoningDelta", "ToolCallDelta", "ToolCallComplete",
+                        "ThinkingBlockComplete", "EncryptedReasoningItem",
+                    ):
+                        emitted_output = True
+                    yield ev
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if emitted_output or idx >= len(candidates) - 1:
+                    raise
+                continue
+        if last_exc is not None:
+            raise last_exc
 
     async def _actor_execute_tool(self, tc: dict[str, Any], ctx: Any) -> str:
         import json
@@ -218,11 +320,17 @@ class ChatTurnEngine(AgentEngine):
     ) -> str:
         actor = self.get_actor(chat_id)
         prev_facing, prev_kind, prev_helper_id = actor.facing_chat_id, actor.actor_kind, actor.helper_id
+        prev_toolsets, prev_override = actor.enabled_toolsets, actor._model_override
         try:
+            actor.max_iterations = self._configured_max_turns()
             if ctx is not None:
-                actor.facing_chat_id = str(getattr(ctx, "facing_chat_id", "") or chat_id)
-                actor.actor_kind = getattr(ctx, "actor_kind", prev_kind)
+                kind = getattr(ctx, "actor_kind", prev_kind)
+                actor.actor_kind = kind
+                is_cron = kind == "cron" or str(chat_id).startswith("cron:")
+                raw_facing = str(getattr(ctx, "facing_chat_id", "") or "")
+                actor.facing_chat_id = ("" if raw_facing.startswith("cron:") else raw_facing) if is_cron else (raw_facing or chat_id)
                 actor.helper_id = getattr(ctx, "helper_id", prev_helper_id)
+                actor.enabled_toolsets = tuple(getattr(ctx, "enabled_toolsets", ()) or ())
             actor.set_model_override(model_override)
             await actor.submit(prompt, turn_id, emit_user_message=False)
             await actor.wait_idle()
@@ -230,6 +338,8 @@ class ChatTurnEngine(AgentEngine):
             actor.facing_chat_id = prev_facing
             actor.actor_kind = prev_kind
             actor.helper_id = prev_helper_id
+            actor.enabled_toolsets = prev_toolsets
+            actor.set_model_override(prev_override)
         events = self._sink.store_events(chat_id)
         return "\n\n".join(
             str(e.get("text") or "").strip()
@@ -250,18 +360,49 @@ class ChatTurnEngine(AgentEngine):
         raise RuntimeError("No approval executor configured on ChatTurnEngine")
 
     @staticmethod
-    def _default_actor_identity(chat_id: str) -> tuple[Any, Optional[str]]:
+    def _configured_max_turns() -> int:
+        with contextlib.suppress(Exception):
+            cfg = load_config()
+            raw = (cfg.get("agent") or {}).get("max_turns") if isinstance(cfg.get("agent"), dict) else cfg.get("max_turns")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+                return raw
+        return 25
+
+    @staticmethod
+    def _resolve_actor_helper(chat_id: str) -> tuple[Any, Optional[str], Optional[dict[str, Any]]]:
+        if str(chat_id).startswith("cron:"):
+            return "cron", None, None
         try:
             from companion.modules import helpers
 
             row = helpers.helper_for_chat(chat_id)
             if isinstance(row, dict) and row.get("id"):
-                return "helper", str(row["id"])
+                return "helper", str(row["id"]), row
         except Exception:
             pass
-        return "companion", None
+        return "companion", None, None
+
+    @classmethod
+    def _default_actor_identity(cls, chat_id: str) -> tuple[Any, Optional[str]]:
+        kind, hid, _ = cls._resolve_actor_helper(chat_id)
+        return kind, hid
+
+    def _refresh_actor_settings(self, actor: Any) -> None:
+        from .helpers_orch import resolve_helper_model_override
+
+        actor.max_iterations = self._configured_max_turns()
+        kind, hid, hrow = self._resolve_actor_helper(actor.chat_id)
+        if hrow is not None:
+            actor.actor_kind = "helper"
+            actor.helper_id = hid
+            actor.set_model_override(resolve_helper_model_override(hrow))
+        elif getattr(actor, "actor_kind", "") == "helper":
+            actor.actor_kind = kind
+            actor.helper_id = None
+            actor.set_model_override(None)
 
     def get_actor(self, chat_id: str) -> Any:
+        from .helpers_orch import resolve_helper_model_override
         from .turn_actor import ChatTurnActor
 
         actor = self._actors.get(chat_id)
@@ -280,7 +421,8 @@ class ChatTurnEngine(AgentEngine):
                 if (self.pipeline is not None or self._execute_tool is not None)
                 else None
             )
-            default_kind, default_helper_id = self._default_actor_identity(chat_id)
+            default_kind, default_helper_id, helper_row = self._resolve_actor_helper(chat_id)
+            close_browser_fn = self.pipeline.close_browser_after_task if self.pipeline is not None else None
             actor = ChatTurnActor(
                 chat_id,
                 db=self._ensure_db(),
@@ -289,11 +431,16 @@ class ChatTurnEngine(AgentEngine):
                 execute_tool=tool_fn,
                 assembler=self._assembler,
                 compactor=self._compactor,
-                facing_chat_id=chat_id,
+                facing_chat_id="" if default_kind == "cron" else chat_id,
                 actor_kind=default_kind,
                 helper_id=default_helper_id,
                 on_goal_control=self._on_goal_control or self._default_goal_control,
+                goal_controller=self.goal_controller,
+                close_browser_fn=close_browser_fn,
+                max_iterations=self._configured_max_turns(),
             )
+            if helper_row is not None:
+                actor.set_model_override(resolve_helper_model_override(helper_row))
             self._actors[chat_id] = actor
         return actor
 
@@ -305,11 +452,13 @@ class ChatTurnEngine(AgentEngine):
         files: Optional[list[tuple[str, str]]] = None,
     ) -> None:
         actor = self.get_actor(chat_id)
+        self._refresh_actor_settings(actor)
         actor.facing_chat_id = self.helper_orchestrator.facing_chat(chat_id) or chat_id
         await actor.submit(text, turn_id, files=files, emit_user_message=False)
 
     async def submit_internal(self, chat_id: str, text: str) -> str:
         actor = self.get_actor(chat_id)
+        self._refresh_actor_settings(actor)
         actor.facing_chat_id = self.helper_orchestrator.facing_chat(chat_id) or chat_id
         return await actor.submit_internal(text)
 
@@ -327,8 +476,53 @@ class ChatTurnEngine(AgentEngine):
 
     async def regenerate(self, chat_id: str, turn_id: str) -> str:
         actor = self.get_actor(chat_id)
+        self._refresh_actor_settings(actor)
         actor.facing_chat_id = self.helper_orchestrator.facing_chat(chat_id) or chat_id
         return await actor.regenerate(turn_id)
+
+    async def delete_turn(self, chat_id: str, turn_id: str, *, role: Optional[str] = None) -> int:
+        from .turn_actor import CANCELLED_TOOL_RESULT
+
+        db = self._ensure_db()
+        sess = db.get_active_session(chat_id, source="companion") if callable(getattr(db, "get_active_session", None)) else None
+        if not sess or not sess.get("id") or not turn_id:
+            return 0
+        rows = db.get_messages(str(sess["id"]), active_only=True)
+        remaining = [e for e in self._sink.store_events(chat_id) if e.get("turn_id") == turn_id and e.get("event") != "turn_end"]
+        to_drop: list[int] = []
+        for r in rows:
+            if r.get("turn_id") != turn_id:
+                continue
+            rid = int(r["id"])
+            if r.get("role") == "tool" and r.get("tool_name") == "clarify":
+                prev_tid = next((str(p.get("turn_id") or "") for p in reversed(rows) if int(p["id"]) < rid and p.get("role") == "assistant"), "") or None
+                db.update_message(rid, content=CANCELLED_TOOL_RESULT, turn_id=prev_tid, extra={"awaiting_user": False, "deleted": True})
+                continue
+            if not remaining or role is None:
+                to_drop.append(rid)
+            elif role == "user" and r.get("role") == "user":
+                to_drop.append(rid)
+            elif role == "reply" and r.get("role") != "user":
+                to_drop.append(rid)
+        return int(db.deactivate_messages(to_drop)) if to_drop else 0
+
+    async def delete_chat(self, chat_id: str) -> None:
+        actor = self._actors.pop(chat_id, None)
+        if actor is not None:
+            if getattr(actor, "_renew_timer", None) is not None:
+                actor._renew_timer.cancel()
+            if actor.active_turn_id is not None or actor._pending_clarify is not None:
+                with contextlib.suppress(Exception):
+                    await actor.handle_stop()
+        db = self._ensure_db()
+        if callable(getattr(db, "get_active_session", None)):
+            while (sess := db.get_active_session(chat_id, source="companion")) and sess.get("id"):
+                sid = str(sess["id"])
+                self._assembler.evict_session(sid)
+                db.update_session(sid, ended_at=time.time(), active=False)
+        if callable(getattr(db, "clear_goal", None)):
+            with contextlib.suppress(Exception):
+                db.clear_goal(chat_id)
 
     async def deliver_proactive(
         self,

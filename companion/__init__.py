@@ -1,4 +1,4 @@
-"""Companion platform for Muse / Hermes Agent: the phone app's server, bridged to the agent."""
+"""Companion web/mobile server and product modules for Muse Bot."""
 
 import sys
 from pathlib import Path
@@ -9,15 +9,4 @@ for _cand in (_HERE.parent, _HERE.parent.parent / "companion-lib"):
         sys.path.insert(0, str(_cand))
         break
 
-from typing import Any
-
-
-def __getattr__(name: str) -> Any:
-    if name == "register":
-        from .adapter import register
-
-        return register
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-__all__ = ["register"]
+__all__: list[str] = []

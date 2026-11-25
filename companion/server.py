@@ -30,7 +30,7 @@ from .media import child_file
 from .store import chat_id_of
 
 if TYPE_CHECKING:
-    from .adapter import CompanionAdapter
+    from muse.app import NativeCompanionAdapter as CompanionAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -740,6 +740,9 @@ async def _chats_change(adapter: "CompanionAdapter", payload: dict[str, Any]) ->
             raise ApiError(400, "缺少消息标识或消息角色不正确")
         await asyncio.to_thread(adapter.store.remove_events, chat_id, lambda e: e.get("turn_id") == turn_id and (
             (e.get("event") == "user_message") == (role == "user")) and e.get("event") != "turn_end")
+        del_turn_fn = getattr(adapter, "delete_turn", None) or getattr(getattr(adapter, "engine", None), "delete_turn", None)
+        if callable(del_turn_fn):
+            await del_turn_fn(chat_id, turn_id, role=role)
         return {"sessions": adapter.store.list()}
     if chat_id == companion_state.read_companion_state().get("chat_id"):
         raise ApiError(409, "主要聊天不能改名或删除")
@@ -750,6 +753,9 @@ async def _chats_change(adapter: "CompanionAdapter", payload: dict[str, Any]) ->
         adapter.store.set_title(chat_id, title)
     else:
         adapter.store.delete(chat_id)
+        del_chat_fn = getattr(adapter, "delete_chat", None) or getattr(getattr(adapter, "engine", None), "delete_chat", None)
+        if callable(del_chat_fn):
+            await del_chat_fn(chat_id)
     return {"sessions": adapter.store.list()}
 
 

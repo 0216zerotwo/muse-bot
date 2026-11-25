@@ -64,7 +64,7 @@ async def announce(adapter: Any, started_ms: int) -> None:
     await asyncio.sleep(settle_seconds())
     try:
         chats = [chat_id for chat_id, meta in adapter.store._read_index().items()
-                 if not meta.get("desk") and not meta.get("helper")]
+                 if not meta.get("desk") and not meta.get("helper") and not meta.get("cron") and not chat_id.startswith("cron:")]
     except Exception:
         logger.exception("companion: could not list the chats to look for cut-off tasks")
         return
