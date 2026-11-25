@@ -327,13 +327,31 @@ class NativeAgentEngine(ChatTurnEngine):
             dispatch_fn = getattr(reg, "dispatch", None)
             if callable(dispatch_fn):
                 sid = str(getattr(ctx, "session_id", "") or "")
-                res = dispatch_fn(name, args, session_id=sid, ctx=ctx)
+                eff_ts = getattr(ctx, "enabled_toolsets", None) or None
+                mcp_defs: list[dict[str, Any]] = []
+                if name == "tool_search" and self._mcp_manager is not None and callable(getattr(self._mcp_manager, "get_tool_definitions", None)):
+                    with contextlib.suppress(Exception):
+                        mcp_defs = list(self._mcp_manager.get_tool_definitions())
+                res = dispatch_fn(
+                    name, args, session_id=sid, ctx=ctx, enabled_toolsets=eff_ts, extra_mcp_tools=mcp_defs,
+                )
                 if asyncio.iscoroutine(res) or isinstance(res, Awaitable):
                     return str(await res)
                 return str(res)
         return f"Tool not available: {name}"
 
-    def _collect_tools_schema(self) -> list[dict[str, Any]]:
+    def _collect_tools_schema(
+        self, *, session_id: Optional[str] = None, enabled_toolsets: Any = None,
+    ) -> list[dict[str, Any]]:
+        from .context import get_turn_context
+
+        ctx = get_turn_context()
+        sid = session_id if session_id is not None else (str(getattr(ctx, "session_id", "") or "") if ctx is not None else "")
+        eff_ts = enabled_toolsets
+        if eff_ts is None and ctx is not None:
+            raw_ts = getattr(ctx, "enabled_toolsets", None)
+            if raw_ts:
+                eff_ts = raw_ts
         schemas: list[dict[str, Any]] = []
         mcp_defs: list[dict[str, Any]] = []
         if self._mcp_manager is not None and callable(getattr(self._mcp_manager, "get_tool_definitions", None)):
@@ -341,20 +359,52 @@ class NativeAgentEngine(ChatTurnEngine):
                 mcp_defs = list(self._mcp_manager.get_tool_definitions())
         reg = self._ensure_tool_registry()
         if reg is not None and callable(getattr(reg, "get_definitions", None)):
-            schemas.extend(reg.get_definitions(extra_mcp_tools=mcp_defs))
+            schemas.extend(reg.get_definitions(enabled_toolsets=eff_ts, session_id=sid, extra_mcp_tools=mcp_defs))
         elif mcp_defs:
             schemas.extend(mcp_defs)
         return schemas
 
     async def _run_cron_job(self, job: dict[str, Any], prompt: str) -> str:
+        from .context import TurnExecutionContext
+        from .cron import resolve_delivery_chat_id
+
         job_id = str(job.get("id") or uuid.uuid4().hex[:8])
         override: Optional[dict[str, Any]] = None
         if job.get("model") or job.get("provider"):
             override = {k: job[k] for k in ("provider", "model", "base_url") if job.get(k)}
+        delivery_chat = resolve_delivery_chat_id(job) or ""
+        if not delivery_chat:
+            with contextlib.suppress(Exception):
+                from companion.modules import companion_state
+                delivery_chat = str(companion_state.read_companion_state().get("chat_id") or "")
+        if delivery_chat.startswith("cron:"):
+            delivery_chat = ""
+        raw_ts = job.get("enabled_toolsets")
+        toolsets = (
+            tuple(str(t).strip() for t in raw_ts if str(t).strip())
+            if isinstance(raw_ts, (list, tuple, set, frozenset))
+            else ()
+        )
+        cron_chat = f"cron:{job_id}"
+        turn_id = f"cron-{job_id}-{uuid.uuid4().hex[:6]}"
+        store = getattr(self._sink, "store", None)
+        if store is not None and callable(getattr(store, "ensure", None)) and callable(getattr(store, "update_meta", None)):
+            with contextlib.suppress(Exception):
+                store.ensure(cron_chat)
+                store.update_meta(cron_chat, cron=True)
+        ctx = TurnExecutionContext(
+            chat_id=cron_chat,
+            facing_chat_id=delivery_chat,
+            session_id=cron_chat,
+            turn_id=turn_id,
+            actor_kind="cron",
+            enabled_toolsets=toolsets,
+        )
         return await self._run_child_actor_turn(
-            chat_id=f"cron:{job_id}",
+            chat_id=cron_chat,
             prompt=prompt,
-            turn_id=f"cron-{job_id}-{uuid.uuid4().hex[:6]}",
+            turn_id=turn_id,
+            ctx=ctx,
             model_override=override,
         )
 

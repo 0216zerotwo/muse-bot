@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import copy
+import io
 import json
 import logging
+import mimetypes
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Sequence
@@ -16,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional, TypeVar
 
+from companion.modules.secrets_guard import is_secret_path
 from .paths import get_muse_home
 
 logger = logging.getLogger(__name__)
@@ -156,7 +160,7 @@ class TurnExecutionContext:
     cancel_scope: CancelScope = field(default_factory=CancelScope)
 
     def __post_init__(self) -> None:
-        if not self.facing_chat_id:
+        if not self.facing_chat_id and self.actor_kind != "cron" and not str(self.chat_id).startswith("cron:"):
             self.facing_chat_id = self.chat_id
         if not isinstance(self.enabled_toolsets, tuple):
             self.enabled_toolsets = tuple(self.enabled_toolsets)
@@ -249,6 +253,16 @@ def load_skill_index(home: Optional[Path] = None, *, include_bundled: bool = Fal
     return rows
 
 
+COMPANION_DELIVERY_GUIDANCE = (
+    "## Companion App Delivery\n"
+    "You are chatting in the user's personal companion app on their phone. "
+    "Reply like a text message: short paragraphs, markdown is rendered. "
+    "To send a file, write MEDIA:/absolute/path/to/file on its own line: images, videos and audio "
+    "show inline, other files become a file card. Remote images: ![alt](url). Never paste a local "
+    "path as plain text expecting the user to open it — they are on their phone."
+)
+
+
 class PromptAssembler:
     """Assembles deterministic system prompts with per-session frozen `SOUL.md` snapshots."""
 
@@ -286,6 +300,7 @@ class PromptAssembler:
         sections: list[str] = []
         if soul := self.get_soul_snapshot(session_id, db=db, home=home):
             sections.append(soul)
+        sections.append(COMPANION_DELIVERY_GUIDANCE)
         user_mem, notes_mem = load_memory_entries(home=home)
         if user_mem or notes_mem:
             blocks = ["## Long-Term Memory"]
@@ -325,6 +340,92 @@ class PromptAssembler:
 
 def _is_image_part(part: Any) -> bool:
     return isinstance(part, dict) and str(part.get("type") or "").strip().lower() in _IMAGE_PART_TYPES
+
+
+_IMG_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif", ".avif", ".tif", ".tiff"})
+_TEXT_EXTS = frozenset({
+    ".txt", ".md", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".csv", ".tsv",
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css", ".sql", ".sh", ".ps1", ".log", ".xml", ".rst",
+})
+_TEXT_MIMES = frozenset({
+    "application/json", "application/xml", "application/javascript", "application/x-yaml",
+    "application/toml", "application/csv", "application/sql",
+})
+
+
+def _encode_image_part(fpath: Path, mime: str) -> Optional[dict[str, Any]]:
+    raw = fpath.read_bytes()
+    if not raw or len(raw) > 50 * 1024 * 1024:
+        return None
+    out_bytes, out_mime = raw, (mime if mime.startswith("image/") else "image/png")
+    with contextlib.suppress(Exception):
+        from PIL import Image, ImageOps
+        with contextlib.suppress(ImportError):
+            import pillow_heif
+            pillow_heif.register_heif_opener()
+        with Image.open(io.BytesIO(raw)) as opened:
+            img = ImageOps.exif_transpose(opened)
+            fmt = (opened.format or "").upper()
+            if fmt in {"PNG", "JPEG", "WEBP", "GIF"} and len(raw) <= 5 * 1024 * 1024 and max(img.size) <= 2048:
+                out_bytes, out_mime = raw, f"image/{fmt.lower()}"
+            else:
+                if max(img.size) > 2048:
+                    img.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+                buf = io.BytesIO()
+                has_alpha = img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info)
+                if has_alpha:
+                    img.save(buf, format="PNG", optimize=True)
+                    if buf.tell() <= 5 * 1024 * 1024:
+                        out_bytes, out_mime = buf.getvalue(), "image/png"
+                    else:
+                        buf = io.BytesIO()
+                        img.convert("RGB").save(buf, format="JPEG", quality=88, optimize=True)
+                        out_bytes, out_mime = buf.getvalue(), "image/jpeg"
+                else:
+                    img.convert("RGB").save(buf, format="JPEG", quality=88, optimize=True)
+                    out_bytes, out_mime = buf.getvalue(), "image/jpeg"
+    return {"type": "image_url", "image_url": {"url": f"data:{out_mime};base64,{base64.b64encode(out_bytes).decode('ascii')}"}}
+
+
+def build_content_parts_sync(text: str, files: Sequence[Any]) -> Optional[list[dict[str, Any]]]:
+    """Convert staged `(path, mime)` attachments into multimodal OpenAI/Anthropic `content_parts`."""
+    if not files:
+        return None
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
+    for item in files:
+        if not isinstance(item, (list, tuple)) or not item:
+            continue
+        raw_path = str(item[0] or "").strip()
+        raw_mime = str(item[1] or "").strip().lower() if len(item) > 1 else ""
+        if not raw_path or is_secret_path(raw_path):
+            continue
+        fpath = Path(raw_path)
+        ext = fpath.suffix.lower()
+        mime = raw_mime or (mimetypes.guess_type(str(fpath))[0] or "application/octet-stream").lower()
+        if not fpath.is_file():
+            parts.append({"type": "text", "text": f"[Attached file: {fpath.name} ({mime}) at {fpath}]"})
+            continue
+        if mime.startswith("image/") or ext in _IMG_EXTS:
+            if (img_part := _encode_image_part(fpath, mime)) is not None:
+                parts.append(img_part)
+                continue
+        if mime == "application/pdf" or ext == ".pdf":
+            preview = ""
+            with contextlib.suppress(Exception):
+                from pypdf import PdfReader
+                reader = PdfReader(str(fpath))
+                preview = "\n\n".join(t.strip() for pg in reader.pages[:8] if (t := (pg.extract_text() or "")).strip())[:4000]
+            note = f"[Attached PDF: {fpath.name} ({mime}) at {fpath}]"
+            parts.append({"type": "text", "text": f"{note}\n{preview}\n(Use read_file on {fpath} if needed.)" if preview else f"{note} — use read_file on {fpath} to inspect."})
+            continue
+        if mime.startswith("text/") or mime in _TEXT_MIMES or ext in _TEXT_EXTS:
+            with fpath.open("rb") as fh:
+                chunk = fh.read(16_384)
+            tail = f"\n… (truncated; use read_file on {fpath} for full contents)" if len(chunk) > 4000 else ""
+            parts.append({"type": "text", "text": f"[Attached file: {fpath.name} ({mime}) at {fpath}]\n{chunk.decode('utf-8', errors='replace')[:4000]}{tail}"})
+            continue
+        parts.append({"type": "text", "text": f"[Attached file: {fpath.name} ({mime}) at {fpath} — use read_file or appropriate tool to inspect.]"})
+    return parts or None
 
 
 def estimate_text_tokens(text: str) -> int:

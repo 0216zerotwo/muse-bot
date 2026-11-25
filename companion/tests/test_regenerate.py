@@ -1,52 +1,81 @@
-"""重新生成: the last answer leaves the chat and the question is asked again (Hermes's /retry), under
-the same turn; anything else is refused with the chat untouched."""
+"""重新生成: the last answer leaves the chat and the question is asked again under the same turn;
+anything else is refused with the chat untouched."""
 
 import asyncio
-import tempfile
 import unittest
-from pathlib import Path
 
-from _loader import chat_store, temp_dir
-from test_stream import _adapter_module
+from _loader import temp_dir
+from muse.app import NativeCompanionAdapter
+from muse.db import MuseDB, close_all
+from muse.engine import ChatTurnEngine
+from muse.llm.types import StreamDone, TextDelta
+from muse.runtime import close_all_shared_dbs
 
 
 class RegenerateTest(unittest.TestCase):
     def setUp(self):
-        module = _adapter_module()
-        adapter = object.__new__(module.CompanionAdapter)
-        adapter._turns = {}
-        adapter.store = chat_store(temp_dir("companion-regen-"))
-        self.started = []
+        self.home = temp_dir("companion-regen-")
+        self.db = MuseDB(self.home / "muse.db")
+        self.adapter = NativeCompanionAdapter(home=self.home, start_background_services=False)
+        self.asked: list[str] = []
 
-        async def start(chat_id, text, turn_id, files=None):
-            self.started.append((chat_id, text, turn_id))
+        async def fake_stream(*, messages, **_):
+            user_msgs = [m for m in messages if m.get("role") == "user"]
+            self.asked.append(str(user_msgs[-1].get("content") or "") if user_msgs else "")
+            yield TextDelta("重新生成的回答")
+            yield StreamDone()
 
-        adapter._start_turn = start
-        self.adapter, self.chat = adapter, adapter.store.create()
+        self.engine = ChatTurnEngine(self.adapter, db=self.db, stream_llm=fake_stream)
+        self.adapter._engine = self.engine
+        self.chat = self.adapter.store.create()
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.db.close()
+        close_all_shared_dbs()
+        close_all()
 
     def add(self, event, turn, text="", **extra):
-        self.adapter.store.append(self.chat, {"event": event, "chat_id": self.chat, "turn_id": turn, "text": text,
-                                              **({"starts_turn": True} if event == "user_message" else {}), **extra})
+        self.adapter.store.append(
+            self.chat,
+            {
+                "event": event,
+                "chat_id": self.chat,
+                "turn_id": turn,
+                "text": text,
+                **({"starts_turn": True} if event == "user_message" else {}),
+                **extra,
+            },
+        )
+        sid = self.db.get_or_create_active_session(self.chat, source="companion")["id"]
+        if event == "user_message":
+            self.db.append_message(sid, self.chat, "user", text, turn_id=turn)
+        elif event == "message" and extra.get("kind") != "tool_hint":
+            self.db.append_message(sid, self.chat, "assistant", text, turn_id=turn)
 
-    def regenerate(self, turn):
+    def regenerate(self, turn, *, wait_done: bool = True):
         async def go():
             await self.adapter.regenerate(self.chat, turn)
-            await asyncio.sleep(0)  # the turn starts in the background
+            if wait_done:
+                await self.engine.get_actor(self.chat).wait_idle(timeout=2.0)
+
         asyncio.run(go())
 
     def test_the_last_answer_goes_and_the_question_is_asked_again(self):
         self.add("user_message", "t1", "早")
-        self.add("message", "t1", "早上好")
+        self.add("message", "t1", "早上好", turn_phase="answer")
         self.add("turn_end", "t1")
         self.add("user_message", "t2", "周六去哪玩")
-        self.add("message", "t2", kind="tool_hint")
-        self.add("message", "t2", "去西湖骑车吧")
+        self.add("message", "t2", kind="tool_hint", turn_phase="activity")
+        self.add("message", "t2", "去西湖骑车吧", turn_phase="answer")
         self.add("turn_end", "t2")
+
         self.regenerate("t2")
-        kept = [(e["event"], e["turn_id"]) for e in self.adapter.store.events(self.chat)]
-        self.assertEqual(kept, [("user_message", "t1"), ("message", "t1"), ("turn_end", "t1"), ("user_message", "t2")])
-        self.assertEqual(self.started, [(self.chat, "/retry", "t2")])
-        self.assertEqual(self.adapter._turns[self.chat], "t2")
+        events = self.adapter.store.events(self.chat)
+        t2_answers = [e["text"] for e in events if e.get("turn_id") == "t2" and e.get("event") == "message"]
+        self.assertEqual(t2_answers, ["重新生成的回答"])
+        self.assertEqual([e["turn_id"] for e in events if e.get("event") == "user_message"], ["t1", "t2"])
+        self.assertTrue(any("周六去哪玩" in q for q in self.asked))
 
     def test_only_the_last_plain_question_while_idle(self):
         self.add("user_message", "t1", "早")
@@ -58,14 +87,20 @@ class RegenerateTest(unittest.TestCase):
                 self.regenerate(turn)
             self.assertEqual(str(caught.exception), message)
         self.add("user_message", "t3", "再来")
-        self.add("message", "t4", "（一个确认卡片的结果）")  # another turn after it: /retry would ask that instead
+        self.add("message", "t4", "（一个确认卡片的结果）")
         with self.assertRaises(ValueError):
             self.regenerate("t3")
-        self.adapter._turns[self.chat] = "t9"
-        with self.assertRaises(ValueError):
-            self.regenerate("t3")
-        self.assertEqual(len(self.adapter.store.events(self.chat)), 6)  # untouched
-        self.assertEqual(self.started, [])
+        actor = self.engine.get_actor(self.chat)
+        actor.active_turn_id = "t9"
+        actor._phase = "llm"
+        try:
+            with self.assertRaises(ValueError):
+                self.regenerate("t3")
+        finally:
+            actor.active_turn_id = None
+            actor._phase = "idle"
+        self.assertEqual(len(self.adapter.store.events(self.chat)), 6)
+        self.assertEqual(self.asked, [])
 
 
 if __name__ == "__main__":

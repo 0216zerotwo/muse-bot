@@ -142,7 +142,10 @@ class ChatStore:
             index = self._read_index()
             if chat_id not in index:
                 now = _now_iso()
-                index[chat_id] = {"created_at": now, "updated_at": now, "title": "", "preview": ""}
+                entry: dict[str, Any] = {"created_at": now, "updated_at": now, "title": "", "preview": ""}
+                if chat_id.startswith("cron:"):
+                    entry["cron"] = True
+                index[chat_id] = entry
                 self._write_index(index)
 
     def list(self) -> list[dict[str, Any]]:
@@ -158,7 +161,7 @@ class ChatStore:
                 **({"group": True} if meta.get("group") else {}),
             }
             for chat_id, meta in self._read_index().items()
-            if not meta.get("desk")  # the companion's browser desk: never one of the user's chats
+            if not meta.get("desk") and not meta.get("cron") and not chat_id.startswith("cron:")
         ]
         rows.sort(key=lambda row: row["updated_at"] or "", reverse=True)
         return rows
@@ -166,6 +169,8 @@ class ChatStore:
     def _touch(self, chat_id: str, preview: str | None, *, bump_rev: bool = True) -> None:
         index = self._read_index()
         meta = index.setdefault(chat_id, {"created_at": _now_iso(), "title": ""})
+        if chat_id.startswith("cron:"):
+            meta["cron"] = True
         meta["updated_at"] = _now_iso()
         if bump_rev:
             meta["rev"] = int(meta.get("rev") or 0) + 1

@@ -11,9 +11,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-from .config_store import get_env_value
+from .config_store import _ENV_VAR_NAME_DENYLIST, _ENV_VAR_NAME_DENY_PREFIXES, _env_var_policy_name, get_env_value, read_env_values
+from .context import _kill_process_tree
 from .paths import bind_muse_home, get_muse_home, get_repo_root, reset_muse_home
 from .runtime import NativeAgentEngine, install_runtime_privacy
+from .streaming import ChatSink, new_history_id
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +25,27 @@ STOP_COMMAND = "/stop"
 GOAL_CONTROLS = frozenset({"/goal stop", "/goal clear", "/goal pause", "/goal resume"})
 
 
+def load_home_dotenv(home: Optional[Path | str] = None) -> dict[str, str]:
+    """Load `<MUSE_HOME>/.env` into `os.environ` (`override=False`, honoring security denylist)."""
+    loaded: dict[str, str] = {}
+    with contextlib.suppress(Exception):
+        for key, val in read_env_values(home=home).items():
+            if not key or val is None or key in os.environ:
+                continue
+            pol = _env_var_policy_name(key)
+            if pol in _ENV_VAR_NAME_DENYLIST or pol.startswith(_ENV_VAR_NAME_DENY_PREFIXES):
+                continue
+            os.environ[key] = str(val)
+            loaded[key] = str(val)
+    return loaded
+
+
 def _read_setting(name: str, default: str = "") -> str:
     val = get_env_value(name) or os.environ.get(name, "")
     return str(val).strip() if val else default
 
 
-class NativeCompanionAdapter:
+class NativeCompanionAdapter(ChatSink):
     """Hermes-free native host fulfilling `companion/server.py`, tools, and `ChatSink` contracts."""
 
     def __init__(
@@ -50,6 +67,7 @@ class NativeCompanionAdapter:
         self.host = host
         self.port = int(port)
         self.home = Path(home).expanduser() if home is not None else get_muse_home()
+        load_home_dotenv(self.home)
         self.webui_dir = self.home / "companion"
         self.webui_dir.mkdir(parents=True, exist_ok=True)
         default_dist = get_repo_root() / "web" / "dist"
@@ -215,7 +233,7 @@ class NativeCompanionAdapter:
                 else "文件没能发出来"
             )
             text = f"{caption}\n\n{fallback}" if caption else fallback
-            body: dict[str, Any] = {"event": "message", "text": text}
+            body: dict[str, Any] = {"event": "message", "text": text, "projection_id": new_history_id()}
             active_tid = turn_id or self._turns.get(chat_id)
             if active_tid:
                 body.update(turn_id=active_tid, turn_phase="answer")
@@ -230,7 +248,7 @@ class NativeCompanionAdapter:
                 )
                 await asyncio.to_thread(creations.collect_sent_file, Path(source), title=title)
 
-        body = {"event": "message", "text": caption or "", "media_urls": [item]}
+        body = {"event": "message", "text": caption or "", "media_urls": [item], "projection_id": new_history_id()}
         active_tid = turn_id or self._turns.get(chat_id)
         if active_tid:
             body.update(turn_id=active_tid, turn_phase="answer")
@@ -258,19 +276,23 @@ class NativeCompanionAdapter:
             persist=persist,
         )
 
-    async def post_tool_hint(
-        self,
-        chat_id: str,
-        *,
-        tool_name: str,
-        phase: str,
-        label: str = "",
-        turn_id: Optional[str] = None,
-    ) -> None:
-        ev: dict[str, Any] = {"event": "tool_hint", "tool": tool_name, "phase": phase, "label": label or tool_name}
-        if turn_id:
-            ev["turn_id"] = turn_id
-        await self._emit(chat_id, ev, persist=False)
+    async def emit_activity(self, chat_id: str, tool_event: dict[str, Any]) -> None:
+        """Emit & persist canonical Web/iOS `tool_hint` activity events while `turn_id` is active."""
+        turn_id = self._turns.get(chat_id)
+        if turn_id is None:
+            return
+        await self._emit(
+            chat_id,
+            {
+                "event": "message",
+                "text": "",
+                "kind": "tool_hint",
+                "turn_phase": "activity",
+                "turn_id": turn_id,
+                "tool_events": [dict(tool_event)],
+            },
+            persist=True,
+        )
 
     async def push_goal_state(self, chat_id: str, socket: Any = None) -> None:
         """Push the goal banner state to one socket (on `attach`) or everyone in `chat_id`."""
@@ -443,6 +465,71 @@ class NativeCompanionAdapter:
     async def regenerate(self, chat_id: str, turn_id: str) -> None:
         await self._engine.regenerate(chat_id, turn_id)
 
+    async def delete_turn(self, chat_id: str, turn_id: str, role: Optional[str] = None) -> int:
+        fn = getattr(self._engine, "delete_turn", None)
+        return int(await fn(chat_id, turn_id, role=role)) if callable(fn) else 0
+
+    async def delete_chat(self, chat_id: str) -> None:
+        fn = getattr(self._engine, "delete_chat", None)
+        if callable(fn):
+            await fn(chat_id)
+
+    def _name_chat(self, chat_id: str) -> None:
+        """Generate a 2–6 character Chinese topic title for an untitled side chat (`旁聊`)."""
+        from companion.modules import models
+        from .llm.auxiliary import call_llm
+
+        said = self._recent(chat_id, 2)
+        if not said or self.store.title(chat_id):
+            return
+        first = said[0]["content"][:300]
+        title = ""
+        try:
+            data = models.read_models()
+            presets = data.get("presets") or {}
+            name = models.quick_model(data, list(presets)) if presets else None
+            target = (
+                {"provider": models.runtime_provider(name, presets[name]), "model": presets[name]["model"]}
+                if name and name in presets
+                else {}
+            )
+            resp = call_llm(
+                messages=[
+                    {"role": "system", "content": "给这段对话起一个 2~6 个字的中文标题（像「饮食记录」「股票专项」），只输出标题。"},
+                    {"role": "user", "content": "\n".join(f"{m['role']}：{m['content'][:300]}" for m in said)},
+                ],
+                max_tokens=20, temperature=0, timeout=10, reasoning_config={"enabled": False}, **target,
+            )
+            if resp.choices:
+                title = (resp.choices[0].message.content or "").strip().strip("「」\"'《》 ")
+        except Exception as exc:
+            logger.info("Companion: could not name a side chat (%s)", type(exc).__name__)
+        if not self.store.title(chat_id):
+            self.store.set_title(chat_id, title[:12] or first[:12])
+
+    async def on_turn_complete(self, chat_id: str, *, succeeded: bool = True) -> None:
+        """Post-turn lifecycle hooks: goal banner sync, memory tidy, side-chat auto-title, browser close."""
+        if not chat_id or chat_id.startswith("cron:"):
+            return
+        await self.push_goal_state(chat_id)
+        meta = self.store.meta(chat_id)
+        is_hidden = bool(meta.get("desk") or meta.get("cron"))
+        if not is_hidden:
+            with contextlib.suppress(Exception):
+                from companion.modules import memory_tidy
+                memory_tidy.maybe_tidy_soon()
+            if (
+                succeeded
+                and not self.is_main_chat(chat_id)
+                and not meta.get("helper")
+                and not meta.get("group")
+                and not self.store.title(chat_id)
+            ):
+                self._spawn_bg(asyncio.to_thread(self._name_chat, chat_id))
+        with contextlib.suppress(Exception):
+            from companion.modules import computer
+            await asyncio.to_thread(computer.close_after_task, chat_id)
+
     async def browser_done(self, answered: Optional[dict[str, Any]]) -> None:
         if answered and answered.get("chat_id"):
             reason = str(answered.get("reason") or "")
@@ -494,6 +581,16 @@ class NativeCompanionAdapter:
             self._spawn_bg(asyncio.to_thread(self._prune_uploads))
             self._spawn_bg(interrupted.announce(self, started_ms))
             self._spawn_bg(self._keep_signed_in_loop())
+            self._spawn_bg(self._time_models_loop())
+            self._spawn_bg(self._learn_memory_loop())
+            with contextlib.suppress(Exception):
+                if not self.devices.any_paired():
+                    code = self.devices.new_code()["code"]
+                    logger.warning(
+                        "Companion: no phone is connected yet. In the app, enter this server's address "
+                        "and the pairing code %s (valid 10 minutes; `musebot pair` makes a new one).",
+                        code,
+                    )
 
     def _spawn_bg(self, coro: Any) -> None:
         task = asyncio.create_task(coro)
@@ -508,6 +605,38 @@ class NativeCompanionAdapter:
                 await asyncio.to_thread(oauth_login.keep_signed_in)
             await asyncio.sleep(300)
 
+    async def _time_models_loop(self) -> None:
+        from companion.modules import models
+
+        await asyncio.sleep(20)
+        health = models.read_health()
+        presets = (models.read_models() or {}).get("presets") or {}
+        stale = [
+            name for name in presets
+            if time.time() * 1000 - (health.get(name) or {}).get("checked_at", 0) > 86_400_000
+            or not (health.get(name) or {}).get("latency_ms")
+        ]
+        if not stale:
+            return
+        with contextlib.suppress(Exception):
+            await models.check_models(stale)
+            models.apply_to_hermes()
+
+    async def _learn_memory_loop(self) -> None:
+        from companion.modules import helper_learn, job_snapshots, memory_fade, memory_learn
+
+        await asyncio.sleep(120)
+        while True:
+            for fn, args in (
+                (job_snapshots.snapshot, ()),
+                (memory_learn.learn, (self.store,)),
+                (memory_fade.fade, ()),
+                (helper_learn.learn, (self.store,)),
+            ):
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(fn, *args)
+            await asyncio.sleep(3600)
+
     async def shutdown(self) -> None:
         for task in list(self._bg_tasks):
             task.cancel()
@@ -516,6 +645,17 @@ class NativeCompanionAdapter:
                 await asyncio.gather(*self._bg_tasks, return_exceptions=True)
             self._bg_tasks.clear()
         await self._engine.stop()
+        with contextlib.suppress(Exception):
+            from companion.modules import computer
+
+            def _shutdown_browser() -> None:
+                computer.release()
+                computer.close_browser()
+                proc = getattr(computer, "_browser_proc", None)
+                if proc is not None and proc.poll() is None and getattr(proc, "pid", 0):
+                    _kill_process_tree(int(proc.pid))
+
+            await asyncio.to_thread(_shutdown_browser)
 
 
 class _LifespanWrapper:
@@ -590,4 +730,4 @@ def create_app(
     return _LifespanWrapper(inner, adapter, resolved_home)
 
 
-__all__ = ["DEFAULT_HOST", "DEFAULT_PORT", "NativeCompanionAdapter", "create_app"]
+__all__ = ["DEFAULT_HOST", "DEFAULT_PORT", "NativeCompanionAdapter", "create_app", "load_home_dotenv"]

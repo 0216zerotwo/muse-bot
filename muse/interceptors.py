@@ -401,7 +401,8 @@ class ActivityEmitter:
                 await self._emit_fn(chat_id, event)
 
     async def intercept(self, call: ToolInvocation, call_next: NextInterceptor) -> str:
-        target_chat = call.facing_chat_id
+        is_cron = call.actor_kind == "cron" or call.chat_id.startswith("cron:")
+        target_chat = "" if is_cron else call.facing_chat_id
         cid = call.call_id or f"call_{uuid.uuid4().hex[:8]}"
         args_payload = dict(call.arguments) if isinstance(call.arguments, dict) else {}
         base = {"version": 1, "call_id": cid, "name": call.tool_name, "arguments": args_payload, "files": [], "embeds": []}
@@ -565,7 +566,7 @@ class NativeApprovalCoordinator:
             extra={
                 "native_exec": True,
                 "native_session": sess_scope,
-                "choices": ["once", "session", "deny"],
+                "choices": ["once", "24h", "session", "deny"],
                 "expires_at_ms": int(time.time() * 1000) + int(max(1.0, wait_s) * 1000),
             },
         )
@@ -632,6 +633,34 @@ class NativeApprovalCoordinator:
 
 _HANDED_APPROVAL_SUFFIX = "（确认卡片已放到用户正在看的聊天里，用户同意后主助理会在那边接着做。先把做到哪一步写出来。）"
 _NO_CHAT_APPROVAL_MSG = "这个操作需要用户确认，但现在没法让用户确认，所以没有执行。"
+_DEFAULT_TOOLSET_BY_NAME: dict[str, str] = {
+    "read_file": "file", "write_file": "file", "patch": "file", "search_files": "file",
+    "terminal": "terminal", "process": "terminal",
+    "web_search": "web", "web_extract": "web",
+    "clarify": "clarify", "memory": "memory", "session_search": "session_search",
+    "skills_list": "skills", "skill_view": "skills", "skill_manage": "skills",
+    "browser_vault": "browser", "vision_analyze": "vision",
+    "image_generate": "image_gen", "video_generate": "video_gen", "text_to_speech": "tts",
+    "cronjob_manage": "cronjob", "tool_search": "tool_search",
+    "connect_request": "companion", "credential_request": "companion",
+    "browser_request": "companion", "browser_hand_over": "companion",
+}
+
+
+def _infer_toolset(tool_name: str, tool_registry: Any = None) -> str:
+    if tool_registry is not None and callable(getattr(tool_registry, "get", None)):
+        entry = tool_registry.get(tool_name)
+        if entry is not None and getattr(entry, "toolset", ""):
+            return str(entry.toolset)
+    if tool_name in _DEFAULT_TOOLSET_BY_NAME:
+        return _DEFAULT_TOOLSET_BY_NAME[tool_name]
+    if tool_name.startswith(("mcp__", "mcp_")):
+        return "mcp"
+    if tool_name.startswith(("goal_", "trigger_", "feed_", "helper_", "avatar_")):
+        return "companion"
+    if tool_name.startswith("browser_"):
+        return "browser"
+    return "core"
 
 
 class TaintAndPermissionsInterceptor:
@@ -639,13 +668,14 @@ class TaintAndPermissionsInterceptor:
 
     def __init__(
         self, coordinator: Optional[NativeApprovalCoordinator] = None, *, egress_mod: Any = None,
-        permissions_mod: Any = None, computer_mod: Any = None,
+        permissions_mod: Any = None, computer_mod: Any = None, tool_registry: Any = None,
         home_chat_fn: Optional[Callable[[], Optional[str]]] = None, exec_timeout_s: Optional[float] = None,
     ) -> None:
         self.coordinator = coordinator
         self._egress_mod = egress_mod
         self._permissions_mod = permissions_mod
         self._computer_mod = computer_mod
+        self.tool_registry = tool_registry
         self._home_chat_fn = home_chat_fn
         self._exec_timeout_s = exec_timeout_s
 
@@ -656,6 +686,15 @@ class TaintAndPermissionsInterceptor:
             cid = _comp_mod(None, "companion_state").read_companion_state().get("chat_id")
             return str(cid) if cid else None
         return None
+
+    def _effective_facing_chat(self, call: ToolInvocation) -> str:
+        raw_facing = call.facing_chat_id
+        if raw_facing.startswith("cron:"):
+            raw_facing = ""
+        home = self._resolve_home_chat() or ""
+        if home.startswith("cron:"):
+            home = ""
+        return raw_facing or home
 
     async def _forward_and_note_taint(self, eg: Any, call: ToolInvocation, call_next: NextInterceptor) -> str:
         result = await call_next(call)
@@ -674,6 +713,25 @@ class TaintAndPermissionsInterceptor:
         if call.skip_policy_gates:
             return await self._forward_and_note_taint(eg, call, call_next)
 
+        raw_allowed = getattr(call.ctx, "enabled_toolsets", None)
+        if raw_allowed:
+            allowed = {str(x).strip() for x in raw_allowed if str(x).strip()}
+            if allowed and call.tool_name != "tool_search":
+                reg = self.tool_registry
+                if reg is None and self.coordinator is not None:
+                    reg = getattr(getattr(self.coordinator.adapter, "_engine", None), "_tool_registry", None)
+                tset = _infer_toolset(call.tool_name, reg)
+                mcp_srv = call.tool_name.split("__", 2)[1] if call.tool_name.startswith("mcp__") and call.tool_name.count("__") >= 2 else ""
+                if (
+                    call.tool_name not in allowed
+                    and tset not in allowed
+                    and not (mcp_srv and f"mcp:{mcp_srv}" in allowed)
+                ):
+                    return self._block(
+                        call,
+                        f"Tool '{call.tool_name}' (toolset '{tset}') is not permitted when enabled_toolsets={sorted(allowed)}.",
+                    )
+
         from companion.approvals import approval_action
 
         perms = _comp_mod(self._permissions_mod, "permissions")
@@ -690,6 +748,7 @@ class TaintAndPermissionsInterceptor:
         if egress_level == perms.DENY:
             return self._block(call, perms.denied_message("send_private"))
 
+        is_cron = call.actor_kind == "cron" or call.chat_id.startswith("cron:")
         if base_kind == "run_command" and isinstance(call.arguments, dict):
             cmd = str(call.arguments.get("command") or call.arguments.get("code") or "")
             risk_reason = classify_risky_command(cmd)
@@ -699,9 +758,15 @@ class TaintAndPermissionsInterceptor:
                     return self._block(call, _NO_CHAT_APPROVAL_MSG)
                 sess_scope = call.session_id or call.chat_id or call.facing_chat_id
                 if not (coord.approvals.granted("run_command", {"reason": risk_reason}) or coord.has_session_grant(sess_scope, f"run_command:{risk_reason}")):
-                    facing = call.facing_chat_id or self._resolve_home_chat() or ""
+                    facing = self._effective_facing_chat(call)
                     if not facing:
                         return self._block(call, _NO_CHAT_APPROVAL_MSG)
+                    if is_cron:
+                        msg = coord.approvals.defer(
+                            facing, call.call_id, call.tool_name, {"command": cmd, "reason": risk_reason},
+                            "run_command", None, kind="run_command",
+                        )
+                        return self._block(call, msg)
                     ok, block_msg, _ = await coord.hold_and_await_exec(
                         call, command=cmd, reason=risk_reason, facing_chat=facing, timeout_s=self._exec_timeout_s
                     )
@@ -727,8 +792,8 @@ class TaintAndPermissionsInterceptor:
             if base_covered and egress_covered and action != "goal_plan":
                 return await self._forward_and_note_taint(eg, call, call_next)
 
-        session_chat = call.chat_id or self._resolve_home_chat()
-        facing_chat = call.facing_chat_id or session_chat
+        session_chat = "" if is_cron else (call.chat_id or self._resolve_home_chat() or "")
+        facing_chat = self._effective_facing_chat(call)
         if not facing_chat or self.coordinator is None:
             return self._block(call, _NO_CHAT_APPROVAL_MSG)
         message = self.coordinator.approvals.defer(
@@ -790,6 +855,7 @@ class ToolInterceptorPipeline:
     def __init__(
         self, executor: ToolExecutorFn, *, interceptors: Optional[list[ToolInterceptor]] = None,
         bounder: Optional[ToolResultBounder] = None, coordinator: Optional[NativeApprovalCoordinator] = None,
+        tool_registry: Any = None,
     ) -> None:
         self._executor = executor
         self.bounder = bounder or ToolResultBounder()
@@ -799,11 +865,16 @@ class ToolInterceptorPipeline:
             ActivityEmitter(emit_fn),
             SecretsGuardInterceptor(),
             BrowserOwnershipInterceptor(has_pending_browser_fn=pending_fn),
-            TaintAndPermissionsInterceptor(coordinator),
+            TaintAndPermissionsInterceptor(coordinator, tool_registry=tool_registry),
             PostToolArtifactInterceptor(),
         ]
         if coordinator is not None:
             coordinator.bind_runner(self.execute_invocation)
+
+    async def close_browser_after_task(self, chat_id: str) -> None:
+        for stage in self.interceptors:
+            if isinstance(stage, BrowserOwnershipInterceptor):
+                await stage.close_after_task(chat_id)
 
     async def _invoke_leaf(self, call: ToolInvocation) -> str:
         raw = self._executor(call.tool_name, call.arguments, call)

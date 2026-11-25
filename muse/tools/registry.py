@@ -346,6 +346,7 @@ class ToolRegistry:
                     },
                 ))
 
+        allow = set(enabled_toolsets) if enabled_toolsets is not None else None
         seen = {item[1] for item in candidates}
         for raw_tool in extra_mcp_tools:
             fn = raw_tool.get("function") if isinstance(raw_tool, Mapping) else None
@@ -356,6 +357,9 @@ class ToolRegistry:
                 continue
             tdesc = str(fn.get("description") or "")
             tset = str(raw_tool.get("toolset") or "mcp")
+            mcp_srv = tname.split("__", 2)[1] if tname.startswith("mcp__") and tname.count("__") >= 2 else ""
+            if allow is not None and tset not in allow and "mcp" not in allow and tname not in allow and not (mcp_srv and f"mcp:{mcp_srv}" in allow):
+                continue
             sc = _score_tool_match(
                 tokens,
                 clean_q,
@@ -397,15 +401,22 @@ class ToolRegistry:
             if max_direct_tools is None
             else max(8, int(max_direct_tools))
         )
+        allow = set(enabled_toolsets) if enabled_toolsets is not None else None
         entries = self.list_entries(enabled_toolsets=enabled_toolsets)
         entry_names = {e.name for e in entries}
-        mcp_defs = [
-            dict(t)
-            for t in extra_mcp_tools
-            if isinstance(t, Mapping)
-            and isinstance(t.get("function"), Mapping)
-            and str(t["function"].get("name") or "") not in entry_names
-        ]
+        mcp_defs: list[dict[str, Any]] = []
+        for t in extra_mcp_tools:
+            if not isinstance(t, Mapping) or not isinstance(t.get("function"), Mapping):
+                continue
+            mname = str(t["function"].get("name") or "")
+            if not mname or mname in entry_names:
+                continue
+            if allow is not None:
+                tset = str(t.get("toolset") or "mcp")
+                mcp_srv = mname.split("__", 2)[1] if mname.startswith("mcp__") and mname.count("__") >= 2 else ""
+                if tset not in allow and "mcp" not in allow and mname not in allow and not (mcp_srv and f"mcp:{mcp_srv}" in allow):
+                    continue
+            mcp_defs.append(dict(t))
 
         total = len(entries) + len(mcp_defs)
         if total <= limit:
@@ -477,12 +488,17 @@ class ToolRegistry:
             args_dict = {}
 
         resolved_sid = session_id or str(getattr(ctx, "session_id", "") or "")
+        eff_toolsets = (
+            enabled_toolsets
+            if enabled_toolsets is not None
+            else (getattr(ctx, "enabled_toolsets", None) or None)
+        )
         entry = self.get(name)
         if entry is None and name == "tool_search":
             matches = self.search(
                 str(args_dict.get("query") or ""),
                 limit=int(args_dict.get("limit") or 10),
-                enabled_toolsets=enabled_toolsets,
+                enabled_toolsets=eff_toolsets,
                 extra_mcp_tools=extra_mcp_tools,
                 activate_for_session=resolved_sid,
             )
@@ -506,6 +522,8 @@ class ToolRegistry:
             "task_id": resolved_sid,
             "ctx": ctx,
             "registry": self,
+            "enabled_toolsets": eff_toolsets,
+            "extra_mcp_tools": extra_mcp_tools,
             **extra_kwargs,
         }
         if entry.is_async:

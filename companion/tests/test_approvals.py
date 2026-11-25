@@ -81,12 +81,14 @@ class McpNamingAndPermissionsGateTest(unittest.TestCase):
 
 class ActivityEgressPrecedenceAndApprovalContractTest(unittest.TestCase):
     def setUp(self):
-        ensure_hermes_stubs()
+        from muse.app import NativeCompanionAdapter
+        from muse.runtime import close_all_shared_dbs
+
+        self.addCleanup(close_all_shared_dbs)
         pkg = _companion_pkg()
         self.pkg = pkg
         self.activity = importlib.import_module(f"{pkg}.activity")
         self.approvals_mod = importlib.import_module(f"{pkg}.approvals")
-        self.adapter_mod = importlib.import_module(f"{pkg}.adapter")
         self.folder = temp_dir("companion-apv-")
         self.ws_frames = []
 
@@ -97,12 +99,12 @@ class ActivityEgressPrecedenceAndApprovalContractTest(unittest.TestCase):
             async def send_json(self, frame):
                 self.sink.append(frame)
 
-        adapter = object.__new__(self.adapter_mod.CompanionAdapter)
+        adapter = NativeCompanionAdapter(home=self.folder, start_background_services=False)
         adapter.store = chat_store(self.folder)
-        adapter._turns = {}
-        adapter._subs = {}
-        adapter._helper_origins = {"helper-1": "main", "desk-1": "helper-1"}
-        adapter._helper_waits = {"helper-1": ("t1", None), "desk-1": ("t2", None)}
+        adapter.approvals = self.approvals_mod.Approvals(adapter, self.folder)
+        orch = adapter.engine.helper_orchestrator
+        orch._helper_origins = {"helper-1": "main", "desk-1": "helper-1"}
+        orch._active_waits = {"helper-1", "desk-1"}
         adapter.socket_devices = {FakeSocket(self.ws_frames): "dev-1"}
         adapter.loop = None
         adapter.companion_name = lambda: "伙伴"
@@ -113,7 +115,6 @@ class ActivityEgressPrecedenceAndApprovalContractTest(unittest.TestCase):
             return "t-internal"
 
         adapter.submit_internal = submit_internal
-        adapter.approvals = self.approvals_mod.Approvals(adapter, self.folder)
         self.adapter = adapter
         self.submitted = submitted
 
@@ -151,22 +152,32 @@ class ActivityEgressPrecedenceAndApprovalContractTest(unittest.TestCase):
             self.assertEqual(records[0].public()["context"]["egress"]["host"], "form.example")
 
     def test_exec_approval_routes_via_facing_chat_normalizes_fields_and_emits_ws_updates(self):
-        from muse.interceptors import ExecApprovalPrompt, NativeApprovalCoordinator
+        from muse.context import TurnExecutionContext
+        from muse.interceptors import NativeApprovalCoordinator, ToolInvocation
 
         async def scenario():
             self.adapter.loop = asyncio.get_running_loop()
-            # Desk -> Helper -> Main: exec prompt in desk-1 must land in "main", not hidden desk-1!
-            prompt = ExecApprovalPrompt(
-                chat_id="desk-1",
-                session_key="native-sess-9",
-                text="Allow command?",
-                actions=[("允许", "once", "primary"), ("本轮允许", "session", ""), ("拒绝", "deny", "danger")],
-                command="rm -rf ./tmp_build",
-                description="destructive delete",
-                smart_denied=False,
+            self.adapter.set_active_turn("main", "t-main")
+            coord_exec = NativeApprovalCoordinator(
+                exec_runner=lambda _call: '{"ok": true}',
+                approvals=self.adapter.approvals,
+                adapter=self.adapter,
             )
-            sent = await self.adapter._send_exec_approval_prompt(prompt)
-            self.assertTrue(sent.success)
+            self.adapter.approvals.bind_native_coordinator(coord_exec)
+            # Desk -> Helper -> Main: exec prompt in desk-1 must land in "main", not hidden desk-1!
+            facing = self.adapter.facing_chat("desk-1")
+            self.assertEqual(facing, "main")
+            inv = ToolInvocation(
+                call_id="exec_1",
+                tool_name="terminal",
+                arguments={"command": "rm -rf ./tmp_build"},
+                ctx=TurnExecutionContext(chat_id="desk-1", facing_chat_id=facing, session_id="native-sess-9"),
+            )
+            hold_task = asyncio.create_task(
+                coord_exec.hold_and_await_exec(
+                    inv, command="rm -rf ./tmp_build", reason="destructive delete", facing_chat=facing, timeout_s=5.0
+                )
+            )
             await asyncio.sleep(0.05)
 
             main_records = self.adapter.approvals.store.list_for_session("websocket:main")
@@ -174,6 +185,9 @@ class ActivityEgressPrecedenceAndApprovalContractTest(unittest.TestCase):
             pub = main_records[0].public()
             self.assertIsInstance(pub["expires_at_ms"], int)
             self.assertGreater(pub["expires_at_ms"], pub["created_at_ms"])
+            await self.adapter.approvals.decide(main_records[0].id, True, "once")
+            ok_exec, _, _ = await hold_task
+            self.assertTrue(ok_exec)
 
             # Mail & delete_emails normalization on public() without mutating raw stored arguments.
             mail_rec = self.adapter.approvals.store.create(

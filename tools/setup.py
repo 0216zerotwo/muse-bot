@@ -81,7 +81,7 @@ def ensure_default_config(home: Path) -> bool:
     cfg_path = home / "config.yaml"
     if cfg_path.exists():
         return False
-    cfg_path.write_text(DEFAULT_CONFIG_YAML, encoding="utf-8", newline="\n")
+    cfg_path.write_bytes(DEFAULT_CONFIG_YAML.replace("\r\n", "\n").encode("utf-8"))
     return True
 
 

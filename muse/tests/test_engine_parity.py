@@ -52,23 +52,6 @@ class _RecordingSocket:
         self.frames.append(dict(payload))
 
 
-def _load_hermes_companion_adapter_cls() -> Any:
-    import _loader
-
-    _loader.ensure_hermes_stubs()
-    mod_name = "companion_parity_hermes_adapter"
-    if mod_name not in sys.modules:
-        spec = importlib.util.spec_from_file_location(
-            mod_name,
-            REPO_ROOT / "companion" / "__init__.py",
-            submodule_search_locations=[str(REPO_ROOT / "companion")],
-        )
-        assert spec is not None
-        sys.modules[mod_name] = importlib.util.module_from_spec(spec)
-    mod = importlib.import_module(f"{mod_name}.adapter")
-    return mod.CompanionAdapter
-
-
 class DualEngineParityTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="muse-parity-")
@@ -107,54 +90,9 @@ class DualEngineParityTest(unittest.TestCase):
     # ── 1. Text streaming & pre-tool persistence parity (Hermes vs Native) ───
 
     def test_text_streaming_and_pre_tool_text_persistence_parity(self) -> None:
-        """Compare golden WS frames & ChatStore `.jsonl` between `hermes` relay and `native` runtime."""
+        """Verify golden WS frames, ChatStore `.jsonl`, and canonical `tool_hint` activity on `native` runtime."""
 
-        async def run_hermes_branch(branch_home: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-            CompanionAdapter = _load_hermes_companion_adapter_cls()
-            adapter = object.__new__(CompanionAdapter)
-            adapter.platform = "companion"
-            adapter.store = ChatStore(branch_home / "companion")
-            adapter._subs = {}
-            adapter._turns = {}
-            adapter._chain_root = {}
-            adapter._inband_active = set()
-            adapter._pending_turns = {}
-            adapter._turn_output = set()
-            adapter._drafts = {}
-            adapter._last_reply = {}
-            adapter._turn_idle = {}
-            adapter._internal_locks = {}
-            adapter._helper_waits = {}
-            adapter._cards = lambda text: text
-            adapter.companion_name = lambda: "伙伴"
-            adapter.push_goal_state = lambda chat_id, socket=None: asyncio.sleep(0)
-
-            chat_id = adapter.store.create()
-            sock = _RecordingSocket()
-            adapter.attach(chat_id, sock)
-
-            captured_events: list[Any] = []
-
-            async def fake_handle_message(ev: Any) -> None:
-                captured_events.append(ev)
-
-            adapter.handle_message = fake_handle_message
-            with (
-                mock.patch("companion_parity_hermes_adapter.adapter.router.prefetch", lambda *a, **k: None),
-                mock.patch("companion_parity_hermes_adapter.adapter.memory_tidy.maybe_tidy_soon", lambda: None),
-                mock.patch("companion_parity_hermes_adapter.adapter.computer.close_after_task", lambda _cid: None),
-            ):
-                await adapter.submit(chat_id, "查一下天气", "turn-1")
-                ev = captured_events[-1]
-                await adapter.on_processing_start(ev)
-                await adapter.send_draft(chat_id, 1, "我查一下。")
-                await adapter.send(chat_id, "我查一下。")
-                await adapter.send_draft(chat_id, 2, "今天晴，24°C。")
-                await adapter.send(chat_id, "今天晴，24°C。")
-                await adapter.on_processing_complete(ev, "success")
-            return sock.frames, adapter.store.events(chat_id)
-
-        async def run_native_branch(branch_home: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        async def scenario() -> None:
             calls = 0
 
             async def fake_stream(**_: Any):
@@ -169,50 +107,46 @@ class DualEngineParityTest(unittest.TestCase):
                     yield TextDelta("24°C。")
                     yield StreamDone(finish_reason="stop", usage=UsageInfo(input_tokens=40, output_tokens=12))
 
-            async def fake_tool(tc: dict[str, Any], _ctx: Any) -> str:
-                fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-                tname = str(fn.get("name") or tc.get("name") or "")
-                await adapter.post_tool_hint(chat_id, tool_name=tname, phase="start", turn_id="turn-1")
-                await adapter.post_tool_hint(chat_id, tool_name=tname, phase="end", turn_id="turn-1")
-                return json.dumps({"weather": "晴", "temp_c": 24}, ensure_ascii=False)
-
+            branch_home = self.home / "native-branch"
             with muse_home_override(branch_home):
-                adapter, chat_id, sock = self._make_native_host(
-                    home=branch_home, stream_llm=fake_stream, execute_tool=fake_tool
+                adapter, chat_id, sock = self._make_native_host(home=branch_home, stream_llm=fake_stream)
+                adapter.engine.tool_registry.register(
+                    "lookup_weather",
+                    toolset="companion",
+                    description="Lookup weather",
+                    handler=lambda args: json.dumps({"weather": "晴", "temp_c": 24, "city": args.get("city")}, ensure_ascii=False),
                 )
                 await adapter.startup()
                 try:
                     await adapter.submit(chat_id, "查一下天气", "turn-1")
                     await adapter.engine.get_actor(chat_id).wait_idle(timeout=3.0)
-                    return sock.frames, adapter.store.events(chat_id)
+                    frames, stored = sock.frames, adapter.store.events(chat_id)
                 finally:
                     await adapter.shutdown()
 
-        async def scenario() -> None:
-            h_frames, h_store = await run_hermes_branch(self.home / "hermes-branch")
-            n_frames, n_store = await run_native_branch(self.home / "native-branch")
+            self.assertTrue(any(f["event"] == "user_message" and f.get("turn_id") == "turn-1" for f in frames))
+            self.assertTrue(any(f["event"] == "delta" and f.get("turn_id") == "turn-1" for f in frames))
+            self.assertTrue(any(f["event"] == "stream_end" and f.get("turn_id") == "turn-1" for f in frames))
+            turn_ends = [f for f in frames if f["event"] == "turn_end" and f.get("turn_id") == "turn-1"]
+            self.assertEqual(len(turn_ends), 1)
+            self.assertEqual(turn_ends[0]["turn_phase"], "complete")
 
-            for label, frames, stored in (("hermes", h_frames, h_store), ("native", n_frames, n_store)):
-                with self.subTest(engine=label):
-                    # Both emit user_message -> delta -> stream_end -> turn_end(turn-1)
-                    self.assertTrue(any(f["event"] == "user_message" and f.get("turn_id") == "turn-1" for f in frames))
-                    self.assertTrue(any(f["event"] == "delta" and f.get("turn_id") == "turn-1" for f in frames))
-                    self.assertTrue(any(f["event"] == "stream_end" and f.get("turn_id") == "turn-1" for f in frames))
-                    turn_ends = [f for f in frames if f["event"] == "turn_end" and f.get("turn_id") == "turn-1"]
-                    self.assertEqual(len(turn_ends), 1)
-                    self.assertEqual(turn_ends[0]["turn_phase"], "complete")
+            # Pre-tool segment is persisted for replay, NEVER duplicated as live WS `message`!
+            ws_pre_msgs = [f for f in frames if f["event"] == "message" and f.get("text") == "我查一下。"]
+            self.assertEqual(ws_pre_msgs, [])
+            stored_texts = [e.get("text") for e in stored if e.get("event") == "message"]
+            self.assertIn("我查一下。", stored_texts)
+            self.assertIn("今天晴，24°C。", stored_texts)
 
-                    # Pre-tool segment is persisted for replay, NEVER duplicated as live WS `message`!
-                    ws_pre_msgs = [f for f in frames if f["event"] == "message" and f.get("text") == "我查一下。"]
-                    self.assertEqual(ws_pre_msgs, [])
-                    stored_texts = [e.get("text") for e in stored if e.get("event") == "message"]
-                    self.assertIn("我查一下。", stored_texts)
-                    self.assertIn("今天晴，24°C。", stored_texts)
-
-            # Native also emits tool_hint start/end cleanly without polluting ChatStore
-            hints = [f for f in n_frames if f["event"] == "tool_hint" and f.get("tool") == "lookup_weather"]
-            self.assertEqual([h["phase"] for h in hints], ["start", "end"])
-            self.assertFalse(any(e.get("event") == "tool_hint" for e in n_store))
+            # Native emits & persists canonical Web/iOS `kind="tool_hint"` start/end events
+            hints = [
+                f for f in frames
+                if f.get("event") == "message" and f.get("kind") == "tool_hint" and f.get("turn_phase") == "activity"
+            ]
+            self.assertEqual([h["tool_events"][0]["phase"] for h in hints], ["start", "end"])
+            self.assertEqual([h["tool_events"][0]["name"] for h in hints], ["lookup_weather", "lookup_weather"])
+            stored_hints = [e for e in stored if e.get("event") == "message" and e.get("kind") == "tool_hint"]
+            self.assertEqual([h["tool_events"][0]["phase"] for h in stored_hints], ["start", "end"])
 
         asyncio.run(scenario())
 
