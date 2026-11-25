@@ -175,6 +175,9 @@ class ChatTurnEngine(AgentEngine):
 
     async def stop(self) -> None:
         for actor in list(self._actors.values()):
+            if (bt := getattr(actor, "_goal_barrier_task", None)) is not None and not bt.done():
+                bt.cancel()
+                await asyncio.wait({bt}, timeout=1.0)
             if actor.active_turn_id is not None or getattr(actor, "_pending_clarify", None) is not None:
                 await actor.handle_stop()
             elif (rt := getattr(actor, "_runner_task", None)) is not None and not rt.done():
@@ -222,6 +225,7 @@ class ChatTurnEngine(AgentEngine):
 
         seen_targets: set[tuple[str, str, str]] = set()
         last_exc: Optional[BaseException] = None
+        overflow_exc: Optional[BaseException] = None
         tools = self._tools_provider() if self._tools_provider is not None else None
 
         for idx, cand in enumerate(candidates):
@@ -241,8 +245,8 @@ class ChatTurnEngine(AgentEngine):
 
             if actor is not None:
                 actor.model_name = str(runtime.get("model") or actor.model_name)
-                actor.provider_name = str(runtime.get("provider") or actor.provider_name)
-                actor.base_url = str(runtime.get("base_url") or actor.base_url)
+                actor.provider_name = str(runtime.get("provider") or "")
+                actor.base_url = str(runtime.get("base_url") or "")
                 if isinstance(ctx_len := runtime.get("context_length"), int) and ctx_len > 0:
                     actor.context_window = ctx_len
 
@@ -281,10 +285,19 @@ class ChatTurnEngine(AgentEngine):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                from .turn_actor import classify_turn_failure
+
+                is_overflow = classify_turn_failure(exc)[2]
+                if idx == 0 and is_overflow:
+                    overflow_exc = exc
                 last_exc = exc
-                if emitted_output or idx >= len(candidates) - 1:
+                if emitted_output or (idx == 0 and is_overflow and not getattr(actor, "_overflow_retried", False)):
                     raise
+                if idx >= len(candidates) - 1:
+                    raise (overflow_exc or exc)
                 continue
+        if overflow_exc is not None:
+            raise overflow_exc
         if last_exc is not None:
             raise last_exc
 
@@ -488,16 +501,24 @@ class ChatTurnEngine(AgentEngine):
         if not sess or not sess.get("id") or not turn_id:
             return 0
         rows = db.get_messages(str(sess["id"]), active_only=True)
+        turn_rows = [r for r in rows if r.get("turn_id") == turn_id]
+        if not turn_rows:
+            return 0
         remaining = [e for e in self._sink.store_events(chat_id) if e.get("turn_id") == turn_id and e.get("event") != "turn_end"]
-        to_drop: list[int] = []
-        for r in rows:
-            if r.get("turn_id") != turn_id:
-                continue
+        clarify_row = next((r for r in turn_rows if r.get("role") == "tool" and r.get("tool_name") == "clarify"), None)
+        if clarify_row is not None:
+            cid = int(clarify_row["id"])
+            if role == "reply" and remaining:
+                to_drop = [int(r["id"]) for r in turn_rows if int(r["id"]) != cid and r.get("role") != "user"]
+                return int(db.deactivate_messages(to_drop)) if to_drop else 0
+            prev_tid = next((str(p.get("turn_id") or "") for p in reversed(rows) if int(p["id"]) < cid and p.get("role") == "assistant"), "") or None
+            db.update_message(cid, content=CANCELLED_TOOL_RESULT, turn_id=prev_tid, extra={"awaiting_user": False, "deleted": True})
+            to_drop = [int(r["id"]) for r in turn_rows if int(r["id"]) != cid]
+            self._sink.remove_store_events(chat_id, lambda e: e.get("turn_id") == turn_id)
+            return (int(db.deactivate_messages(to_drop)) if to_drop else 0) + 1
+        to_drop = []
+        for r in turn_rows:
             rid = int(r["id"])
-            if r.get("role") == "tool" and r.get("tool_name") == "clarify":
-                prev_tid = next((str(p.get("turn_id") or "") for p in reversed(rows) if int(p["id"]) < rid and p.get("role") == "assistant"), "") or None
-                db.update_message(rid, content=CANCELLED_TOOL_RESULT, turn_id=prev_tid, extra={"awaiting_user": False, "deleted": True})
-                continue
             if not remaining or role is None:
                 to_drop.append(rid)
             elif role == "user" and r.get("role") == "user":
@@ -511,7 +532,14 @@ class ChatTurnEngine(AgentEngine):
         if actor is not None:
             if getattr(actor, "_renew_timer", None) is not None:
                 actor._renew_timer.cancel()
-            if actor.active_turn_id is not None or actor._pending_clarify is not None:
+            if (bt := getattr(actor, "_goal_barrier_task", None)) is not None and not bt.done():
+                bt.cancel()
+                await asyncio.wait({bt}, timeout=1.0)
+            if (
+                actor.active_turn_id is not None
+                or actor._pending_clarify is not None
+                or ((rt := getattr(actor, "_runner_task", None)) is not None and not rt.done())
+            ):
                 with contextlib.suppress(Exception):
                     await actor.handle_stop()
         db = self._ensure_db()

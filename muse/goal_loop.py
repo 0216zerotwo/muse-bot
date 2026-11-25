@@ -381,8 +381,23 @@ class GoalLoopController:
                 await self._post_notice_fn(chat_id, notice)
 
     def _wake(self, chat_id: str) -> None:
+        self._control_epochs = getattr(self, "_control_epochs", {})
+        self._control_epochs[chat_id] = self._control_epochs.get(chat_id, 0) + 1
         if (ev := self._wake_events.get(chat_id)) is not None:
             ev.set()
+
+    async def pause_for_approval(self, chat_id: str, reason: str = "等待操作确认") -> Optional[GoalState]:
+        state = self.load_state(chat_id)
+        if state is None or state.status != "active":
+            return state
+        state.status = "paused"
+        state.last_verdict = "awaiting_approval"
+        state.paused_reason = reason
+        state.clear_wait()
+        self.save_state(chat_id, state)
+        self._wake(chat_id)
+        await self._sync_ui(chat_id, NOTICE_GOAL_PAUSED)
+        return state
 
     # ── User & UI Controls (`/goal ...`) ──────────────────────────────────────
 
@@ -587,12 +602,31 @@ class GoalLoopController:
         if state is None or state.status != "active":
             return GoalDecision("inactive", False, None, "skipped", "no active goal")
 
+        orig_created_at, orig_goal = state.created_at, state.goal
+        epochs = getattr(self, "_control_epochs", {})
+        orig_epoch = epochs.get(chat_id, 0)
+
+        def _check_fresh() -> Optional[GoalState]:
+            fresh = self.load_state(chat_id)
+            if (
+                fresh is None
+                or fresh.status != "active"
+                or fresh.created_at != orig_created_at
+                or fresh.goal != orig_goal
+                or getattr(self, "_control_epochs", {}).get(chat_id, 0) != orig_epoch
+            ):
+                return None
+            state.subgoals = list(fresh.subgoals)
+            return fresh
+
         state.turns_used += 1
         state.last_turn_at = time.time()
 
         # 1. Deterministic quality gates run BEFORE LLM judge
         for gate in state.gates:
             passed, exit_code, tail = await run_gate_async(gate, cwd=self._gate_cwd)
+            if _check_fresh() is None:
+                return GoalDecision("inactive", False, None, "stopped", "goal changed")
             gate.last_exit_code = exit_code
             gate.last_output_tail = tail
             if passed:
@@ -620,6 +654,8 @@ class GoalLoopController:
             verdict, reason, parse_failed, wait_dir, transport_failed = "continue", "empty response", False, None, False
         else:
             verdict, reason, parse_failed, wait_dir, transport_failed = await self._call_judge(state, last_response, chat_id)
+            if _check_fresh() is None:
+                return GoalDecision("inactive", False, None, "stopped", "goal changed")
 
         state.last_verdict = verdict
         state.last_reason = reason

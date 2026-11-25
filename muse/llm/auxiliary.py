@@ -227,6 +227,13 @@ def _resolve_vision_slot(
     return vision_provider, vision_model
 
 
+def _flatten_if_text_only(msg: dict[str, Any]) -> dict[str, Any]:
+    parts = msg.get("content")
+    if isinstance(parts, list) and all(isinstance(p, dict) and p.get("type") == "text" for p in parts):
+        return {**msg, "content": "\n".join(str(p.get("text") or "") for p in parts if p.get("text"))}
+    return msg
+
+
 async def describe_images_if_blind(
     messages: list[dict[str, Any]], *, chat_vision: bool, vision_provider: Optional[str] = None,
     vision_model: Optional[str] = None, vision_base_url: Optional[str] = None, vision_api_key: Optional[str] = None,
@@ -234,16 +241,18 @@ async def describe_images_if_blind(
     client: Optional[httpx.AsyncClient] = None, config: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     """Replace inline images with textual descriptions via the configured ``vision=True`` model when ``chat_vision=False``."""
-    has_img = any(isinstance(m, dict) and isinstance(m.get("content"), list) and any(_part_is_image(p) for p in m["content"]) for m in messages)
-    if chat_vision or not has_img:
+    if chat_vision:
         return messages
+    has_img = any(isinstance(m, dict) and isinstance(m.get("content"), list) and any(_part_is_image(p) for p in m["content"]) for m in messages)
+    if not has_img:
+        return [_flatten_if_text_only(m) if isinstance(m, dict) else m for m in messages]
     v_prov, v_model = _resolve_vision_slot(vision_provider=vision_provider, vision_model=vision_model, config=config)
     can_desc = bool(v_model and (v_prov or vision_base_url))
     out: list[dict[str, Any]] = []
     for msg in messages:
         content = msg.get("content") if isinstance(msg, dict) else None
         if not isinstance(content, list) or not any(_part_is_image(p) for p in content):
-            out.append(msg)
+            out.append(_flatten_if_text_only(msg) if isinstance(msg, dict) else msg)
             continue
         imgs = [p for p in content if _part_is_image(p)]
         texts = [p for p in content if not _part_is_image(p)]
@@ -262,5 +271,5 @@ async def describe_images_if_blind(
                 logger.warning("muse.llm.auxiliary: vision fallback failed (%s)", type(exc).__name__)
         new_parts = [copy.deepcopy(p) for p in texts]
         new_parts.append({"type": "text", "text": f"[图片内容描述]\n{desc}" if desc else "[图片：当前对话模型不支持直接看图，且未能生成图片描述]"})
-        out.append({**msg, "content": new_parts})
+        out.append(_flatten_if_text_only({**msg, "content": new_parts}))
     return out

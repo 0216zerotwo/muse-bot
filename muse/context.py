@@ -364,9 +364,10 @@ def _encode_image_part(fpath: Path, mime: str) -> Optional[dict[str, Any]]:
             import pillow_heif
             pillow_heif.register_heif_opener()
         with Image.open(io.BytesIO(raw)) as opened:
+            orient = opened.getexif().get(274, 1)
             img = ImageOps.exif_transpose(opened)
             fmt = (opened.format or "").upper()
-            if fmt in {"PNG", "JPEG", "WEBP", "GIF"} and len(raw) <= 5 * 1024 * 1024 and max(img.size) <= 2048:
+            if orient in (None, 1) and fmt in {"PNG", "JPEG", "WEBP", "GIF"} and len(raw) <= 5 * 1024 * 1024 and max(img.size) <= 2048:
                 out_bytes, out_mime = raw, f"image/{fmt.lower()}"
             else:
                 if max(img.size) > 2048:
@@ -656,10 +657,99 @@ class ContextCompactor:
         return (resp.choices[0].message.content or "").strip() if resp.choices else ""
 
 
+def db_rows_to_llm_messages(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert `MuseDB.get_messages(...)` rows into OpenAI/Anthropic-compatible message dicts."""
+    out: list[dict[str, Any]] = []
+    extra_keys = (
+        "reasoning_content", "extra_content", "reasoning_details",
+        "codex_reasoning_items", "anthropic_content_blocks",
+    )
+    for row in rows:
+        extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+        parts = extra.get("content_parts")
+        if not isinstance(parts, list) and row.get("role") == "user" and isinstance(extra.get("files"), list):
+            parts = build_content_parts_sync(str(row.get("content") or ""), extra["files"])
+        content: Any = parts if isinstance(parts, list) else (row.get("content") or "")
+        msg: dict[str, Any] = {"role": str(row.get("role") or "user"), "content": content}
+        if isinstance(row.get("id"), int):
+            msg["id"] = row["id"]
+        if row.get("tool_calls"):
+            msg["tool_calls"] = row["tool_calls"]
+        if row.get("tool_call_id"):
+            msg["tool_call_id"] = row["tool_call_id"]
+        if row.get("tool_name"):
+            msg["tool_name"] = msg["name"] = row["tool_name"]
+        for key in extra_keys:
+            if extra.get(key) is not None:
+                msg[key] = extra[key]
+        out.append(msg)
+    return out
+
+
+async def collect_pre_llm_context(
+    chat_id: str, user_text: str, session_id: str, history: list[dict[str, Any]],
+    *, internal: bool = False, actor_kind: str = "companion",
+) -> str:
+    """Build per-turn Companion helper identity/routing & presentation router hints without touching system prompt."""
+    parts: list[str] = []
+    with contextlib.suppress(Exception):
+        from companion.modules import helpers as comp_helpers
+
+        hctx = await run_in_turn_thread(comp_helpers.context_for, chat_id, user_text)
+        if isinstance(hctx, str) and hctx.strip():
+            parts.append(hctx.strip())
+    if not internal and actor_kind != "cron":
+        with contextlib.suppress(Exception):
+            from companion.modules import router as comp_router
+
+            res = await run_in_turn_thread(
+                comp_router.on_pre_llm_call,
+                platform="companion",
+                session_id=session_id,
+                user_message=user_text,
+                conversation_history=history,
+            )
+            rctx = res.get("context") if isinstance(res, dict) else None
+            if isinstance(rctx, str) and rctx.strip():
+                parts.append(rctx.strip())
+    return "\n\n".join(parts)
+
+
+def inject_pre_llm_context(
+    messages: list[dict[str, Any]], extra: str, *, target_msg_id: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    if not extra or not messages:
+        return messages
+    out = list(messages)
+    target_idx: Optional[int] = None
+    if target_msg_id is not None:
+        for idx in range(len(out) - 1, -1, -1):
+            if out[idx].get("role") == "user" and out[idx].get("id") == target_msg_id:
+                target_idx = idx
+                break
+    if target_idx is None:
+        for idx in range(len(out) - 1, -1, -1):
+            r_role = out[idx].get("role")
+            if r_role == "user" or (r_role == "tool" and out[idx].get("tool_name") == "clarify"):
+                target_idx = idx
+                break
+    if target_idx is not None:
+        copy_msg = dict(out[target_idx])
+        content = copy_msg.get("content")
+        if isinstance(content, list):
+            copy_msg["content"] = [*content, {"type": "text", "text": f"\n\n{extra}"}]
+        else:
+            base = str(content or "")
+            copy_msg["content"] = f"{base}\n\n{extra}" if base else extra
+        out[target_idx] = copy_msg
+    return out
+
+
 __all__ = [
     "ActorKind", "CancelScope", "CompactionPhase", "CompactionResult", "ContextCompactor", "MEMORY_DELIMITER",
     "PromptAssembler", "TurnExecutionContext", "bind_turn_context", "build_compaction_event",
+    "build_content_parts_sync", "collect_pre_llm_context", "db_rows_to_llm_messages",
     "estimate_message_tokens", "estimate_text_tokens", "estimate_tokens", "get_turn_context",
-    "load_memory_entries", "load_skill_index", "reset_turn_context", "run_in_turn_thread",
-    "split_user_groups", "turn_context_scope",
+    "inject_pre_llm_context", "load_memory_entries", "load_skill_index", "reset_turn_context",
+    "run_in_turn_thread", "split_user_groups", "turn_context_scope",
 ]

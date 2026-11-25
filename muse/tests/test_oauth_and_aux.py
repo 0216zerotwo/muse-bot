@@ -316,10 +316,9 @@ class AuxiliaryClientAndVisionFallbackTest(unittest.TestCase):
                 )
 
         rewritten = asyncio.run(run())
-        parts = rewritten[0]["content"]
-        self.assertTrue(all(p["type"] == "text" for p in parts))
-        joined = "\n".join(p["text"] for p in parts)
-        self.assertIn("橘猫", joined)
+        content = rewritten[0]["content"]
+        self.assertIsInstance(content, str)
+        self.assertIn("橘猫", content)
         # Original messages untouched.
         self.assertEqual(msgs[0]["content"][1]["type"], "image_url")
 

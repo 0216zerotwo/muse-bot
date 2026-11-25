@@ -290,6 +290,12 @@ def _norm_sig(extra_content: Any) -> Optional[dict[str, Any]]:
     return {"google": {"thought_signature": sig}} if sig else None
 
 
+def _flatten_text_only_content(content: Any) -> Any:
+    if isinstance(content, list) and all(isinstance(p, dict) and p.get("type") == "text" for p in content):
+        return "\n".join(str(p.get("text") or "") for p in content if p.get("text"))
+    return content
+
+
 def _sanitize_chat_messages(
     messages: list[dict[str, Any]], *, keep_gemini_sig: bool, is_kimi: bool, keep_reasoning_content: bool,
     mistral_mapper: Optional[MistralToolIdMapper], tool_forward: dict[str, str],
@@ -300,6 +306,8 @@ def _sanitize_chat_messages(
             continue
         role = raw.get("role", "user")
         msg = {k: v for k, v in raw.items() if k not in _STRIP_MSG_KEYS and not (isinstance(k, str) and k.startswith("_"))}
+        if "content" in msg:
+            msg["content"] = _flatten_text_only_content(msg["content"])
         if role == "tool":
             msg.pop("name", None)
             if mistral_mapper is not None and msg.get("tool_call_id"):
