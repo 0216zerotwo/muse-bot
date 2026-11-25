@@ -16,7 +16,8 @@ from typing import Any, Literal, Optional
 
 from .context import (
     ActorKind, CancelScope, ContextCompactor, PromptAssembler, TurnExecutionContext,
-    build_content_parts_sync as _build_content_parts_sync, run_in_turn_thread, turn_context_scope,
+    build_content_parts_sync as _build_content_parts_sync, collect_pre_llm_context,
+    db_rows_to_llm_messages, inject_pre_llm_context, run_in_turn_thread, turn_context_scope,
 )
 from .interceptors import scrub_url_secrets
 from .notices import render_notice
@@ -77,35 +78,6 @@ class PendingSlashConfirm:
     timeout_s: float = SLASH_CONFIRM_TIMEOUT_S
 
 
-def db_rows_to_llm_messages(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert `MuseDB.get_messages(...)` rows into OpenAI/Anthropic-compatible message dicts."""
-    out: list[dict[str, Any]] = []
-    extra_keys = (
-        "reasoning_content", "extra_content", "reasoning_details",
-        "codex_reasoning_items", "anthropic_content_blocks",
-    )
-    for row in rows:
-        extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
-        parts = extra.get("content_parts")
-        if not isinstance(parts, list) and row.get("role") == "user" and isinstance(extra.get("files"), list):
-            parts = _build_content_parts_sync(str(row.get("content") or ""), extra["files"])
-        content: Any = parts if isinstance(parts, list) else (row.get("content") or "")
-        msg: dict[str, Any] = {"role": str(row.get("role") or "user"), "content": content}
-        if isinstance(row.get("id"), int):
-            msg["id"] = row["id"]
-        if row.get("tool_calls"):
-            msg["tool_calls"] = row["tool_calls"]
-        if row.get("tool_call_id"):
-            msg["tool_call_id"] = row["tool_call_id"]
-        if row.get("tool_name"):
-            msg["tool_name"] = msg["name"] = row["tool_name"]
-        for key in extra_keys:
-            if extra.get(key) is not None:
-                msg[key] = extra[key]
-        out.append(msg)
-    return out
-
-
 StreamLLMFn = Callable[..., AsyncIterator[Any]]
 ToolExecFn = Callable[[dict[str, Any], TurnExecutionContext], Awaitable[str]]
 GoalControlFn = Callable[[str, str], Awaitable[None]]
@@ -142,12 +114,15 @@ class ChatTurnActor:
         self.home, self.model_name, self.provider_name, self.base_url = home, model_name, provider_name, base_url
 
         self.active_turn_id: Optional[str] = None
-        self._phase: Literal["idle", "llm", "tools", "clarify_wait"] = "idle"
+        self._phase: Literal["idle", "llm", "tools", "clarify_wait", "goal_eval", "goal_wait"] = "idle"
         self._cancel_scope: Optional[CancelScope] = None
         self._runner_task: Optional[asyncio.Task[Any]] = None
+        self._goal_barrier_task: Optional[asyncio.Task[None]] = None
         self._pending_clarify: Optional[PendingClarify] = None
         self._pending_confirm: Optional[PendingSlashConfirm] = None
         self._steer_queue: list[InboundMessage] = []
+        self._deferred_proactive_messages: list[tuple[str, dict[str, Any]]] = []
+        self._overflow_retried: bool = False
         self.inbox: deque[InboundMessage] = deque()
         self._active_tool_calls: list[dict[str, Any]] = []
         self._completed_tool_ids: set[str] = set()
@@ -235,16 +210,66 @@ class ChatTurnActor:
             )
         await self.sink.emit(self.chat_id, body, persist=True)
         if attach_to_session:
-            self.db.append_message(
-                self._active_session()["id"], self.chat_id, "assistant", content,
-                turn_id=None, extra={"job_id": job_id, "proactive": True},
+            in_flight = (
+                self.active_turn_id is not None
+                or bool(self._active_tool_calls)
+                or self._pending_clarify is not None
+                or (self._runner_task is not None and not self._runner_task.done() and self._phase in ("llm", "tools", "clarify_wait"))
             )
+            if in_flight:
+                self._deferred_proactive_messages.append((content, {"job_id": job_id, "proactive": True}))
+            else:
+                self.db.append_message(
+                    self._active_session()["id"], self.chat_id, "assistant", content,
+                    turn_id=None, extra={"job_id": job_id, "proactive": True},
+                )
+
+    def _flush_deferred_proactive(self, session_id: Optional[str] = None) -> None:
+        if not self._deferred_proactive_messages:
+            return
+        sid = session_id or str(self._active_session()["id"])
+        pending, self._deferred_proactive_messages = list(self._deferred_proactive_messages), []
+        for content, extra in pending:
+            self.db.append_message(sid, self.chat_id, "assistant", content, turn_id=None, extra=extra)
+
+    async def _pause_active_goal_if_any(self) -> None:
+        active = False
+        if self.goal_controller is not None:
+            with contextlib.suppress(Exception):
+                st = self.goal_controller.load_state(self.chat_id)
+                active = bool(st is not None and st.status == "active")
+        elif self.db is not None and callable(getattr(self.db, "get_goal", None)):
+            with contextlib.suppress(Exception):
+                g = self.db.get_goal(self.chat_id)
+                active = bool(isinstance(g, dict) and g.get("status") == "active")
+        if active:
+            await self._invoke_goal_control("/goal pause")
+            await self.sink.push_goal_state(self.chat_id)
+
+    async def _cancel_goal_eval_or_wait(self) -> None:
+        if (bt := self._goal_barrier_task) is not None:
+            self._goal_barrier_task = None
+            if not bt.done():
+                bt.cancel()
+                await asyncio.wait({bt}, timeout=1.0)
+        if any(m.internal for m in self.inbox):
+            self.inbox = deque(m for m in self.inbox if not m.internal)
+        if self.active_turn_id is None and self._phase in ("goal_eval", "goal_wait"):
+            if self._cancel_scope is not None:
+                self._cancel_scope.cancel("goal_interrupted")
+            await self._drain_runner(timeout=1.5, cancel=True)
 
     async def handle_stop(self) -> str:
-        """P0 `/stop`: cancel active turn & queued inbox turns, OR emit `turn_end` when idle (iOS `stopGoal()`)."""
+        """P0 `/stop`: cancel active turn & queued inbox turns, pause active goal, OR emit `turn_end` when idle."""
         self._steer_queue.clear()
         queued = list(self.inbox)
         self.inbox.clear()
+        await self._pause_active_goal_if_any()
+        if (bt := self._goal_barrier_task) is not None:
+            self._goal_barrier_task = None
+            if not bt.done():
+                bt.cancel()
+                await asyncio.wait({bt}, timeout=1.0)
         if (pending := self._pending_clarify) is not None:
             self._pending_clarify = None
             if not pending.future.done():
@@ -265,10 +290,19 @@ class ChatTurnActor:
 
         active_tid = self.active_turn_id
         if active_tid is None:
+            if self._runner_task is not None and not self._runner_task.done():
+                if self._cancel_scope is not None:
+                    self._cancel_scope.cancel("user_stop")
+                await self._drain_runner(timeout=2.0, cancel=True)
+                if self.inbox:
+                    queued.extend(self.inbox)
+                    self.inbox.clear()
             if queued:
                 for item in queued:
-                    if item.turn_id:
+                    if item.turn_id and not item.internal:
                         await self._emit_turn_end(item.turn_id, outcome="cancelled", persist=True)
+                if all(item.internal for item in queued):
+                    await self._emit_turn_end(None, persist=False)
             else:
                 await self._emit_turn_end(None, persist=False)
             return ""
@@ -329,14 +363,18 @@ class ChatTurnActor:
     async def _handle_goal_control(self, command: str) -> None:
         low = command.strip().lower()
         await self._invoke_goal_control(command)
+        if low in ("/goal stop", "/goal pause", "/goal clear"):
+            await self._cancel_goal_eval_or_wait()
         await self.sink.push_goal_state(self.chat_id)
         if low == "/goal resume" and self.goal_controller is not None:
+            await self._cancel_goal_eval_or_wait()
             st = self.goal_controller.load_state(self.chat_id)
             if st is not None and st.status == "active" and self.active_turn_id is None and self._phase == "idle":
                 await self.submit_internal(self.goal_controller._build_continuation_prompt(st))
 
     async def _handle_typed_goal_command(self, stripped: str, lowered: str, resolved_tid: str) -> Optional[str]:
         if lowered.startswith("/goal ") and not lowered.startswith(("/goal status", "/goal gate")):
+            await self._cancel_goal_eval_or_wait()
             await self._cancel_pending_clarify("goal_start")
         ctrl = self.goal_controller
         if ctrl is None:
@@ -389,12 +427,16 @@ class ChatTurnActor:
             await self._resolve_slash_confirm(lowered == APPROVE_COMMAND, resolved_tid)
             return resolved_tid
 
-        if not internal and self.active_turn_id is None and self._phase in ("idle", "clarify_wait"):
+        if not internal and self.active_turn_id is None and self._phase in ("idle", "clarify_wait", "goal_eval", "goal_wait"):
             slash_cmd = lowered.lstrip("/").split(" ", 1)[0] if lowered.startswith("/") else ""
             if slash_cmd in CONFIRMABLE_COMMANDS:
+                if self._phase in ("goal_eval", "goal_wait") or self._goal_barrier_task is not None:
+                    await self._cancel_goal_eval_or_wait()
                 await self._begin_slash_confirm(slash_cmd, resolved_tid)
                 return resolved_tid
             if lowered == COMPACT_COMMAND:
+                if self._phase in ("goal_eval", "goal_wait") or self._goal_barrier_task is not None:
+                    await self._cancel_goal_eval_or_wait()
                 await self._handle_manual_compact(resolved_tid)
                 return resolved_tid
 
@@ -409,6 +451,11 @@ class ChatTurnActor:
                 self._set_active_turn(resolved_tid)
                 entry.future.set_result((text, resolved_tid, list(files or [])))
                 return resolved_tid
+
+        if not internal and (bt := self._goal_barrier_task) is not None:
+            self._goal_barrier_task = None
+            if not bt.done():
+                bt.cancel()
 
         msg = InboundMessage(text=text, turn_id=resolved_tid, media_urls=list(media_urls or []), files=list(files or []), internal=internal)
         if self.active_turn_id is not None or self._phase != "idle":
@@ -498,11 +545,16 @@ class ChatTurnActor:
             await self._emit_answer(turn_id, "好，取消了。")
             await self._emit_turn_end(turn_id)
         elif pending.command in ("new", "reset"):
+            await self._cancel_goal_eval_or_wait()
             await self._cancel_pending_clarify(pending.command)
+            await self._invoke_goal_control("/goal clear")
+            await self.sink.push_goal_state(self.chat_id)
+            self._deferred_proactive_messages.clear()
             await self.renew_session(silent=True)
             await self._emit_answer(turn_id, render_notice("gateway.reset.header_new"))
             await self._emit_turn_end(turn_id)
         elif pending.command == "undo":
+            await self._cancel_goal_eval_or_wait()
             await self._cancel_pending_clarify("undo")
             self._undo_db_exchange(self._active_session()["id"], pending.target_turn_id)
             drop_tids = {t for t in (pending.target_turn_id, pending.confirm_turn_id, turn_id) if t}
@@ -558,6 +610,18 @@ class ChatTurnActor:
                 with contextlib.suppress(Exception):
                     await self._close_browser_fn(self.chat_id)
 
+    def _pending_approval_ids(self) -> set[str]:
+        apv = getattr(self.sink, "approvals", None)
+        store = getattr(apv, "store", None)
+        target = self.facing_chat_id or self.chat_id
+        if store is not None and target and callable(getattr(store, "list_for_session", None)):
+            with contextlib.suppress(Exception):
+                return {
+                    str(r.id) for r in store.list_for_session(f"websocket:{target}")
+                    if getattr(r, "status", "") == "pending"
+                }
+        return set()
+
     async def _execute_turn(self, msg: InboundMessage) -> None:
         session = self._active_session()
         session_id, current_turn_id = str(session["id"]), msg.turn_id
@@ -579,6 +643,8 @@ class ChatTurnActor:
         )
         streamer = self._streamer = DraftSegmentStreamer(self.sink, self.chat_id, current_turn_id)
         turn_closed_by_clarify = False
+        deferred_approval_hit = False
+        pre_pending_apvs = self._pending_approval_ids()
         last_final_text = ""
 
         try:
@@ -624,12 +690,14 @@ class ChatTurnActor:
                         final_text, media = await streamer.close_segment(final_raw=raw_text, for_tools=False)
                         await streamer.flush_media(media, reply_context=final_text)
                         last_final_text = final_text or raw_text
+                        self._flush_deferred_proactive(session_id)
                         break
 
                     pre_text, media = await streamer.close_segment(final_raw=raw_text, for_tools=True)
                     await streamer.flush_media(media, reply_context=pre_text)
                     self._phase, self._active_tool_calls, self._completed_tool_ids = "tools", list(tool_calls), set()
                     clarify_files_b: list[tuple[str, str]] = []
+                    clarify_answer_b: Optional[str] = None
 
                     for tc in tool_calls:
                         scope.check()
@@ -642,9 +710,11 @@ class ChatTurnActor:
                                 tc=tc, tc_id=tc_id, session_id=session_id, turn_id_a=current_turn_id,
                             )
                             if answered is None:
+                                self._flush_deferred_proactive(session_id)
                                 await self._finalize_turn_hooks(succeeded=False)
                                 return
-                            _, current_turn_id, files_b = answered
+                            ans_txt, current_turn_id, files_b = answered
+                            clarify_answer_b = ans_txt
                             if files_b:
                                 clarify_files_b.extend(files_b)
                             turn_closed_by_clarify, ctx.turn_id = False, current_turn_id
@@ -656,6 +726,8 @@ class ChatTurnActor:
                             else json.dumps({"error": "No tool executor configured"})
                         )
                         content = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
+                        if content.lstrip().startswith("[已等待确认"):
+                            deferred_approval_hit = True
                         self.db.append_message(
                             session_id, self.chat_id, "tool", content,
                             turn_id=current_turn_id, tool_call_id=tc_id, tool_name=tc_name,
@@ -672,6 +744,12 @@ class ChatTurnActor:
                             turn_id=current_turn_id,
                             extra={"files": [list(f) for f in clarify_files_b], "clarify_attachment": True, **({"content_parts": c_parts} if c_parts else {})},
                         )
+                    if clarify_answer_b is not None:
+                        user_msg_id = None
+                        cur_hist = db_rows_to_llm_messages(self.db.get_messages(session_id, active_only=True))
+                        pre_llm_context = await self._collect_pre_llm_context(
+                            clarify_answer_b, session_id, cur_hist[:-1] if cur_hist else [], internal=False,
+                        )
                     if self._steer_queue:
                         steered, self._steer_queue = list(self._steer_queue), []
                         for sm in steered:
@@ -685,12 +763,16 @@ class ChatTurnActor:
                                 session_id, self.chat_id, "user", sm.text,
                                 turn_id=current_turn_id, extra=s_extra,
                             )
+                    self._flush_deferred_proactive(session_id)
                 else:
+                    self._flush_deferred_proactive(session_id)
                     await self.sink.post_notice(
                         self.chat_id, render_notice("gateway.errors.stopped_before_finishing", reason="")
                     )
         except asyncio.CancelledError:
             self._write_cancelled_tool_results(session_id, current_turn_id)
+            self._active_tool_calls = []
+            self._flush_deferred_proactive(session_id)
             if not turn_closed_by_clarify:
                 with contextlib.suppress(Exception):
                     await streamer.close_segment(for_tools=False)
@@ -699,6 +781,8 @@ class ChatTurnActor:
             await self._finalize_turn_hooks(succeeded=False)
             return
         except Exception as exc:
+            self._active_tool_calls = []
+            self._flush_deferred_proactive(session_id)
             error_kind, attempts, _ = classify_turn_failure(exc)
             with contextlib.suppress(Exception):
                 await streamer.close_segment(for_tools=False)
@@ -713,12 +797,40 @@ class ChatTurnActor:
             await self._finalize_turn_hooks(succeeded=False)
             return
 
+        if not deferred_approval_hit and (self._pending_approval_ids() - pre_pending_apvs):
+            deferred_approval_hit = True
         self._set_active_turn(None)
         await self._emit_turn_end(current_turn_id, outcome="completed")
         await self._finalize_turn_hooks(succeeded=True)
-        await self._maybe_continue_goal(last_final_text)
+        await self._maybe_continue_goal(last_final_text, deferred_approval=deferred_approval_hit)
 
-    async def _maybe_continue_goal(self, last_response: str) -> None:
+    def _schedule_goal_barrier(self, ctrl: Any, directive: dict[str, Any], prompt: str) -> None:
+        if (prev := self._goal_barrier_task) is not None and not prev.done():
+            prev.cancel()
+
+        async def _worker() -> None:
+            try:
+                ok = await ctrl.wait_for_barrier(self.chat_id, directive)
+                if not ok or getattr(self.db, "_closed", False):
+                    return
+                st_after = ctrl.load_state(self.chat_id)
+                if (
+                    st_after is not None
+                    and st_after.status == "active"
+                    and self.active_turn_id is None
+                    and self._phase == "idle"
+                    and not self.inbox
+                ):
+                    await self.submit_internal(prompt)
+            except asyncio.CancelledError:
+                return
+            finally:
+                if self._goal_barrier_task is asyncio.current_task():
+                    self._goal_barrier_task = None
+
+        self._goal_barrier_task = asyncio.get_running_loop().create_task(_worker())
+
+    async def _maybe_continue_goal(self, last_response: str, *, deferred_approval: bool = False) -> None:
         ctrl = self.goal_controller
         if ctrl is None or self.actor_kind != "companion" or getattr(self.db, "_closed", False):
             return
@@ -728,102 +840,56 @@ class ChatTurnActor:
             return
         if st is None or st.status != "active":
             return
+        if deferred_approval:
+            await ctrl.pause_for_approval(self.chat_id, reason="等待操作确认")
+            return
+        self._phase = "goal_eval"
         decision = await ctrl.evaluate_after_turn(self.chat_id, last_response)
         if not decision.should_continue or not decision.continuation_prompt or getattr(self.db, "_closed", False):
             return
         if decision.verdict == "wait" and decision.wait_directive:
-            if not await ctrl.wait_for_barrier(self.chat_id, decision.wait_directive):
-                return
-        if getattr(self.db, "_closed", False):
+            self._schedule_goal_barrier(ctrl, decision.wait_directive, decision.continuation_prompt)
             return
         st_after = ctrl.load_state(self.chat_id)
-        if st_after is not None and st_after.status == "active" and not any(m.internal for m in self.inbox):
+        if st_after is not None and st_after.status == "active" and not self.inbox:
             self.inbox.append(InboundMessage(
                 text=decision.continuation_prompt, turn_id=f"goal-{uuid.uuid4().hex[:10]}", internal=True,
             ))
 
     async def _collect_pre_llm_context(
-        self,
-        user_text: str,
-        session_id: str,
-        history: list[dict[str, Any]],
-        *,
-        internal: bool = False,
+        self, user_text: str, session_id: str, history: list[dict[str, Any]], *, internal: bool = False,
     ) -> str:
-        """Build per-turn Companion helper identity/routing & presentation router hints without touching system prompt."""
-        parts: list[str] = []
-        with contextlib.suppress(Exception):
-            from companion.modules import helpers as comp_helpers
+        return await collect_pre_llm_context(
+            self.chat_id, user_text, session_id, history, internal=internal, actor_kind=self.actor_kind,
+        )
 
-            hctx = await run_in_turn_thread(comp_helpers.context_for, self.chat_id, user_text)
-            if isinstance(hctx, str) and hctx.strip():
-                parts.append(hctx.strip())
-        if not internal and self.actor_kind != "cron":
-            with contextlib.suppress(Exception):
-                from companion.modules import router as comp_router
-
-                res = await run_in_turn_thread(
-                    comp_router.on_pre_llm_call,
-                    platform="companion",
-                    session_id=session_id,
-                    user_message=user_text,
-                    conversation_history=history,
-                )
-                rctx = res.get("context") if isinstance(res, dict) else None
-                if isinstance(rctx, str) and rctx.strip():
-                    parts.append(rctx.strip())
-        return "\n\n".join(parts)
-
-    @staticmethod
-    def _inject_pre_llm_context(
-        messages: list[dict[str, Any]], extra: str, *, target_msg_id: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
-        if not extra or not messages:
-            return messages
-        out = list(messages)
-        target_idx: Optional[int] = None
-        if target_msg_id is not None:
-            for idx in range(len(out) - 1, -1, -1):
-                if out[idx].get("role") == "user" and out[idx].get("id") == target_msg_id:
-                    target_idx = idx
-                    break
-        if target_idx is None:
-            for idx in range(len(out) - 1, -1, -1):
-                if out[idx].get("role") == "user":
-                    target_idx = idx
-                    break
-        if target_idx is not None:
-            copy_msg = dict(out[target_idx])
-            content = copy_msg.get("content")
-            if isinstance(content, list):
-                copy_msg["content"] = [*content, {"type": "text", "text": f"\n\n{extra}"}]
-            else:
-                base = str(content or "")
-                copy_msg["content"] = f"{base}\n\n{extra}" if base else extra
-            out[target_idx] = copy_msg
-        return out
+    _inject_pre_llm_context = staticmethod(inject_pre_llm_context)
 
     async def _invoke_llm_with_overflow_retry(
         self, llm_msgs: list[dict[str, Any]], system_prompt: str, session_id: str,
         turn_id: str, streamer: DraftSegmentStreamer, scope: CancelScope,
     ) -> tuple[str, list[dict[str, Any]], dict[str, Any], Any]:
         retried, active = False, llm_msgs
-        while True:
-            try:
-                wire = [{"role": "system", "content": system_prompt}, *active] if system_prompt else active
-                return await self._consume_llm_stream(wire, turn_id, streamer, scope)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if classify_turn_failure(exc)[2] and not retried:
-                    res = await self.compactor.tier3_emergency_drop(
-                        active, db=self.db, session_id=session_id, chat_id=self.chat_id, turn_id=turn_id,
-                        emit_event=lambda ev: self.sink.emit(self.chat_id, ev, persist=True),
-                    )
-                    if res.compacted:
-                        retried, active = True, res.messages
-                        continue
-                raise
+        try:
+            while True:
+                self._overflow_retried = retried
+                try:
+                    wire = [{"role": "system", "content": system_prompt}, *active] if system_prompt else active
+                    return await self._consume_llm_stream(wire, turn_id, streamer, scope)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if classify_turn_failure(exc)[2] and not retried:
+                        res = await self.compactor.tier3_emergency_drop(
+                            active, db=self.db, session_id=session_id, chat_id=self.chat_id, turn_id=turn_id,
+                            emit_event=lambda ev: self.sink.emit(self.chat_id, ev, persist=True),
+                        )
+                        if res.compacted:
+                            retried, active = True, res.messages
+                            continue
+                    raise
+        finally:
+            self._overflow_retried = False
 
     async def _consume_llm_stream(
         self, messages: list[dict[str, Any]], turn_id: str, streamer: DraftSegmentStreamer, scope: CancelScope,
@@ -950,9 +1016,9 @@ class ChatTurnActor:
         ov = self._model_override or {}
         with contextlib.suppress(Exception):
             self.db.record_usage(
-                session_id, str(ov.get("model") or self.model_name or "unknown"),
-                provider=str(ov.get("provider") or self.provider_name or ""),
-                base_url=str(ov.get("base_url") or self.base_url or ""),
+                session_id, str(self.model_name or ov.get("model") or "unknown"),
+                provider=str(self.provider_name or ov.get("provider") or ""),
+                base_url=str(self.base_url or ov.get("base_url") or ""),
                 source=self._session_source, chat_id=self.chat_id,
                 input_tokens=in_tok, output_tokens=out_tok,
                 cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0) or 0),

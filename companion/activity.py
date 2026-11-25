@@ -20,7 +20,7 @@ from .approvals import approval_action
 from .modules import computer, creations, egress, permissions, secrets_guard
 
 if TYPE_CHECKING:
-    from .adapter import CompanionAdapter
+    from muse.app import NativeCompanionAdapter as CompanionAdapter
 
 logger = logging.getLogger(__name__)
 

@@ -20,7 +20,10 @@ from typing import Any
 from unittest import mock
 
 from PIL import Image
-from pypdf import PdfWriter
+try:
+    from pypdf import PdfWriter
+except ImportError:  # pragma: no cover - fallback for stripped envs without pypdf
+    PdfWriter = None  # type: ignore[assignment,misc]
 
 from companion.modules import companion_state, helpers as comp_helpers, interrupted, models as comp_models
 from companion.server import _handle_mutation
@@ -140,10 +143,13 @@ class Pass1RuntimeFixesTest(unittest.TestCase):
             txt_a = self.home / "notes.txt"
             txt_a.write_text("deploy_env=staging\nport=8080\n", encoding="utf-8")
             pdf_a = self.home / "spec.pdf"
-            writer = PdfWriter()
-            writer.add_blank_page(width=200, height=200)
-            with pdf_a.open("wb") as fh:
-                writer.write(fh)
+            if PdfWriter is not None:
+                writer = PdfWriter()
+                writer.add_blank_page(width=200, height=200)
+                with pdf_a.open("wb") as fh:
+                    writer.write(fh)
+            else:
+                pdf_a.write_bytes(b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n")
 
             img_b = self.home / "clarify_b.png"
             Image.new("RGB", (12, 12), color=(0, 200, 100)).save(img_b, format="PNG")

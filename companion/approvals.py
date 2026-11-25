@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import urlparse
 
 if TYPE_CHECKING:
-    from .adapter import CompanionAdapter
+    from muse.app import NativeCompanionAdapter as CompanionAdapter
 
 logger = logging.getLogger(__name__)
 

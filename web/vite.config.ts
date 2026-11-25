@@ -184,7 +184,7 @@ export default defineConfig(({ mode }) => {
       include: ["@radix-ui/react-dialog"],
     },
     build: {
-      // The Muse Bot server serves this folder (companion/adapter.py, COMPANION_WEB_DIST).
+      // The Muse Bot server serves this folder (companion/server.py, COMPANION_WEB_DIST).
       outDir: path.resolve(__dirname, "dist"),
       emptyOutDir: true,
       manifest: "asset-manifest.json",

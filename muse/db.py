@@ -590,15 +590,16 @@ class MuseDB:
                 return 0
             eff_turn = (turn_id or "").strip() or None
             tail_tid = str(rows[-1]["turn_id"] or "").strip() or None
+            real_u = lambda r: r["role"] == "user" and not (isinstance(ex := _json_loads(r["extra_json"], default={}), dict) and ex.get("clarify_attachment"))
             if eff_turn is None and tail_tid:
                 tail_rows = [r for r in rows if r["turn_id"] == tail_tid]
                 f_ex = _json_loads(tail_rows[0]["extra_json"], default={}) if tail_rows else {}
-                if tail_rows and not any(r["role"] == "user" for r in tail_rows) and tail_rows[0]["role"] == "tool" and (tail_rows[0]["tool_name"] == "clarify" or (isinstance(f_ex, dict) and "clarify_id" in f_ex)):
+                if tail_rows and not any(real_u(r) for r in tail_rows) and tail_rows[0]["role"] == "tool" and (tail_rows[0]["tool_name"] == "clarify" or (isinstance(f_ex, dict) and "clarify_id" in f_ex)):
                     eff_turn = tail_tid
             if eff_turn and (turn_rows := [r for r in rows if r["turn_id"] == eff_turn]):
                 first = turn_rows[0]
                 f_ex = _json_loads(first["extra_json"], default={})
-                if not any(r["role"] == "user" for r in turn_rows) and first["role"] == "tool" and (first["tool_name"] == "clarify" or (isinstance(f_ex, dict) and "clarify_id" in f_ex)):
+                if not any(real_u(r) for r in turn_rows) and first["role"] == "tool" and (first["tool_name"] == "clarify" or (isinstance(f_ex, dict) and "clarify_id" in f_ex)):
                     cid = int(first["id"])
                     parent_tid = next((r["turn_id"] for r in reversed(rows) if int(r["id"]) < cid and r["role"] == "assistant"), None)
                     restored = {**(f_ex if isinstance(f_ex, dict) else {}), "awaiting_user": False, "undone": True}
