@@ -681,6 +681,8 @@ class ChatTurnActor:
                         wire_msgs, sys_prompt, session_id, current_turn_id, streamer, scope,
                     )
                     self._record_usage(session_id, usage)
+                    if not tool_calls:
+                        self._flush_deferred_proactive(session_id)
                     self.db.append_message(
                         session_id, self.chat_id, "assistant", raw_text,
                         turn_id=current_turn_id, tool_calls=tool_calls or None, extra=msg_extra or None,
@@ -736,6 +738,7 @@ class ChatTurnActor:
 
                     self._active_tool_calls = []
                     if clarify_files_b:
+                        self._flush_deferred_proactive(session_id)
                         c_parts = await run_in_turn_thread(
                             _build_content_parts_sync, "[User attached files with clarify response]", clarify_files_b,
                         )
@@ -751,6 +754,7 @@ class ChatTurnActor:
                             clarify_answer_b, session_id, cur_hist[:-1] if cur_hist else [], internal=False,
                         )
                     if self._steer_queue:
+                        self._flush_deferred_proactive(session_id)
                         steered, self._steer_queue = list(self._steer_queue), []
                         for sm in steered:
                             s_extra: dict[str, Any] = {"steered_turn_id": sm.turn_id}
@@ -763,7 +767,6 @@ class ChatTurnActor:
                                 session_id, self.chat_id, "user", sm.text,
                                 turn_id=current_turn_id, extra=s_extra,
                             )
-                    self._flush_deferred_proactive(session_id)
                 else:
                     self._flush_deferred_proactive(session_id)
                     await self.sink.post_notice(
