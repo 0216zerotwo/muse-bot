@@ -668,6 +668,112 @@ class Pass2SecondOrderFixesTest(unittest.TestCase):
         vite_txt = (repo_root / "web/vite.config.ts").read_text(encoding="utf-8")
         self.assertNotIn("companion/adapter.py", vite_txt)
 
+    # ── 13. Pass-3 proactive flush ordering without & with Steer (#288) ──────
+
+    def test_12_proactive_flush_ordering_without_and_with_steer(self) -> None:
+        from muse.llm.anthropic_messages import convert_messages_to_anthropic
+
+        async def scenario() -> None:
+            iter_wire: list[list[dict[str, Any]]] = []
+            call_num = 0
+
+            async def fake_stream(*, messages: list[dict[str, Any]], **_: Any):
+                nonlocal call_num
+                call_num += 1
+                iter_wire.append([dict(m) for m in messages])
+                if call_num in (1, 3):
+                    yield ToolCallComplete(id=f"tc-p3-{call_num}", name="slow_tool", arguments="{}")
+                    yield StreamDone(finish_reason="tool_calls")
+                else:
+                    yield TextDelta(f"done-{call_num}")
+                    yield StreamDone()
+
+            adapter_ref: list[muse_app.NativeCompanionAdapter] = []
+            chat_ref: list[str] = []
+            with_steer = False
+
+            async def exec_tool(_tc: dict[str, Any], _ctx: Any) -> str:
+                await adapter_ref[0]._engine.deliver_proactive(
+                    chat_ref[0],
+                    "Cron提醒：有新日程",
+                    job_id="job-p3",
+                    attach_to_session=True,
+                )
+                if with_steer:
+                    await adapter_ref[0].submit(chat_ref[0], "Steer: 顺便查一下天气", turn_id="t-steer-p3")
+                return json.dumps({"ok": True})
+
+            with muse_home_override(self.home), mock.patch("companion.modules.router.prefetch", lambda *a, **k: None), mock.patch(
+                "companion.modules.router.on_pre_llm_call", lambda **_: {}
+            ):
+                adapter, chat_id, _ = self._make_host(stream_llm=fake_stream, execute_tool=exec_tool)
+                adapter_ref.append(adapter)
+                chat_ref.append(chat_id)
+                await adapter.startup()
+                try:
+                    actor = adapter._engine.get_actor(chat_id)
+                    db = adapter._engine._ensure_db()
+
+                    # (a) WITHOUT Steer: Iter 2 wire MUST NOT end in role="assistant", while final DB has [tool, assistant(proactive), assistant(final)]
+                    await adapter.submit(chat_id, "执行工具A", turn_id="t-p3-no-steer")
+                    await actor.wait_idle(timeout=5.0)
+
+                    iter2_no_steer = iter_wire[1]
+                    self.assertNotEqual(iter2_no_steer[-1]["role"], "assistant")
+                    self.assertEqual(iter2_no_steer[-1]["role"], "tool")
+                    _, anth_conv_a = convert_messages_to_anthropic(iter2_no_steer, model="claude-opus-4-6")
+                    self.assertEqual(anth_conv_a[-1]["role"], "user")
+
+                    sid = db.get_active_session(chat_id, source="companion")["id"]
+                    rows_a = db.get_messages(sid, active_only=True)
+                    tail_a = [(r["role"], bool((r.get("extra") or {}).get("proactive")), r["content"]) for r in rows_a[-3:]]
+                    self.assertEqual(
+                        tail_a,
+                        [
+                            ("tool", False, '{"ok": true}'),
+                            ("assistant", True, "Cron提醒：有新日程"),
+                            ("assistant", False, "done-2"),
+                        ],
+                    )
+
+                    # (b) WITH Steer: Iter 2 wire & DB MUST be [..., tool, assistant(proactive), user(steer)] ending in role="user"
+                    with_steer = True
+                    await adapter.submit(chat_id, "执行工具B", turn_id="t-p3-with-steer")
+                    await actor.wait_idle(timeout=5.0)
+
+                    iter2_steer = iter_wire[3]
+                    self.assertEqual(
+                        [(m["role"], m["content"]) for m in iter2_steer[-3:]],
+                        [
+                            ("tool", '{"ok": true}'),
+                            ("assistant", "Cron提醒：有新日程"),
+                            ("user", "Steer: 顺便查一下天气"),
+                        ],
+                    )
+                    self.assertEqual(iter2_steer[-1]["role"], "user")
+                    _, anth_conv_b = convert_messages_to_anthropic(iter2_steer, model="claude-opus-4-6")
+                    self.assertEqual(anth_conv_b[-1]["role"], "user")
+
+                    rows_b = db.get_messages(sid, active_only=True)
+                    tail_b = [
+                        (r["role"], bool((r.get("extra") or {}).get("proactive")), r["content"])
+                        for r in rows_b[-4:]
+                    ]
+                    self.assertEqual(
+                        tail_b,
+                        [
+                            ("tool", False, '{"ok": true}'),
+                            ("assistant", True, "Cron提醒：有新日程"),
+                            ("user", False, "Steer: 顺便查一下天气"),
+                            ("assistant", False, "done-4"),
+                        ],
+                    )
+                    self.assertEqual(db.heal_orphan_tool_calls(sid), 0)
+                finally:
+                    await adapter.shutdown()
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()
