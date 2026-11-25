@@ -460,7 +460,14 @@ def get_codex_auth_status() -> dict[str, Any]:
     try:
         creds = resolve_codex_runtime_credentials(read_only=True)
         tok = _clean(creds.get("api_key"))
-        return {"provider": "openai-codex", "logged_in": bool(tok), "base_url": creds.get("base_url") or _codex_base_url(), "source": creds.get("source"), "last_refresh": creds.get("last_refresh"), "auth_mode": "chatgpt"}
+        return {
+            "provider": "openai-codex",
+            "logged_in": bool(tok) and not _codex_access_token_is_expiring(tok, 0),
+            "base_url": creds.get("base_url") or _codex_base_url(),
+            "source": creds.get("source"),
+            "last_refresh": creds.get("last_refresh"),
+            "auth_mode": "chatgpt",
+        }
     except Exception as exc:
         return {"provider": "openai-codex", "logged_in": False, "error": str(exc), "base_url": _codex_base_url(), "auth_mode": "chatgpt"}
 

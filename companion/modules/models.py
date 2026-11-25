@@ -137,9 +137,9 @@ def short_error(text: str, name: str) -> str:
 
 
 def _service(provider: str) -> dict[str, Any]:
-    from muse.config_store import read_raw_config
+    from muse.config_store import load_config
 
-    service = (read_raw_config().get("providers") or {}).get(provider)
+    service = (load_config().get("providers") or {}).get(provider)
     if not isinstance(service, dict) or not service.get("base_url"):
         raise ValueError(f"找不到这个服务：{provider}")
     return service
@@ -181,8 +181,11 @@ async def check_models(names: Optional[list[str]] = None) -> dict[str, Any]:
             await asyncio.to_thread(_check_signed_in, name, preset)
             continue
         try:
+            from muse.config_store import get_env_value
+
             service = _service(preset["provider"])
-            key = os.environ.get(str(service.get("key_env") or ""), "") or str(service.get("api_key") or "")
+            key_env = str(service.get("key_env") or "")
+            key = (get_env_value(key_env) if key_env else None) or str(service.get("api_key") or "")
             base = str(service["base_url"]).rstrip("/")
             messages = [{"role": "user", "content": "ping"}]
             started = time.monotonic()
@@ -236,8 +239,13 @@ def _services() -> dict[str, Any]:
 
 def saved_key_urls() -> set[str]:
     """Addresses whose key is already saved (添加模型 then lets the key field stay empty)."""
-    return {str(entry.get("base_url") or "").rstrip("/") for entry in _services().values()
-            if entry.get("api_key") or os.environ.get(str(entry.get("key_env") or ""))}
+    from muse.config_store import get_env_value
+
+    return {
+        str(entry.get("base_url") or "").rstrip("/")
+        for entry in _services().values()
+        if entry.get("api_key") or (entry.get("key_env") and get_env_value(str(entry["key_env"])))
+    }
 
 
 def _vendor_of(services: dict[str, Any], provider: str) -> Optional[str]:
@@ -468,11 +476,11 @@ def _share_key(service: str, env: str) -> None:
     """Hermes's OpenRouter, xAI, fal and DeepInfra drawing/video backends read their company's usual
     variable (OPENROUTER_API_KEY, XAI_API_KEY, FAL_KEY, DEEPINFRA_API_KEY): make sure it holds the key
     this service uses."""
-    from muse.config_store import read_raw_config, save_env_value
+    from muse.config_store import get_env_value, read_raw_config, save_env_value
 
     own = str(((read_raw_config().get("providers") or {}).get(service) or {}).get("key_env") or "")
-    if own and own != env and os.environ.get(own):
-        save_env_value(env, os.environ[own])
+    if own and own != env and (val := get_env_value(own)):
+        save_env_value(env, val)
 
 
 def _unique(name: str, taken: set[str]) -> str:

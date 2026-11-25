@@ -83,8 +83,10 @@ def _store():
 
 
 def payload() -> dict[str, Any]:
+    from muse.config_store import get_env_value
+
     logins = [m.to_dict() for m in _store().list_items() if m.kind == "login"]
-    keys = [{**k, "set": bool(os.environ.get(k["env"]))} for k in _read_keys()]
+    keys = [{**k, "set": bool(get_env_value(k["env"]))} for k in _read_keys()]
     return {"logins": [{k: m.get(k) for k in ("id", "label", "origin", "identifier", "created_at")} for m in logins],
             "keys": keys}
 
@@ -171,7 +173,9 @@ def _handle_request(args: dict[str, Any], **_: Any) -> str:
             return json.dumps({"success": False, "error": "env 要写这个密钥用的环境变量名，比如 GITHUB_TOKEN"}, ensure_ascii=False)
         if not is_allowed_env_name(env):
             return json.dumps({"success": False, "error": "这个环境变量属于系统或运行配置，不能在这里请求"}, ensure_ascii=False)
-        if os.environ.get(env):
+        from muse.config_store import get_env_value
+
+        if get_env_value(env):
             return json.dumps({"success": True, "exists": True, "note": f"{env} 已经设好了，直接用"}, ensure_ascii=False)
         card["env"] = env
     if reason:

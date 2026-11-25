@@ -274,8 +274,16 @@ class OpenAIResponsesTransport:
         if isinstance(reasoning_config, dict):
             eff = str(reasoning_config.get("effort") or "").strip().lower()
             disabled = reasoning_config.get("enabled") is False or eff == "none"
-            if not disabled and eff in {"low", "medium", "high", "xhigh", "max"}:
-                payload["reasoning"] = {"effort": "high" if eff in {"xhigh", "max"} and issuer != "codex_backend" else eff, "summary": "auto"}
+            if not disabled and eff in {"minimal", "low", "medium", "high", "xhigh", "max", "adaptive"}:
+                if eff == "adaptive":
+                    mapped_eff = "medium"
+                elif eff == "max":
+                    mapped_eff = "xhigh" if issuer == "codex_backend" else "high"
+                elif eff == "xhigh" and issuer != "codex_backend":
+                    mapped_eff = "high"
+                else:
+                    mapped_eff = eff
+                payload["reasoning"] = {"effort": mapped_eff, "summary": "auto"}
             elif disabled and issuer != "codex_backend":
                 payload["reasoning"] = {"effort": "none"}
         for k, v in cleaned_extra.items():

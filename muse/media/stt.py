@@ -196,8 +196,8 @@ def _resolve_language(provider: str, stt_cfg: dict[str, Any], explicit: Optional
         psec.get("language"),
         psec.get("language_code"),
         stt_cfg.get("language"),
-        os.environ.get("MUSE_LOCAL_STT_LANGUAGE"),
-        os.environ.get("HERMES_LOCAL_STT_LANGUAGE"),
+        get_secret("MUSE_LOCAL_STT_LANGUAGE"),
+        get_secret("HERMES_LOCAL_STT_LANGUAGE"),
     ):
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
@@ -207,9 +207,9 @@ def _resolve_language(provider: str, stt_cfg: dict[str, Any], explicit: Optional
 def _resolve_local_command(stt_cfg: dict[str, Any]) -> str:
     local_sec = _section(stt_cfg, "local")
     for candidate in (
-        os.environ.get("MUSE_LOCAL_STT_COMMAND"),
-        os.environ.get("HERMES_LOCAL_STT_COMMAND"),
-        os.environ.get("HERMES_STT_COMMAND"),
+        get_secret("MUSE_LOCAL_STT_COMMAND"),
+        get_secret("HERMES_LOCAL_STT_COMMAND"),
+        get_secret("HERMES_STT_COMMAND"),
         local_sec.get("command"),
     ):
         if isinstance(candidate, str) and candidate.strip():
@@ -253,7 +253,16 @@ def _has_openai_stt(stt_cfg: Optional[dict[str, Any]] = None) -> bool:
     return bool(base and _is_local_url(base))
 
 
-def _has_xai_stt() -> bool:
+def _has_xai_stt(stt_cfg: Optional[dict[str, Any]] = None) -> bool:
+    if _resolve_cloud_key("xai", "XAI_API_KEY", stt_cfg):
+        return True
+    try:
+        from muse.llm.oauth import get_xai_oauth_auth_status
+
+        if get_xai_oauth_auth_status().get("logged_in"):
+            return True
+    except Exception:
+        pass
     return bool(resolve_xai_credentials(prefer_api_key=True).get("api_key"))
 
 

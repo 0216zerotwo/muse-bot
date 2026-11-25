@@ -74,8 +74,10 @@ def _resolve(value: Optional[str]) -> Optional[str]:
     """A config value with a whole ``${VAR}`` reference looked up (None when unset)."""
     if not value:
         return None
+    from muse.config_store import get_env_value
+
     ref = _REF.match(value)
-    return os.environ.get(ref.group(1)) or None if ref else value
+    return get_env_value(ref.group(1)) or None if ref else value
 
 
 # ---------- fields ----------
@@ -136,7 +138,9 @@ def _field_raw(field: dict[str, Any], cfg: Optional[dict[str, Any]]) -> Optional
 def _field_configured(field: dict[str, Any], cfg: Optional[dict[str, Any]]) -> bool:
     if _resolve(_field_raw(field, cfg)):
         return True
-    return bool(field.get("env_var") and os.environ.get(field["env_var"]))
+    from muse.config_store import get_env_value
+
+    return bool(field.get("env_var") and get_env_value(str(field["env_var"])))
 
 
 def _field_payload(field: dict[str, Any], cfg: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -210,8 +214,11 @@ def _materialize(preset: dict[str, Any], values: dict[str, str], existing: Optio
             ref = f"${{{var}}}"
         elif _resolve(_field_raw(field, cfg)):
             continue  # already set
-        elif field.get("env_var") and os.environ.get(field["env_var"]):
-            ref = f"${{{field['env_var']}}}"
+        elif field.get("env_var"):
+            from muse.config_store import get_env_value
+
+            if get_env_value(str(field["env_var"])):
+                ref = f"${{{field['env_var']}}}"
         if ref is None:
             if field.get("required", True):
                 raise ConnectionError_(f"还缺「{field['label']}」")
@@ -366,7 +373,7 @@ def _message(action: str, preset: dict[str, Any], ok: bool = True) -> dict[str, 
 
 def run_action(action: str, name: str, values: dict[str, Any]) -> dict[str, Any]:
     """``enable`` (connect, or resume a paused one), ``disable`` (pause), ``remove``, ``tools``."""
-    from muse.config_store import remove_env_value, save_env_value
+    from muse.config_store import get_env_value, remove_env_value, save_env_value
 
     preset = _preset(name)
     with _LOCK:
@@ -394,7 +401,7 @@ def run_action(action: str, name: str, values: dict[str, Any]) -> dict[str, Any]
                 remove_custom_secrets(name)
             for field in preset.get("fields") or []:
                 var = _env_name(name, field["name"])
-                if os.environ.get(var) is not None:
+                if get_env_value(var) is not None:
                     remove_env_value(var)
             _last_checks.pop(name, None)
         elif action == "tools":
@@ -477,10 +484,13 @@ def add_custom(values: dict[str, Any]) -> dict[str, Any]:
 
 
 def remove_custom_secrets(name: str) -> None:
-    from muse.config_store import remove_env_value
+    from muse.config_store import read_env_values, remove_env_value
 
     prefix = _env_name(name, "")
-    for var in [k for k in os.environ if k.startswith(prefix)]:
+    seen = {k for k in os.environ if k.startswith(prefix)} | {
+        k for k in read_env_values() if k.startswith(prefix)
+    }
+    for var in sorted(seen):
         remove_env_value(var)
 
 

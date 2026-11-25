@@ -45,7 +45,7 @@ _GEMINI_VERSION_RE = re.compile(r"^gemini-(\d+)(?:\.(\d+))?")
 _GEMINI_3_HIDDEN_THOUGHT_TOKEN_FLOOR = 512
 _GEMINI_ENABLED_THOUGHT_TOKEN_FLOOR = 4096
 _STRIP_MSG_KEYS = frozenset({
-    "codex_reasoning_items", "codex_message_items", "tool_name", "effect_disposition", "timestamp",
+    "id", "codex_reasoning_items", "codex_message_items", "tool_name", "effect_disposition", "timestamp",
     "platform_message_id", "message_id", "api_content", "anthropic_content_blocks", "bedrock_content_blocks",
 })
 _STRIP_TC_KEYS = frozenset({"call_id", "response_item_id"})
@@ -437,10 +437,16 @@ class OpenAIChatTransport:
         if is_openai_reasoning_model(model):
             if eff_max is not None:
                 payload["max_completion_tokens"] = eff_max
-            if isinstance(reasoning_config, dict) and reasoning_config.get("enabled") is not False:
+            if isinstance(reasoning_config, dict):
                 eff = str(reasoning_config.get("effort") or "").strip().lower()
-                if eff in {"minimal", "low", "medium", "high", "xhigh"}:
-                    payload["reasoning_effort"] = "high" if eff == "xhigh" else eff
+                off = reasoning_config.get("enabled") is False or eff == "none"
+                if off:
+                    if str(model or "").strip().lower().removeprefix("openai/").startswith("gpt-5"):
+                        payload["reasoning_effort"] = "minimal"
+                elif eff in {"minimal", "low", "medium", "high", "xhigh", "max", "adaptive"}:
+                    payload["reasoning_effort"] = (
+                        "high" if eff in {"xhigh", "max"} else ("medium" if eff == "adaptive" else eff)
+                    )
         else:
             if eff_max is not None:
                 payload["max_tokens"] = eff_max
@@ -455,7 +461,8 @@ class OpenAIChatTransport:
         elif is_openrouter and isinstance(reasoning_config, dict):
             eff = str(reasoning_config.get("effort") or "medium").strip().lower()
             off = reasoning_config.get("enabled") is False or eff == "none"
-            cleaned_extra.setdefault("reasoning", {"enabled": not off, "effort": "none" if off else eff})
+            or_eff = "high" if eff in {"xhigh", "max"} else ("medium" if eff == "adaptive" else eff)
+            cleaned_extra.setdefault("reasoning", {"enabled": not off, "effort": "none" if off else or_eff})
         if gemini_thinking is not None:
             if is_gemini_compat:
                 nested = dict(cleaned_extra.get("extra_body") or {})
@@ -529,6 +536,8 @@ class OpenAIChatTransport:
         self, resp: httpx.Response, tool_reverse: dict[str, str], mistral_mapper: Optional[MistralToolIdMapper],
     ) -> AsyncIterator[StreamEvent]:
         tool_acc: dict[int, dict[str, Any]] = {}
+        id_to_idx: dict[str, int] = {}
+        last_implicit_idx: Optional[int] = None
         msg_extra: Optional[dict[str, Any]] = None
         finish_reason, usage = "stop", None
         async for _, chunk in iter_sse_json(resp):
@@ -552,12 +561,37 @@ class OpenAIChatTransport:
             for tc_d in delta.get("tool_calls") or []:
                 if not isinstance(tc_d, dict):
                     continue
-                idx = int(tc_d.get("index", 0))
-                slot = tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": [], "extra_content": None, "thought_signature": None})
-                if tc_d.get("id"):
-                    raw_id = str(tc_d["id"])
-                    slot["id"] = mistral_mapper.from_wire(raw_id) if mistral_mapper else raw_id
                 fn = tc_d.get("function") if isinstance(tc_d.get("function"), dict) else {}
+                raw_id = str(tc_d["id"]) if tc_d.get("id") else ""
+                mapped_id = (mistral_mapper.from_wire(raw_id) if mistral_mapper else raw_id) if raw_id else ""
+                raw_idx = tc_d.get("index")
+                if mapped_id and mapped_id in id_to_idx:
+                    idx = id_to_idx[mapped_id]
+                elif raw_idx is not None:
+                    cand_idx = int(raw_idx)
+                    existing = tool_acc.get(cand_idx)
+                    if existing and mapped_id and existing["id"] and existing["id"] != mapped_id:
+                        idx = max(tool_acc.keys(), default=-1) + 1
+                    else:
+                        idx = cand_idx
+                elif mapped_id:
+                    if 0 in tool_acc and not tool_acc[0]["id"] and not tool_acc[0]["name"] and not tool_acc[0]["arguments"]:
+                        idx = 0
+                    else:
+                        idx = max(tool_acc.keys(), default=-1) + 1
+                elif fn.get("name") and last_implicit_idx is not None and tool_acc.get(last_implicit_idx, {}).get("name"):
+                    idx = max(tool_acc.keys(), default=-1) + 1
+                elif last_implicit_idx is not None:
+                    idx = last_implicit_idx
+                else:
+                    idx = 0
+                if raw_idx is None:
+                    last_implicit_idx = idx
+                if mapped_id:
+                    id_to_idx[mapped_id] = idx
+                slot = tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": [], "extra_content": None, "thought_signature": None})
+                if mapped_id:
+                    slot["id"] = mapped_id
                 if fn.get("name"):
                     slot["name"] = tool_reverse.get(str(fn["name"]), str(fn["name"]))
                 arg_delta = fn.get("arguments")

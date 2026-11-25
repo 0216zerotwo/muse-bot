@@ -238,8 +238,10 @@ def fetch_deepinfra_video_models(*, timeout: float = 5.0, force_refresh: bool = 
             return list(_deepinfra_video_cache[1])
         if now < _deepinfra_neg_until:
             return []
+    from muse.config_store import get_env_value
+
     headers = {"Accept": "application/json"}
-    if api_key := os.environ.get("DEEPINFRA_API_KEY", "").strip():
+    if api_key := (get_env_value("DEEPINFRA_API_KEY") or "").strip():
         headers["Authorization"] = f"Bearer {api_key}"
     try:
         resp = httpx.get(DEEPINFRA_MODELS_LIST_URL, headers=headers, timeout=httpx.Timeout(float(timeout), connect=min(float(timeout), 5.0)), follow_redirects=True)
