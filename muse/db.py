@@ -454,7 +454,12 @@ class MuseDB:
         data = dict(row)
         data["active"] = bool(data.get("active"))
         data["tool_calls"] = _json_loads(data.get("tool_calls_json"), default=[]) if data.get("tool_calls_json") else []
-        data["extra"] = _json_loads(data.get("extra_json"), default={}) if data.get("extra_json") else {}
+        extra = _json_loads(data.get("extra_json"), default={}) if data.get("extra_json") else {}
+        if isinstance(extra, dict):
+            for rk in ("reasoning_details", "codex_reasoning_items"):
+                if isinstance(extra.get(rk), str) and isinstance(parsed := _json_loads(extra[rk], default=None), list):
+                    extra[rk] = parsed
+        data["extra"] = extra
         return data
 
     def deactivate_messages(self, message_ids: Sequence[int]) -> int:
@@ -577,18 +582,40 @@ class MuseDB:
             sids = sorted(to_deactivate)
             return int(conn.execute(f"UPDATE messages SET active = 0 WHERE id IN ({','.join('?' * len(sids))}) AND active = 1", sids).rowcount)
 
-    def undo_last_exchange(self, session_id: str) -> int:
-        """Soft-delete the latest user exchange (from the last active `role='user'` row to tail)."""
+    def undo_last_exchange(self, session_id: str, turn_id: str | None = None) -> int:
+        """Soft-delete the latest exchange (or `turn_id`), keeping `turn_A` intact when undoing a `clarify` resumption."""
         with self._write_tx() as conn:
-            rows = conn.execute("SELECT id, turn_id, role FROM messages WHERE session_id = ? AND active = 1 ORDER BY id ASC", (session_id,)).fetchall()
+            rows = conn.execute("SELECT id, turn_id, role, tool_name, extra_json FROM messages WHERE session_id = ? AND active = 1 ORDER BY id ASC", (session_id,)).fetchall()
             if not rows:
                 return 0
+            eff_turn = (turn_id or "").strip() or None
+            tail_tid = str(rows[-1]["turn_id"] or "").strip() or None
+            if eff_turn is None and tail_tid:
+                tail_rows = [r for r in rows if r["turn_id"] == tail_tid]
+                f_ex = _json_loads(tail_rows[0]["extra_json"], default={}) if tail_rows else {}
+                if tail_rows and not any(r["role"] == "user" for r in tail_rows) and tail_rows[0]["role"] == "tool" and (tail_rows[0]["tool_name"] == "clarify" or (isinstance(f_ex, dict) and "clarify_id" in f_ex)):
+                    eff_turn = tail_tid
+            if eff_turn and (turn_rows := [r for r in rows if r["turn_id"] == eff_turn]):
+                first = turn_rows[0]
+                f_ex = _json_loads(first["extra_json"], default={})
+                if not any(r["role"] == "user" for r in turn_rows) and first["role"] == "tool" and (first["tool_name"] == "clarify" or (isinstance(f_ex, dict) and "clarify_id" in f_ex)):
+                    cid = int(first["id"])
+                    parent_tid = next((r["turn_id"] for r in reversed(rows) if int(r["id"]) < cid and r["role"] == "assistant"), None)
+                    restored = {**(f_ex if isinstance(f_ex, dict) else {}), "awaiting_user": False, "undone": True}
+                    conn.execute("UPDATE messages SET content = ?, turn_id = ?, extra_json = ? WHERE id = ?", (_INTERRUPTED_TOOL_RESULT, parent_tid, _json_dumps(restored), cid))
+                    deact = [int(r["id"]) for r in rows if int(r["id"]) != cid and (r["turn_id"] == eff_turn or (eff_turn == tail_tid and int(r["id"]) > cid))]
+                    if deact:
+                        conn.execute(f"UPDATE messages SET active = 0 WHERE id IN ({','.join('?' * len(deact))}) AND active = 1", deact)
+                    return len(deact) + 1
+                if eff_turn == tail_tid:
+                    return int(conn.execute("UPDATE messages SET active = 0 WHERE session_id = ? AND active = 1 AND id >= ?", (session_id, int(first["id"]))).rowcount)
+                tids = [int(r["id"]) for r in turn_rows]
+                return int(conn.execute(f"UPDATE messages SET active = 0 WHERE id IN ({','.join('?' * len(tids))}) AND active = 1", tids).rowcount)
             last_user_id = next((int(r["id"]) for r in reversed(rows) if r["role"] == "user"), None)
             if last_user_id is not None:
                 return int(conn.execute("UPDATE messages SET active = 0 WHERE session_id = ? AND active = 1 AND id >= ?", (session_id, last_user_id)).rowcount)
-            tail_turn = rows[-1]["turn_id"]
-            if tail_turn:
-                return int(conn.execute("UPDATE messages SET active = 0 WHERE session_id = ? AND active = 1 AND turn_id = ?", (session_id, tail_turn)).rowcount)
+            if tail_tid:
+                return int(conn.execute("UPDATE messages SET active = 0 WHERE session_id = ? AND active = 1 AND turn_id = ?", (session_id, tail_tid)).rowcount)
             return int(conn.execute("UPDATE messages SET active = 0 WHERE id = ? AND active = 1", (int(rows[-1]["id"]),)).rowcount)
 
     def search_messages(
@@ -960,7 +987,11 @@ def _extract_legacy_snapshot(conn: sqlite3.Connection, fallback_mtime: float) ->
                 extra_obj: dict[str, Any] = {"legacy_key": f"state_db:{sid}:{mr['id']}", **({"content_parts": parts} if parts is not None else {})}
                 for k in extra_fields:
                     if mr[k] not in (None, ""):
-                        extra_obj[k] = _scrub_str(mr[k]) if isinstance(mr[k], str) else mr[k]
+                        if k in ("reasoning_details", "codex_reasoning_items") and isinstance(mr[k], str):
+                            parsed_blk = _json_loads(_scrub_str(mr[k]), default=None)
+                            extra_obj[k] = parsed_blk if isinstance(parsed_blk, list) else _scrub_str(mr[k])
+                        else:
+                            extra_obj[k] = _scrub_str(mr[k]) if isinstance(mr[k], str) else mr[k]
                 tc_raw = mr["tool_calls"]
                 msgs.append((str(mr["platform_message_id"]).strip() if mr["platform_message_id"] else None, str(mr["role"] or "user"), text_content,
                              _scrub_str(tc_raw) if isinstance(tc_raw, str) and tc_raw.strip() else None, str(mr["tool_call_id"]) if mr["tool_call_id"] else None,

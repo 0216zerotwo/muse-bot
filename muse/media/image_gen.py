@@ -84,8 +84,9 @@ def image_success(
     modality: str = "text", extra: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
-        "success": True, "image": image, "model": model, "prompt": prompt,
-        "aspect_ratio": aspect_ratio, "provider": provider, "modality": modality,
+        "success": True, "image": image, "media_tag": f"MEDIA:{image}",
+        "model": model, "prompt": prompt, "aspect_ratio": aspect_ratio,
+        "provider": provider, "modality": modality,
     }
     for k, v in (extra or {}).items():
         out.setdefault(k, v)
@@ -684,7 +685,11 @@ def _handle_image_generate(args: dict[str, Any], **_: Any) -> str:
 
 IMAGE_GENERATE_SCHEMA: dict[str, Any] = {
     "name": "image_generate",
-    "description": "Generate or edit an image from a text prompt using the configured image model.",
+    "description": (
+        "Generate or edit an image from a text prompt using the configured image model. "
+        "To deliver the generated image to the user, include its exact `MEDIA:/abs/path` "
+        "(the returned `media_tag`) on its own line in your reply."
+    ),
     "parameters": {
         "type": "object",
         "properties": {

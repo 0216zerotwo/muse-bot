@@ -184,11 +184,17 @@ async def _open_sdk_session(
         sig = inspect.signature(client_fn)
         if "http_client" in sig.parameters:
             factory = getattr(sh_mod, "create_mcp_http_client", None)
-            timeout = httpx.Timeout(read_timeout, connect=connect_timeout)
+            http_mod = (
+                getattr(sh_mod, "httpx2", None)
+                or (getattr(factory, "__globals__", {}).get("httpx2") if callable(factory) else None)
+                or (getattr(factory, "__globals__", {}).get("httpx") if callable(factory) else None)
+                or httpx
+            )
+            timeout = http_mod.Timeout(read_timeout, connect=connect_timeout)
             if callable(factory):
                 http_client = factory(headers=headers, timeout=timeout)
             else:
-                http_client = httpx.AsyncClient(headers=headers, timeout=timeout)
+                http_client = http_mod.AsyncClient(headers=headers, timeout=timeout)
             await stack.enter_async_context(http_client)
             streams = await stack.enter_async_context(client_fn(url, http_client=http_client))
         else:

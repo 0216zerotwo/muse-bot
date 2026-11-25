@@ -118,65 +118,97 @@ def enable() -> bool:
 
 
 _CLOUD_PROVIDERS: dict[str, tuple[str, Optional[str]]] = {
-    "groq": ("GROQ_API_KEY", "openai"),
-    "openai": ("OPENAI_API_KEY", "openai"),
-    "mistral": ("MISTRAL_API_KEY", "mistralai"),
+    "groq": ("GROQ_API_KEY", None),
+    "openai": ("OPENAI_API_KEY", None),
+    "mistral": ("MISTRAL_API_KEY", None),
     "xai": ("XAI_API_KEY", None),
     "elevenlabs": ("ELEVENLABS_API_KEY", None),
-    "deepinfra": ("DEEPINFRA_API_KEY", "openai"),
+    "deepinfra": ("DEEPINFRA_API_KEY", None),
 }
 
 
 def _raw_stt_config() -> dict[str, Any]:
     try:
-        from muse.config_store import read_raw_config
+        from muse.config_store import load_config
 
-        raw = read_raw_config()
+        raw = load_config()
         stt = raw.get("stt") if isinstance(raw, dict) else None
         return stt if isinstance(stt, dict) else {}
     except Exception:
         return {}
 
 
+def _is_local_url(url: str) -> bool:
+    import ipaddress
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(url).hostname or "").lower()
+        if host == "localhost" or host.endswith((".local", ".lan", ".internal")):
+            return True
+        addr = ipaddress.ip_address(host)
+        return addr.is_loopback or addr.is_private
+    except Exception:
+        return False
+
+
 def _cloud_ready(provider: str, stt: dict[str, Any]) -> bool:
-    import importlib.util
     import sys
 
     transcription_tools = sys.modules.get("muse.media.stt")
     if transcription_tools is not None:
         try:
+            if provider == "openai" and transcription_tools._has_openai_stt(stt):
+                return True
+            if provider == "xai" and transcription_tools._has_xai_stt(stt):
+                return True
             spec = getattr(transcription_tools, "_CLOUD_PROVIDER_SPECS", {}).get(provider)
             if spec is not None and callable(spec[1]) and spec[1]():
                 return True
         except Exception:
             pass
-    env_var, pkg = _CLOUD_PROVIDERS.get(provider, ("", None))
+    env_var, _ = _CLOUD_PROVIDERS.get(provider, ("", None))
     if not env_var:
         return False
-    if pkg and importlib.util.find_spec(pkg) is None:
-        section = stt.get(provider)
-        if not (isinstance(section, dict) and section.get("api_key")):
-            return False
     section = stt.get(provider)
-    env_val = os.environ.get(env_var)
-    if not env_val:
-        try:
-            from muse.config_store import get_env_value
+    sec_dict = section if isinstance(section, dict) else {}
 
-            env_val = get_env_value(env_var)
+    def _env(name: str) -> Optional[str]:
+        val = os.environ.get(name)
+        if not val:
+            try:
+                from muse.config_store import get_env_value
+
+                val = get_env_value(name)
+            except Exception:
+                val = None
+        return val
+
+    key = sec_dict.get("api_key") or stt.get("api_key") or _env(env_var)
+    if not key and provider == "openai":
+        key = _env("VOICE_TOOLS_OPENAI_KEY")
+    if str(key or "").strip():
+        return True
+    if provider == "openai":
+        base = str(sec_dict.get("base_url") or "").strip()
+        return bool(base and _is_local_url(base))
+    if provider == "xai":
+        try:
+            from muse.paths import get_muse_home
+
+            if (get_muse_home() / "auth.json").is_file():
+                from muse.llm.oauth import get_xai_oauth_auth_status
+
+                return bool(get_xai_oauth_auth_status().get("logged_in"))
         except Exception:
-            env_val = None
-    key = (
-        (section.get("api_key") if isinstance(section, dict) else None)
-        or stt.get("api_key")
-        or env_val
-    )
-    return bool(str(key or "").strip())
+            return False
+    return False
 
 
 def stt_available() -> bool:
     """Whether voice speech-to-text can run right now (SenseVoice or another configured STT provider)."""
     import importlib.util
+    from muse.config_store import get_env_value
 
     stt = _raw_stt_config()
     enabled = stt.get("enabled", True)
@@ -190,9 +222,9 @@ def stt_available() -> bool:
         return True
     local_section = stt.get("local")
     local_cmd = bool(
-        os.environ.get("MUSE_LOCAL_STT_COMMAND")
-        or os.environ.get("HERMES_LOCAL_STT_COMMAND")
-        or os.environ.get("HERMES_STT_COMMAND")
+        get_env_value("MUSE_LOCAL_STT_COMMAND")
+        or get_env_value("HERMES_LOCAL_STT_COMMAND")
+        or get_env_value("HERMES_STT_COMMAND")
         or (local_section.get("command") if isinstance(local_section, dict) else None)
     )
     faster_whisper = importlib.util.find_spec("faster_whisper") is not None

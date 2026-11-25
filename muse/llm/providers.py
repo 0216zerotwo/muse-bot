@@ -33,13 +33,14 @@ _ANTHROPIC_MODES = frozenset({"anthropic", "anthropic-messages", "anthropic_mess
 _RESPONSES_MODES = frozenset({"responses", "openai-responses", "openai_responses", "codex_responses", "codex"})
 _CHAT_MODES = frozenset({"openai", "chat", "chat-completions", "chat_completions", "openai-chat"})
 _OPENAI_REASONING_RE = re.compile(r"^(?:openai/)?(?:o1(?:$|[-.])|o3(?:$|[-.])|o4(?:$|[-.])|gpt-5(?:$|[-.]))", re.IGNORECASE)
+_ENV_TEMPLATE_RE = re.compile(r"\$\{([^}]+)\}")
 
 
 def _read_config() -> dict[str, Any]:
     try:
-        from muse.config_store import read_raw_config
+        from muse.config_store import load_config
 
-        data = read_raw_config()
+        data = load_config()
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -57,6 +58,20 @@ def _read_env(name: str) -> str:
     except Exception:
         pass
     return str(os.environ.get(name, "") or "").strip()
+
+
+def _expand_str(val: Any) -> str:
+    s = str(val or "").strip()
+    if "${" not in s:
+        return s
+
+    def _repl(match: re.Match[str]) -> str:
+        ref = match.group(1).strip()
+        var_name = ref[4:].strip() if ref.startswith("env:") else ref
+        resolved = _read_env(var_name) if var_name else ""
+        return resolved if resolved else match.group(0)
+
+    return _ENV_TEMPLATE_RE.sub(_repl, s).strip()
 
 
 def canonical_api_mode(raw: Any) -> Optional[str]:
@@ -148,7 +163,13 @@ def resolve_runtime_provider(
 ) -> dict[str, Any]:
     """Resolve ``m-*`` presets, OAuth subscriptions, or built-in/custom providers into transport kwargs."""
     cfg = config if isinstance(config, dict) else _read_config()
-    model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
+    raw_model_cfg = cfg.get("model")
+    if isinstance(raw_model_cfg, dict):
+        model_cfg: dict[str, Any] = raw_model_cfg
+    elif isinstance(raw_model_cfg, str) and raw_model_cfg.strip():
+        model_cfg = {"default": _expand_str(raw_model_cfg)}
+    else:
+        model_cfg = {}
     providers_cfg = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
     reasoning_overrides = (cfg.get("agent") or {}).get("reasoning_overrides") if isinstance(cfg.get("agent"), dict) else {}
 
@@ -170,18 +191,19 @@ def resolve_runtime_provider(
             resolve_codex_runtime_credentials, resolve_xai_oauth_runtime_credentials,
         )
         creds: dict[str, Any] = {}
-        if not api_key:
+        explicit_key = str(api_key or "").strip()
+        if not explicit_key:
             creds = (
                 resolve_codex_runtime_credentials(refresh_if_expiring=allow_oauth_refresh, read_only=not allow_oauth_refresh)
                 if prov_lower == "openai-codex"
                 else resolve_xai_oauth_runtime_credentials(refresh_if_expiring=allow_oauth_refresh)
             )
         default_url = DEFAULT_CODEX_BASE_URL if prov_lower == "openai-codex" else DEFAULT_XAI_OAUTH_BASE_URL
-        resolved_model = str(target_model or entry.get("model") or model_cfg.get("default") or "").strip()
+        resolved_model = _expand_str(target_model or entry.get("model") or model_cfg.get("default") or "")
         return {
             "provider": prov_lower, "model": resolved_model,
-            "base_url": (base_url or creds.get("base_url") or default_url).strip().rstrip("/"),
-            "api_key": str(api_key or creds.get("api_key") or "").strip(),
+            "base_url": _expand_str(base_url or creds.get("base_url") or default_url).rstrip("/"),
+            "api_key": str(explicit_key or creds.get("api_key") or "").strip(),
             "api_mode": canonical_api_mode(api_mode) or "codex_responses",
             "extra_body": {}, "max_tokens": None, "temperature": None, "extra_headers": {},
             "context_length": entry.get("context_length"),
@@ -192,9 +214,15 @@ def resolve_runtime_provider(
 
     builtin = BUILTIN_PROVIDER_DEFAULTS.get(prov_lower, {})
     same_cfg = str(model_cfg.get("provider") or "").strip().lower() == prov_lower
-    resolved_url = str(base_url or entry.get("base_url") or (model_cfg.get("base_url") if same_cfg else "") or builtin.get("base_url") or "").strip().rstrip("/")
+    resolved_url = _expand_str(
+        base_url or entry.get("base_url") or (model_cfg.get("base_url") if same_cfg else "") or builtin.get("base_url") or ""
+    ).rstrip("/")
     key_env = str(entry.get("key_env") or entry.get("api_key_env") or builtin.get("key_env") or "").strip()
-    resolved_key = str(api_key or (_read_env(key_env) if key_env else "") or entry.get("api_key") or "").strip()
+    resolved_key = str(
+        (str(api_key).strip() if api_key else "")
+        or (_read_env(key_env) if key_env else "")
+        or _expand_str(entry.get("api_key") or "")
+    ).strip()
     raw_mode = api_mode or entry.get("api_mode") or (model_cfg.get("api_mode") if same_cfg else None)
     resolved_mode = detect_api_mode(provider=provider_id, base_url=resolved_url, api_mode=raw_mode)
     if not raw_mode and resolved_mode == "chat_completions" and builtin.get("api_mode") and not base_url and not entry.get("base_url"):
@@ -204,12 +232,12 @@ def resolve_runtime_provider(
         extra_body=entry.get("extra_body") if isinstance(entry.get("extra_body"), dict) else None,
         max_tokens=entry.get("max_tokens"), temperature=entry.get("temperature"),
     )
-    resolved_model = str(target_model or entry.get("model") or model_cfg.get("default") or "").strip()
+    resolved_model = _expand_str(target_model or entry.get("model") or model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or "")
     raw_headers = entry.get("extra_headers")
     return {
         "provider": provider_id, "model": resolved_model, "base_url": resolved_url, "api_key": resolved_key,
         "api_mode": resolved_mode, "extra_body": cleaned_extra, "max_tokens": lifted_max, "temperature": lifted_temp,
-        "extra_headers": {str(k): str(v) for k, v in raw_headers.items() if k and v is not None} if isinstance(raw_headers, dict) else {},
+        "extra_headers": {str(k): _expand_str(v) for k, v in raw_headers.items() if k and v is not None} if isinstance(raw_headers, dict) else {},
         "context_length": entry.get("context_length"),
         "reasoning_effort": reasoning_overrides.get(resolved_model) if isinstance(reasoning_overrides, dict) else None,
         "auth_mode": None, "source": "config" if entry else ("builtin" if builtin else "explicit"),

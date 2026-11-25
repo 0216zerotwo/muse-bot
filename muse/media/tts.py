@@ -193,7 +193,11 @@ def _handle_text_to_speech(args: dict[str, Any], **_: Any) -> str:
 
 TEXT_TO_SPEECH_SCHEMA: dict[str, Any] = {
     "name": "text_to_speech",
-    "description": "Convert text into a spoken audio file (MP3) using OpenAI TTS or edge-tts.",
+    "description": (
+        "Convert text into a spoken audio file (MP3) using OpenAI TTS or edge-tts. "
+        "To deliver the generated audio to the user, include its exact `MEDIA:/abs/path` "
+        "(the returned `media_tag`) on its own line in your reply."
+    ),
     "parameters": {
         "type": "object",
         "properties": {

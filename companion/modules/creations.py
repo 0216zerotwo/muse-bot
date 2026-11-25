@@ -39,6 +39,13 @@ _AUDIO = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus"}
 _INDEX = ".index.json"
 _MEDIA_URL = re.compile(r"https?://[A-Za-z0-9\-._~:/?#@!$&*+,;=%]+")
 _LOCAL_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|/)[^\s\"'<>|*?]+\.[A-Za-z0-9]{2,5}")
+_SPACED_LOCAL_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|/)[^\r\n\"'`<>|*?]*?\.[A-Za-z0-9]{2,5}(?=$|[\s\"'`),;])")
+_QUOTED_LOCAL_PATH = re.compile(r"[\"'`]((?:[A-Za-z]:[\\/]|/)[^\"'`<>|*?\r\n]+\.[A-Za-z0-9]{2,5})[\"'`]")
+_MEDIA_TAG_LINE = re.compile(r"MEDIA:\s*([^\r\n]+)")
+_JSON_MEDIA_KEYS = frozenset({
+    "image", "video", "video_path", "file_path", "audio_path", "audio",
+    "path", "output_path", "media_tag", "url", "image_url", "video_url", "audio_url",
+})
 _MEDIA_TOOL = re.compile(r"(image|video|audio|music|speech|tts)", re.IGNORECASE)
 _SCREENSHOT = re.compile(r"screenshot|^page-\d", re.IGNORECASE)
 _MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024
@@ -184,15 +191,67 @@ def _media_in(text: str) -> tuple[list[str], list[Path]]:
     """Media links and existing local media files mentioned in a tool result."""
     from .secrets_guard import is_secret_path
 
-    urls, files = [], []
-    for match in _MEDIA_URL.finditer(text or ""):
-        url = match.group(0).rstrip(".,;:!?\"')")
-        if kind_of(urlparse(url).path) in ("image", "video", "audio") and url not in urls:
-            urls.append(url)
-    for match in _LOCAL_PATH.finditer(text or ""):
-        path = Path(match.group(0).replace("\\\\", "\\"))
-        if not is_secret_path(path) and kind_of(path.name) in ("image", "video", "audio") and path.is_file() and path not in files:
-            files.append(path)
+    urls: list[str] = []
+    files: list[Path] = []
+    raw_text = text or ""
+
+    def _add_candidate(raw_val: str) -> None:
+        cand = raw_val.strip().strip("\"'`")
+        if cand.upper().startswith("MEDIA:"):
+            cand = cand[6:].strip().strip("\"'`")
+        if not cand:
+            return
+        if cand.lower().startswith(("http://", "https://")):
+            url = cand.rstrip(".,;:!?\"')")
+            if kind_of(urlparse(url).path) in ("image", "video", "audio") and url not in urls:
+                urls.append(url)
+            return
+        with_slashes = cand.replace("\\\\", "\\")
+        for variant in (cand, with_slashes):
+            try:
+                path = Path(variant)
+                if not is_secret_path(path) and kind_of(path.name) in ("image", "video", "audio") and path.is_file():
+                    if path not in files:
+                        files.append(path)
+                    return
+            except (OSError, ValueError):
+                continue
+
+    def _walk_json(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(v, str) and str(k).lower() in _JSON_MEDIA_KEYS:
+                    _add_candidate(v)
+                elif isinstance(v, (dict, list)):
+                    _walk_json(v)
+                elif isinstance(k, str) and str(k).lower() in _JSON_MEDIA_KEYS and isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, str):
+                            _add_candidate(item)
+        elif isinstance(node, list):
+            for item in node:
+                if isinstance(item, str):
+                    _add_candidate(item)
+                elif isinstance(item, (dict, list)):
+                    _walk_json(item)
+
+    stripped = raw_text.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            _walk_json(json.loads(stripped))
+        except ValueError:
+            pass
+
+    for match in _MEDIA_TAG_LINE.finditer(raw_text):
+        _add_candidate(match.group(1))
+    for match in _QUOTED_LOCAL_PATH.finditer(raw_text):
+        _add_candidate(match.group(1))
+    for match in _MEDIA_URL.finditer(raw_text):
+        _add_candidate(match.group(0))
+    for match in _SPACED_LOCAL_PATH.finditer(raw_text):
+        _add_candidate(match.group(0))
+    for match in _LOCAL_PATH.finditer(raw_text):
+        _add_candidate(match.group(0))
     return urls, files
 
 

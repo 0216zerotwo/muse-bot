@@ -268,13 +268,15 @@ def web_search_handler(args: dict[str, Any], **_: Any) -> str:
             {"success": False, "error": "Parameter 'query' is required.", "data": {"web": []}},
             ensure_ascii=False,
         )
+    from muse.config_store import get_env_value
+
     limit = max(1, min(25, int(args.get("max_results") or args.get("count") or 8)))
     region = str(args.get("region") or "wt-wt").strip() or "wt-wt"
     timelimit = str(args["timelimit"]).strip() if args.get("timelimit") else None
-    requested = str(args.get("backend") or os.environ.get("MUSE_WEB_SEARCH_BACKEND") or "auto").lower()
+    requested = str(args.get("backend") or get_env_value("MUSE_WEB_SEARCH_BACKEND") or "auto").lower()
 
-    tavily_key = os.environ.get("TAVILY_API_KEY", "").strip()
-    brave_key = os.environ.get("BRAVE_API_KEY", "").strip()
+    tavily_key = (get_env_value("TAVILY_API_KEY") or "").strip()
+    brave_key = (get_env_value("BRAVE_API_KEY") or "").strip()
 
     try:
         if requested == "tavily" or (requested == "auto" and tavily_key):

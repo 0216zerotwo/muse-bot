@@ -69,8 +69,8 @@ def success_response(
     duration: int = 0, provider: str, extra: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
-        "success": True, "video": video, "model": model, "prompt": prompt,
-        "modality": modality, "aspect_ratio": aspect_ratio,
+        "success": True, "video": video, "media_tag": f"MEDIA:{video}",
+        "model": model, "prompt": prompt, "modality": modality, "aspect_ratio": aspect_ratio,
         "duration": int(duration) if duration else 0, "provider": provider,
     }
     for k, v in (extra or {}).items():
@@ -630,7 +630,11 @@ def _handle_video_generate(args: dict[str, Any], **_: Any) -> str:
 
 VIDEO_GENERATE_SCHEMA: dict[str, Any] = {
     "name": "video_generate",
-    "description": "Generate a video from a text prompt or animate a still image.",
+    "description": (
+        "Generate a video from a text prompt or animate a still image. "
+        "To deliver the generated video to the user, include its exact `MEDIA:/abs/path` "
+        "(the returned `media_tag`) on its own line in your reply."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
