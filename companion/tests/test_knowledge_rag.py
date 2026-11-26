@@ -603,6 +603,25 @@ class KnowledgeServerApiTests(unittest.TestCase):
                     self.assertFalse(res_404["ok"])
                     self.assertEqual(res_404["error"]["status"], 404)
 
+    def test_no_circular_import_across_server_knowledge_and_tools(self):
+        import subprocess
+        import sys
+        from _loader import REPO_ROOT
+
+        for stmt in (
+            "import companion.server; import muse.tools",
+            "import companion.modules.knowledge; import muse.tools",
+            "import muse.tools; import companion.server",
+        ):
+            with self.subTest(stmt=stmt):
+                proc = subprocess.run(
+                    [sys.executable, "-B", "-c", stmt],
+                    cwd=str(REPO_ROOT),
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(proc.returncode, 0, f"{stmt} failed:\n{proc.stderr}")
+
 
 if __name__ == "__main__":
     unittest.main()

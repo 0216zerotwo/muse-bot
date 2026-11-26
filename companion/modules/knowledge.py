@@ -21,8 +21,6 @@ from typing import Any, Iterator
 
 from muse.interceptors import scrub_url_secrets
 from muse.paths import get_muse_home
-from muse.tools import files as file_tools
-from muse.tools.web import html_to_markdown
 
 from . import creations, secrets_guard
 
@@ -346,6 +344,9 @@ def _extract_text(filename: str, data: bytes) -> tuple[str, str, str]:
         raise ValueError(f"不支持的文件格式（{ext or '未知格式'}），请上传文档、表格、演示文稿、Markdown 或代码文件")
 
     if ext in _PDF_EXTS:
+        # 延迟导入 muse.tools，避免与 muse.tools.knowledge 形成启动循环依赖
+        from muse.tools import files as file_tools
+
         with tempfile.TemporaryDirectory(prefix="muse-kb-pdf-") as tmp:
             tmp_path = Path(tmp) / f"doc{ext}"
             tmp_path.write_bytes(data)
@@ -359,6 +360,8 @@ def _extract_text(filename: str, data: bytes) -> tuple[str, str, str]:
         return text, "pdf", ""
 
     if ext in _OFFICE_EXTS:
+        from muse.tools import files as file_tools
+
         with tempfile.TemporaryDirectory(prefix="muse-kb-office-") as tmp:
             tmp_path = Path(tmp) / f"doc{ext}"
             tmp_path.write_bytes(data)
@@ -373,6 +376,8 @@ def _extract_text(filename: str, data: bytes) -> tuple[str, str, str]:
 
     decoded = _decode_text_bytes(data)
     if ext in _HTML_EXTS:
+        from muse.tools.web import html_to_markdown
+
         html_title, md_text = html_to_markdown(decoded)
         if not md_text.strip():
             raise ValueError("网页文档正文为空，无法导入知识库")

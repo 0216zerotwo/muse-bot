@@ -1356,6 +1356,17 @@ export class NanobotClient {
       return;
     }
 
+    if (parsed.event === "chat_forked") {
+      this.knownChats.add(parsed.chat_id);
+      if (this.pendingNewChat && !this.pendingNewChat.temporary) {
+        clearTimeout(this.pendingNewChat.timer);
+        this.pendingNewChat.resolve(parsed.chat_id);
+        this.pendingNewChat = null;
+      }
+      this.dispatch(parsed.chat_id, parsed);
+      return;
+    }
+
     if (parsed.event === "runtime_model_updated") {
       this.emitRuntimeModelUpdate(parsed.model_name || null, parsed.model_preset ?? null);
       return;

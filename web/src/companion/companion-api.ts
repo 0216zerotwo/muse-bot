@@ -987,7 +987,7 @@ export interface ChatSearchHit {
   chat_title: string;
   title?: string;
   main?: boolean;
-  helper?: boolean;
+  helper?: boolean | string;
   role: "user" | "assistant";
   text: string;
   snippet?: string;
