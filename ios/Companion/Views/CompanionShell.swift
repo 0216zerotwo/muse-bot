@@ -245,7 +245,7 @@ struct CompanionRootView: View {
                                 .modifier(FloatingPanel(radius: 22))
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(store.currentChatID != store.mainChatID ? "旁聊操作与导出" : "对话操作与导出")
+                        .accessibilityLabel(store.currentChatID != store.mainChatID ? "旁聊设置与导出" : "更多聊天操作")
                     }
                 }.padding(.horizontal, 16)
             }.padding(.top, 6)

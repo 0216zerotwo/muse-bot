@@ -217,6 +217,7 @@ struct MediaViewer: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
                         .tint(isDarkMediaStage ? .white : CompanionPalette.primary)
+                        .accessibilityLabel("关闭")
                 }
                 ToolbarItemGroup(placement: .primaryAction) {
                     if canImportKnowledge {
