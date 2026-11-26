@@ -10,6 +10,7 @@ enum SpokenText {
             (#"!\[[^\]]*\]\([^)]*\)"#, ""),                       // pictures
             (#"\[([^\]]+)\]\([^)]*\)"#, "$1"),                    // links: their words
             (#"https?://\S+"#, ""),                               // bare addresses
+            (#"\[\d{1,2}\]"#, ""),                                // citation references
             (#"(?m)^\s*\|?\s*:?-{3,}.*$"#, ""),                   // table rules
             (#"\|"#, "，"),                                       // table cells
             (#"(?m)^[ \t]*，[ \t]*|[ \t]*，[ \t]*$"#, ""),             // a row's outer edges
@@ -137,5 +138,64 @@ enum ComposerAutocomplete {
     static func replacingMention(in text: String, with helperName: String) -> String {
         guard mentionQuery(in: text) != nil, let atIndex = text.lastIndex(of: "@") else { return text }
         return String(text[..<atIndex]) + "@\(helperName) "
+    }
+}
+
+/// Multi-span search highlighting supporting backend `matches: [[start, end]]` character intervals.
+enum SearchHighlight {
+    struct Span: Equatable, Sendable {
+        let start: Int
+        let end: Int
+    }
+
+    /// Computes non-overlapping, clamped character spans in `text` from backend `matches` or fallback query.
+    static func resolvedSpans(in text: String, matches: [[Int]]?, fallbackQuery: String) -> [Span] {
+        let length = text.count
+        guard length > 0 else { return [] }
+        if let matches, !matches.isEmpty {
+            var spans: [Span] = []
+            for pair in matches {
+                guard pair.count >= 2 else { continue }
+                let s = max(0, min(length, pair[0]))
+                let e = max(0, min(length, pair[1]))
+                if e > s { spans.append(Span(start: s, end: e)) }
+            }
+            if !spans.isEmpty { return normalize(spans) }
+        }
+        let query = fallbackQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return [] }
+        let tokens = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        var candidates: [String] = [query]
+        for token in tokens where !candidates.contains(where: { $0.caseInsensitiveCompare(token) == .orderedSame }) {
+            candidates.append(token)
+        }
+        var found: [Span] = []
+        for needle in candidates {
+            var searchStart = text.startIndex
+            while searchStart < text.endIndex,
+                  let range = text.range(of: needle, options: .caseInsensitive, range: searchStart..<text.endIndex) {
+                let s = text.distance(from: text.startIndex, to: range.lowerBound)
+                let e = text.distance(from: text.startIndex, to: range.upperBound)
+                if e > s { found.append(Span(start: s, end: e)) }
+                searchStart = range.upperBound
+            }
+        }
+        return normalize(found)
+    }
+
+    private static func normalize(_ spans: [Span]) -> [Span] {
+        let sorted = spans.sorted { lhs, rhs in
+            if lhs.start != rhs.start { return lhs.start < rhs.start }
+            return lhs.end > rhs.end
+        }
+        var merged: [Span] = []
+        for span in sorted {
+            if let last = merged.last, span.start <= last.end {
+                merged[merged.count - 1] = Span(start: last.start, end: max(last.end, span.end))
+            } else {
+                merged.append(span)
+            }
+        }
+        return merged
     }
 }

@@ -141,6 +141,8 @@ struct EmbeddedCardView: View {
     @State private var live = false
     /// Its picture kept on this iPhone from an earlier launch.
     @State private var keptPicture: UIImage?
+    /// Full-screen interactive sheet for complex charts/maps.
+    @State private var expanded = false
 
     /// The card's identity: its content (the same card in another reply is the same card). A content
     /// digest, not `hashValue`, so it is the same on the next launch and the kept picture is found.
@@ -181,6 +183,40 @@ struct EmbeddedCardView: View {
                     .accessibilityLabel(card.title ?? "互动内容")
                     .onAppear { live = true }
             } else { ProgressView("正在加载互动内容…").frame(maxWidth: .infinity, minHeight: height) }
+        }
+        .overlay(alignment: .topTrailing) {
+            if document != nil && error == nil {
+                Button {
+                    live = true
+                    expanded = true
+                    Haptics.selection()
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 30, height: 30)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.10)))
+                }
+                .buttonStyle(.plain)
+                .padding(8)
+                .accessibilityLabel("全屏展开互动卡片")
+            }
+        }
+        .sheet(isPresented: $expanded) {
+            if let document {
+                EmbeddedCardFullScreenSheet(
+                    title: card.title ?? "互动内容",
+                    document: document,
+                    send: send.map { action in
+                        { text in
+                            let sent = action(text)
+                            if sent { expanded = false }
+                            return sent
+                        }
+                    }
+                )
+            }
         }
         .onChange(of: height) { _, value in CardMemory.heights[key] = value }
         .task(id: pictureKey as String) { await restorePicture() }
@@ -252,6 +288,47 @@ struct EmbeddedCardView: View {
 }
 
 @MainActor
+private struct EmbeddedCardFullScreenSheet: View {
+    let title: String
+    let document: String
+    var send: ((String) -> Bool)?
+    @Environment(\.dismiss) private var dismiss
+    @State private var fullHeight: CGFloat = 600
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let error {
+                    ResourceErrorView(message: error) { self.error = nil }
+                } else {
+                    EmbeddedWebSurface(
+                        document: document,
+                        fixedHeight: true,
+                        height: $fullHeight,
+                        error: $error,
+                        send: send,
+                        interactiveFullScreen: true
+                    )
+                    .ignoresSafeArea(edges: .bottom)
+                }
+            }
+            .background(CompanionPalette.background)
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .tint(CompanionPalette.primary)
+    }
+}
+
+@MainActor
 private struct EmbeddedWebSurface: UIViewRepresentable {
     let document: String
     let fixedHeight: Bool
@@ -260,6 +337,7 @@ private struct EmbeddedWebSurface: UIViewRepresentable {
     var send: ((String) -> Bool)?
     /// A picture of the card once it has drawn and settled (charts animate in first).
     var onSnapshot: (UIImage) -> Void = { _ in }
+    var interactiveFullScreen: Bool = false
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -268,7 +346,7 @@ private struct EmbeddedWebSurface: UIViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "companionCard")
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false; webView.backgroundColor = .clear; webView.scrollView.backgroundColor = .clear
-        webView.scrollView.isScrollEnabled = false; webView.allowsLinkPreview = false
+        webView.scrollView.isScrollEnabled = interactiveFullScreen; webView.allowsLinkPreview = false
         webView.navigationDelegate = context.coordinator
         context.coordinator.webView = webView
         context.coordinator.prepare()
@@ -291,6 +369,7 @@ private struct EmbeddedWebSurface: UIViewRepresentable {
         init(_ parent: EmbeddedWebSurface) { self.parent = parent }
         /// Its picture, taken once it has been still for a moment (a later change takes it again).
         func scheduleSnapshot() {
+            guard !parent.interactiveFullScreen else { return }
             snapshotTask?.cancel()
             snapshotTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(1_500))

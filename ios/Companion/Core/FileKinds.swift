@@ -3,23 +3,24 @@ import Foundation
 /// What a file the companion sent is, for its card in the chat (as Muse shows a document: its first
 /// page, then its name and kind): the mark on its icon, the words under its name, how the page is drawn.
 enum FileKind: String, Equatable, Sendable {
-    case pdf, markdown, text, code, table, web, word, sheet, slides, audio, archive, other
+    case pdf, markdown, text, code, table, web, svg, word, sheet, slides, audio, archive, other
 
     static func of(_ name: String) -> FileKind {
         switch FileKinds.ext(name) {
         case "pdf": return .pdf
-        case "md", "markdown", "mdown", "mkd": return .markdown
-        case "txt", "text", "log": return .text
+        case "md", "markdown", "mdown", "mkd", "mdx": return .markdown
+        case "txt", "text", "log", "rst": return .text
         case "csv", "tsv": return .table
         case "html", "htm", "xhtml": return .web
+        case "svg": return .svg
         case "doc", "docx", "rtf", "pages", "odt": return .word
         case "xls", "xlsx", "numbers", "ods": return .sheet
         case "ppt", "pptx", "key", "odp": return .slides
         case "mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "flac", "ogg", "opus", "amr": return .audio
         case "zip", "rar", "7z", "tar", "gz", "tgz": return .archive
-        case "json", "jsonl", "py", "js", "mjs", "ts", "tsx", "jsx", "swift", "sh", "bash", "zsh", "ps1", "bat",
+        case "json", "jsonl", "py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "swift", "sh", "bash", "zsh", "ps1", "bat",
              "yaml", "yml", "toml", "ini", "cfg", "conf", "xml", "css", "scss", "sql", "c", "h", "cc", "cpp", "hpp",
-             "java", "kt", "go", "rs", "rb", "php", "lua", "r", "cs", "vue": return .code
+             "java", "kt", "kts", "go", "rs", "rb", "php", "lua", "r", "cs", "vue": return .code
         default: return .other
         }
     }
@@ -33,6 +34,7 @@ enum FileKind: String, Equatable, Sendable {
         case .code: return "代码"
         case .table, .sheet: return "表格"
         case .web: return "网页"
+        case .svg: return "矢量图"
         case .slides: return "演示文稿"
         case .audio: return "音频"
         case .archive: return "压缩包"
@@ -42,8 +44,8 @@ enum FileKind: String, Equatable, Sendable {
 
     /// Drawn from its own text on this iPhone.
     var isText: Bool { [.markdown, .text, .code, .table].contains(self) }
-    /// Its first page is a picture made on this iPhone (PDF, Office and iWork files, web pages).
-    var isPage: Bool { [.pdf, .word, .sheet, .slides, .web].contains(self) }
+    /// Its first page is a picture made on this iPhone (PDF, Office and iWork files, web pages, SVGs).
+    var isPage: Bool { [.pdf, .word, .sheet, .slides, .web, .svg].contains(self) }
 }
 
 /// A file being written in the turn at work: shown as it will look, before it is sent.
@@ -202,5 +204,56 @@ enum FileKinds {
             .replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
         let outer = EmbeddedCardDocument.policy.replacingOccurrences(of: "frame-src 'none'", with: "frame-src about:")
         return "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"\(outer)\"><meta name=\"color-scheme\" content=\"light\"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#fff}iframe{width:100%;height:100%;border:0;display:block}</style></head><body><iframe title=\"网页预览\" sandbox=\"allow-scripts\" referrerpolicy=\"no-referrer\" srcdoc=\"\(escaped)\"></iframe></body></html>"
+    }
+
+    static func isSVG(name: String?, url: String = "") -> Bool {
+        if let name, ext(name) == "svg" { return true }
+        if ext(url) == "svg" { return true }
+        return url.lowercased().hasPrefix("data:image/svg+xml")
+    }
+
+    static func isHTML(name: String?, url: String = "") -> Bool {
+        let htmlExts = ["html", "htm", "xhtml"]
+        if let name, htmlExts.contains(ext(name)) { return true }
+        if htmlExts.contains(ext(url)) { return true }
+        return url.lowercased().hasPrefix("data:text/html")
+    }
+
+    static func isCodeOrText(name: String?, url: String = "") -> Bool {
+        let candidate = name.flatMap { $0.isEmpty ? nil : $0 } ?? url
+        return FileKind.of(candidate).isText
+    }
+
+    /// Matches `companion/modules/knowledge.py`'s supported document extensions for Knowledge Vault ingestion.
+    static func canImportToKnowledge(name: String?, url: String = "") -> Bool {
+        let candidate = name.flatMap { $0.isEmpty ? nil : $0 } ?? url
+        let extensionName = ext(candidate)
+        let supported: Set<String> = [
+            "pdf", "docx", "xlsx", "pptx", "odt",
+            "html", "htm", "xhtml", "md", "markdown", "mdx",
+            "txt", "csv", "tsv", "json", "jsonl", "yaml", "yml",
+            "xml", "svg", "rst", "log", "ini", "toml", "conf", "cfg",
+            "py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "swift",
+            "java", "kt", "kts", "go", "rs", "sh", "bash", "zsh",
+            "css", "scss", "sql", "c", "h", "cpp", "hpp", "rb", "php",
+        ]
+        if supported.contains(extensionName) { return true }
+        let stem = ((candidate as NSString).lastPathComponent).lowercased()
+        return extensionName.isEmpty && ["readme", "license", "makefile", "dockerfile", "changelog"].contains(stem)
+    }
+
+    /// Sandboxed, script-free HTML wrapper that centers and responsively scales an SVG document.
+    static func svgPage(_ svg: String) -> String {
+        let svgPolicy = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'"
+        var cleaned = svg.trimmingCharacters(in: .whitespacesAndNewlines)
+        cleaned = cleaned.replacingOccurrences(of: #"(?is)<script\b[^>]*>.*?</script\s*>"#, with: "", options: .regularExpression)
+        cleaned = cleaned.replacingOccurrences(of: #"(?is)<script\b[^>]*/>"#, with: "", options: .regularExpression)
+        let inner = "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"\(svgPolicy)\"><style>html,body{margin:0;padding:16px;box-sizing:border-box;width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:#fafafa;overflow:auto}svg{max-width:100%;max-height:100%;width:auto;height:auto;display:block}</style></head><body>\(cleaned)</body></html>"
+        let escaped = inner.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        let outerPolicy = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; frame-src about:; connect-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'"
+        return "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"referrer\" content=\"no-referrer\"><meta http-equiv=\"Content-Security-Policy\" content=\"\(outerPolicy)\"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#fafafa}iframe{width:100%;height:100%;border:0;display:block}</style></head><body><iframe title=\"SVG 预览\" sandbox=\"\" referrerpolicy=\"no-referrer\" srcdoc=\"\(escaped)\"></iframe></body></html>"
     }
 }

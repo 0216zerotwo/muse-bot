@@ -84,7 +84,8 @@ struct MediaAttachment: Identifiable, Codable, Equatable, Sendable {
         let candidate = name.flatMap { $0.isEmpty ? nil : $0 } ?? url
         let clean = candidate.components(separatedBy: CharacterSet(charactersIn: "?#")).first ?? ""
         let ext = (clean as NSString).pathExtension.lowercased()
-        if url.hasPrefix("data:image/") || ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "svg", "tif", "tiff", "heic", "heif"].contains(ext) { self.kind = "image" }
+        if ext == "svg" || url.lowercased().hasPrefix("data:image/svg+xml") { self.kind = "file" }
+        else if url.hasPrefix("data:image/") || ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "tif", "tiff", "heic", "heif"].contains(ext) { self.kind = "image" }
         else if url.hasPrefix("data:video/") || ["mp4", "webm", "mov", "m4v", "avi", "mkv", "3gp"].contains(ext) { self.kind = "video" }
         else { self.kind = ["image", "video", "file"].contains(kind ?? "") ? (kind ?? "file") : "file" }
     }
@@ -94,6 +95,165 @@ struct MediaAttachment: Identifiable, Codable, Equatable, Sendable {
     }
 
     init(from decoder: Decoder) throws { self.init(json: try JSONValue(from: decoder)) }
+}
+
+/// Structured web or knowledge-base citation attached to an assistant reply (`sources`).
+struct CitationSource: Identifiable, Codable, Equatable, Sendable {
+    var id: Int
+    var title: String
+    var url: String
+    var domain: String
+    var snippet: String
+
+    var isKnowledge: Bool { url.hasPrefix("#knowledge:") }
+
+    var knowledgeDocID: String? {
+        guard isKnowledge else { return nil }
+        let raw = String(url.dropFirst("#knowledge:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.isEmpty ? nil : raw
+    }
+
+    var webURL: URL? {
+        guard !isKnowledge, let parsed = URL(string: url),
+              let scheme = parsed.scheme?.lowercased(), ["http", "https"].contains(scheme) else { return nil }
+        return parsed
+    }
+
+    var displayDomain: String {
+        if !domain.isEmpty { return domain }
+        if isKnowledge { return "知识库" }
+        if let host = URL(string: url)?.host, !host.isEmpty {
+            return host.hasPrefix("www.") && host.count > 4 ? String(host.dropFirst(4)) : host
+        }
+        return title.isEmpty ? "来源" : title
+    }
+
+    init(id: Int, title: String, url: String, domain: String = "", snippet: String = "") {
+        self.id = id
+        self.title = title
+        self.url = url
+        self.domain = domain
+        self.snippet = snippet
+    }
+
+    init(json: JSONValue, fallbackID: Int = 1) {
+        let resolvedID = json["id"].intValue ?? fallbackID
+        let rawURL = json["url"].nonemptyString ?? ""
+        let rawDomain = json["domain"].nonemptyString ?? ""
+        let rawTitle = json["title"].nonemptyString ?? (rawDomain.isEmpty ? rawURL : rawDomain)
+        let rawSnippet = json["snippet"].nonemptyString ?? json["description"].nonemptyString ?? ""
+        self.init(id: resolvedID, title: rawTitle, url: rawURL, domain: rawDomain, snippet: rawSnippet)
+    }
+
+    init(from decoder: Decoder) throws {
+        self.init(json: try JSONValue(from: decoder))
+    }
+
+    static func parseList(_ value: JSONValue) -> [CitationSource]? {
+        let records = value.records
+        guard !records.isEmpty else { return nil }
+        var seen: Set<String> = []
+        var items: [CitationSource] = []
+        for (offset, row) in records.enumerated() {
+            let source = CitationSource(json: row, fallbackID: offset + 1)
+            guard !source.url.isEmpty || !source.title.isEmpty else { continue }
+            let dedupKey = source.url.isEmpty ? "\(source.id)|\(source.title)" : source.url
+            if seen.insert(dedupKey).inserted {
+                items.append(source)
+            }
+        }
+        return items.isEmpty ? nil : items
+    }
+}
+
+/// One long-term memory entry returned by `/api/webui/companion/memory` (supports optional `pinned`).
+struct MemoryItem: Identifiable, Codable, Equatable, Sendable {
+    var id: String
+    var file: String
+    var line: String
+    var text: String
+    var pinned: Bool
+
+    init(id: String, file: String, line: String, text: String, pinned: Bool = false) {
+        self.id = id
+        self.file = file
+        self.line = line
+        self.text = text
+        self.pinned = pinned
+    }
+
+    init(json: JSONValue, defaultFile: String = "USER.md") {
+        let file = json["file"].nonemptyString ?? defaultFile
+        let line = json["line"].string ?? json["text"].stringValue
+        let text = json["text"].nonemptyString ?? line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = json["id"].nonemptyString ?? "\(file)|\(line)"
+        let pinned = json["pinned"].boolValue
+        self.init(id: id, file: file, line: line, text: text, pinned: pinned)
+    }
+
+    init(from decoder: Decoder) throws {
+        self.init(json: try JSONValue(from: decoder))
+    }
+}
+
+/// One grouped memory section (`USER.md` / `MEMORY.md`).
+struct MemorySection: Identifiable, Codable, Equatable, Sendable {
+    var file: String
+    var title: String
+    var items: [MemoryItem]
+    var id: String { file }
+
+    init(file: String, title: String, items: [MemoryItem]) {
+        self.file = file
+        self.title = title
+        self.items = items
+    }
+
+    init(json: JSONValue) {
+        let file = json["file"].nonemptyString ?? "USER.md"
+        let title = json["title"].nonemptyString ?? file
+        let parsed = json["items"].records.map { MemoryItem(json: $0, defaultFile: file) }
+            .filter { !$0.text.isEmpty }
+        self.init(file: file, title: title, items: parsed)
+    }
+
+    init(from decoder: Decoder) throws {
+        self.init(json: try JSONValue(from: decoder))
+    }
+
+    static func parseSections(_ payload: JSONValue) -> [MemorySection] {
+        payload["sections"].records.map(MemorySection.init(json:)).filter { !$0.items.isEmpty }
+    }
+}
+
+/// Contextual follow-up prompt suggestions returned by `GET /api/sessions/{key}/followups`.
+struct FollowupsResponse: Codable, Equatable, Sendable {
+    var chatId: String
+    var turnId: String
+    var suggestions: [String]
+
+    init(chatId: String = "", turnId: String = "", suggestions: [String] = []) {
+        self.chatId = chatId
+        self.turnId = turnId
+        self.suggestions = suggestions
+    }
+
+    init(json: JSONValue) {
+        let chatId = json["chat_id"].nonemptyString ?? json["chatId"].nonemptyString ?? ""
+        let turnId = json["turn_id"].nonemptyString ?? json["turnId"].nonemptyString ?? ""
+        var seen: Set<String> = []
+        let items: [String] = json["suggestions"].array.compactMap { entry in
+            guard let text = entry.nonemptyString else { return nil }
+            let key = text.lowercased()
+            guard seen.insert(key).inserted else { return nil }
+            return text
+        }
+        self.init(chatId: chatId, turnId: turnId, suggestions: Array(items.prefix(3)))
+    }
+
+    init(from decoder: Decoder) throws {
+        self.init(json: try JSONValue(from: decoder))
+    }
 }
 
 struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
@@ -107,6 +267,7 @@ struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     var reasoningStreaming = false
     var media: [MediaAttachment] = []
     var source: JSONValue?
+    var sources: [CitationSource]? = nil
     var toolEvents: [JSONValue] = []
     var turnId: String?
     var turnPhase: String?
@@ -133,6 +294,7 @@ struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         reasoningStreaming = json["reasoningStreaming"].boolValue
         media = (json["media"].array + json["images"].array).map(MediaAttachment.init(json:)).filter { !$0.url.isEmpty }
         source = json["source"] == .null ? nil : json["source"]
+        sources = CitationSource.parseList(json["sources"])
         toolEvents = json["toolEvents"].array
         turnId = json["turnId"].string ?? json["turn_id"].string
         turnPhase = json["turnPhase"].string

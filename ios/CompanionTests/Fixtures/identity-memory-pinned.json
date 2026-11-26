@@ -1,0 +1,38 @@
+{
+  "sections": [
+    {
+      "file": "USER.md",
+      "title": "关于你",
+      "items": [
+        {
+          "id": "pin001",
+          "file": "USER.md",
+          "line": "【习惯】回复尽量简洁并附带代码示例",
+          "text": "【习惯】回复尽量简洁并附带代码示例",
+          "pinned": true
+        },
+        {
+          "id": "pin002",
+          "file": "USER.md",
+          "line": "【饮食】不吃香菜",
+          "text": "【饮食】不吃香菜",
+          "pinned": false
+        }
+      ]
+    },
+    {
+      "file": "MEMORY.md",
+      "title": "我记下的",
+      "items": [
+        {
+          "id": "note001",
+          "file": "MEMORY.md",
+          "line": "项目使用 SwiftUI + Xcode 26",
+          "text": "项目使用 SwiftUI + Xcode 26"
+        }
+      ]
+    }
+  ],
+  "changes": [],
+  "learned_at": 1793275841.03
+}

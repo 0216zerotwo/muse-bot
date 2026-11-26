@@ -445,6 +445,8 @@ struct CompanionDocumentSheet: View {
     @State private var note: String?
     @State private var error: String?
     @State private var changes: [JSONValue] = []
+    @State private var memorySections: [MemorySection] = []
+    @State private var showMemoryItems = true
     @State private var showChanges = false
     @State private var discarding = false
 
@@ -487,6 +489,28 @@ struct CompanionDocumentSheet: View {
             } else if editing {
                 TextEditor(text: $text).font(.system(size: 15, design: .monospaced)).scrollContentBackground(.hidden)
                     .padding(.horizontal, 14).accessibilityLabel(kind.file + " 内容").disabled(busy)
+            } else if kind == .memory {
+                VStack(spacing: 0) {
+                    Picker("查看方式", selection: $showMemoryItems) {
+                        Text("条目").tag(true)
+                        Text("全文").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+
+                    if showMemoryItems {
+                        memoryItemsList
+                    } else {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 18) {
+                                (Text("关于这个文件。").bold() + Text(kind.about)).italic().font(.system(size: 14)).foregroundStyle(.secondary)
+                                if showChanges { changeList }
+                                Markdown(text).markdownTextStyle { FontSize(15) }.textSelection(.enabled)
+                            }.padding(.horizontal, 20).padding(.bottom, 30).frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
@@ -505,6 +529,86 @@ struct CompanionDocumentSheet: View {
         .interactiveDismissDisabled(editing && text != original)
         .presentationDetents([.large]).presentationDragIndicator(.hidden).presentationCornerRadius(28)
         .tint(CompanionPalette.primary)
+    }
+
+    @ViewBuilder private var memoryItemsList: some View {
+        List {
+            if showChanges {
+                Section {
+                    changeList
+                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
+            }
+            if memorySections.isEmpty {
+                Section {
+                    Text("还没有记住的条目。聊得越多，伙伴会自动记住重要偏好，也可以点右上角编辑全文添加。")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .listRowBackground(Color.clear)
+                }
+            }
+            ForEach(memorySections) { section in
+                let sortedItems = section.items.filter(\.pinned) + section.items.filter { !$0.pinned }
+                Section(section.title) {
+                    ForEach(sortedItems) { item in
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                if item.pinned {
+                                    Label("已置顶", systemImage: "pin.fill")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(CompanionPalette.primary)
+                                }
+                                Text(item.text)
+                                    .font(.system(size: 15))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Button {
+                                Task { await togglePin(item) }
+                            } label: {
+                                Image(systemName: item.pinned ? "pin.fill" : "pin")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(item.pinned ? CompanionPalette.primary : Color.secondary)
+                                    .frame(width: 32, height: 32)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(busy)
+                            .accessibilityLabel(item.pinned ? "取消置顶" : "置顶记忆")
+                        }
+                        .padding(.vertical, 4)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                Task { await forgetItem(item) }
+                            } label: {
+                                Label("忘掉", systemImage: "trash")
+                            }
+                            Button {
+                                Task { await togglePin(item) }
+                            } label: {
+                                Label(item.pinned ? "取消置顶" : "置顶", systemImage: item.pinned ? "pin.slash" : "pin")
+                            }
+                            .tint(.orange)
+                        }
+                        .contextMenu {
+                            Button(item.pinned ? "取消置顶" : "置顶记忆", systemImage: item.pinned ? "pin.slash" : "pin") {
+                                Task { await togglePin(item) }
+                            }
+                            Button("复制", systemImage: "doc.on.doc") {
+                                UIPasteboard.general.string = item.text
+                                note = "已复制"
+                            }
+                            Button("忘掉", systemImage: "trash", role: .destructive) {
+                                Task { await forgetItem(item) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
     }
 
     @ViewBuilder private var changeList: some View {
@@ -539,8 +643,47 @@ struct CompanionDocumentSheet: View {
         do {
             let value = try await store.getResource(path)
             text = value["text"].stringValue; original = text
-            if kind == .memory { changes = (try? await store.getResource("/api/webui/companion/memory"))?["changes"].records ?? [] }
+            if kind == .memory {
+                let mem = try? await store.getResource("/api/webui/companion/memory")
+                if let mem {
+                    changes = mem["changes"].records
+                    memorySections = MemorySection.parseSections(mem)
+                }
+            }
         } catch { self.error = "文件没能读取，请检查连接后重新打开。" }
+    }
+
+    private func togglePin(_ item: MemoryItem) async {
+        busy = true; error = nil
+        defer { busy = false }
+        do {
+            let updated = try await store.pinMemory(file: item.file, line: item.line, pinned: !item.pinned)
+            memorySections = MemorySection.parseSections(updated)
+            changes = updated["changes"].records
+            note = item.pinned ? "已取消置顶" : "已置顶，整理时将永久保留"
+            Haptics.selection()
+        } catch { self.error = error.localizedDescription }
+    }
+
+    private func forgetItem(_ item: MemoryItem) async {
+        busy = true; error = nil
+        defer { busy = false }
+        do {
+            let updated = try await store.changeResource("companion.memory.forget", payload: [
+                "file": .string(item.file),
+                "line": .string(item.line),
+            ])
+            memorySections = MemorySection.parseSections(updated)
+            changes = updated["changes"].records
+            let doc = try? await store.getResource("/api/webui/companion/memory-doc")
+            if let doc {
+                text = doc["text"].stringValue
+                original = text
+            }
+            note = "已忘掉"
+            saved(Date().timeIntervalSince1970 * 1000)
+            Haptics.selection()
+        } catch { self.error = error.localizedDescription }
     }
 
     private func save() async {

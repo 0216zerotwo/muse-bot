@@ -26,6 +26,8 @@ struct IdentityView: View {
     @State private var grants: [JSONValue] = []
     @State private var soulDate: Double?
     @State private var memoryDate: Double?
+    @State private var memorySections: [MemorySection] = []
+    @State private var pinningMemoryID: String?
     @State private var loaded = false
     @State private var error: String?
     @State private var openTask: ActivityTask?
@@ -68,7 +70,9 @@ struct IdentityView: View {
         .sheet(item: $openJob) { record in
             JobSheet(job: record.value, changed: { jobs = $0 }, editInChat: { editInChat(record.value) })
         }
-        .sheet(item: $openDocument) { kind in
+        .sheet(item: $openDocument, onDismiss: {
+            Task { await loadMemoryEntries() }
+        }) { kind in
             CompanionDocumentSheet(kind: kind) { date in if kind == .soul { soulDate = date } else { memoryDate = date } }
         }
         .sheet(isPresented: $renaming) { RenameSheet() }
@@ -319,6 +323,82 @@ struct IdentityView: View {
                 DocumentCard(kind: .soul, date: soulDate) { openDocument = .soul }
                 DocumentCard(kind: .memory, date: memoryDate) { openDocument = .memory }
             }
+            if !memorySections.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("记住的事").font(.system(size: 16, weight: .semibold))
+                        Spacer()
+                        Button("管理全部") { openDocument = .memory }
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(CompanionPalette.primary)
+                    }
+                    .padding(.top, 8)
+
+                    ForEach(memorySections) { section in
+                        let sortedItems = section.items.filter(\.pinned) + section.items.filter { !$0.pinned }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(section.title)
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            VStack(spacing: 0) {
+                                ForEach(Array(sortedItems.enumerated()), id: \.element.id) { idx, item in
+                                    HStack(alignment: .top, spacing: 10) {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            if item.pinned {
+                                                Label("已置顶", systemImage: "pin.fill")
+                                                    .font(.system(size: 11, weight: .semibold))
+                                                    .foregroundStyle(CompanionPalette.primary)
+                                            }
+                                            Text(item.text)
+                                                .font(.system(size: 14.5))
+                                                .fixedSize(horizontal: false, vertical: true)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                                        Button {
+                                            Task { await togglePin(item) }
+                                        } label: {
+                                            Group {
+                                                if pinningMemoryID == item.id {
+                                                    ProgressView().controlSize(.mini)
+                                                } else {
+                                                    Image(systemName: item.pinned ? "pin.fill" : "pin")
+                                                        .font(.system(size: 14, weight: .semibold))
+                                                        .foregroundStyle(item.pinned ? CompanionPalette.primary : Color.secondary)
+                                                }
+                                            }
+                                            .frame(width: 36, height: 36)
+                                            .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+                                        .disabled(pinningMemoryID != nil)
+                                        .accessibilityLabel(item.pinned ? "取消置顶" : "置顶记忆")
+                                    }
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 10)
+                                    .contextMenu {
+                                        Button(item.pinned ? "取消置顶" : "置顶记忆", systemImage: item.pinned ? "pin.slash" : "pin") {
+                                            Task { await togglePin(item) }
+                                        }
+                                        Button("复制", systemImage: "doc.on.doc") {
+                                            UIPasteboard.general.string = item.text
+                                            Haptics.selection()
+                                        }
+                                        Button("忘掉这条记忆", systemImage: "trash", role: .destructive) {
+                                            Task { await forgetMemory(item) }
+                                        }
+                                    }
+                                    if idx + 1 < sortedItems.count {
+                                        Divider().overlay(CompanionPalette.border).padding(.leading, 14)
+                                    }
+                                }
+                            }
+                            .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 16))
+                            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(CompanionPalette.border))
+                        }
+                    }
+                }
+            }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -334,6 +414,45 @@ struct IdentityView: View {
         triggers = (try? await store.getResource("/api/webui/companion/triggers"))?["triggers"].records ?? []
         soulDate = (try? await store.getResource("/api/webui/companion/soul"))?["updated_at"].doubleValue
         memoryDate = (try? await store.getResource("/api/webui/companion/memory-doc"))?["updated_at"].doubleValue
+        await loadMemoryEntries()
+    }
+
+    private func loadMemoryEntries() async {
+        let value = try? await store.getResource("/api/webui/companion/memory")
+        if let value {
+            memorySections = MemorySection.parseSections(value)
+        }
+    }
+
+    private func togglePin(_ item: MemoryItem) async {
+        guard pinningMemoryID == nil else { return }
+        pinningMemoryID = item.id
+        error = nil
+        defer { pinningMemoryID = nil }
+        do {
+            let updated = try await store.pinMemory(file: item.file, line: item.line, pinned: !item.pinned)
+            memorySections = MemorySection.parseSections(updated)
+            Haptics.selection()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func forgetMemory(_ item: MemoryItem) async {
+        guard pinningMemoryID == nil else { return }
+        pinningMemoryID = item.id
+        error = nil
+        defer { pinningMemoryID = nil }
+        do {
+            let updated = try await store.changeResource("companion.memory.forget", payload: [
+                "file": .string(item.file),
+                "line": .string(item.line),
+            ])
+            memorySections = MemorySection.parseSections(updated)
+            Haptics.selection()
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 
     private func loadApprovals() async {

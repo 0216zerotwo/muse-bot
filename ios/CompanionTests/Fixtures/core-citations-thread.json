@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "projection": "events",
+  "sessionKey": "websocket:example-chat-01",
+  "events": [
+    {
+      "event": "user_message",
+      "text": "帮我调研 FTS5 中文检索方案并结合我的知识库",
+      "turn_id": "turn-cite-1",
+      "created_at_ms": 1793276000000
+    },
+    {
+      "event": "delta",
+      "text": "根据最新资料 [1] 和你的本地白皮书 [2]，",
+      "turn_id": "turn-cite-1",
+      "created_at_ms": 1793276001000
+    },
+    {
+      "event": "message",
+      "text": "根据最新资料 [1] 和你的本地白皮书 [2]，推荐采用 FTS5 trigram + LIKE 混合检索。",
+      "turn_id": "turn-cite-1",
+      "created_at_ms": 1793276002000,
+      "sources": [
+        {
+          "id": 1,
+          "title": "SQLite FTS5 Extension",
+          "url": "https://www.sqlite.org/fts5.html",
+          "domain": "sqlite.org",
+          "snippet": "The trigram tokenizer extends FTS5 to support substring matching."
+        },
+        {
+          "id": 2,
+          "title": "Muse 架构白皮书",
+          "url": "#knowledge:kb_doc_001",
+          "domain": "知识库",
+          "snippet": "采用 SQLite FTS5 trigram 索引结合 CJK LIKE 混合检索。"
+        }
+      ]
+    },
+    {
+      "event": "turn_end",
+      "turn_id": "turn-cite-1",
+      "created_at_ms": 1793276003000
+    }
+  ]
+}

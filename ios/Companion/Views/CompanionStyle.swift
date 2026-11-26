@@ -167,3 +167,24 @@ struct ResourceErrorView: View {
         }.padding(24).frame(maxWidth: .infinity).accessibilityElement(children: .contain)
     }
 }
+
+extension SearchHighlight {
+    /// Renders multi-span search highlights in the app's accent color with bold emphasis.
+    static func styled(_ text: String, matches: [[Int]]?, fallbackQuery: String) -> AttributedString {
+        var result = AttributedString(text)
+        let spans = resolvedSpans(in: text, matches: matches, fallbackQuery: fallbackQuery)
+        for span in spans {
+            guard span.start >= 0, span.end <= text.count, span.end > span.start else { continue }
+            let lower = text.index(text.startIndex, offsetBy: span.start)
+            let upper = text.index(text.startIndex, offsetBy: span.end)
+            if let attrLower = AttributedString.Index(lower, within: result),
+               let attrUpper = AttributedString.Index(upper, within: result),
+               attrLower < attrUpper {
+                result[attrLower..<attrUpper].swiftUI.foregroundColor = CompanionPalette.primary
+                result[attrLower..<attrUpper].swiftUI.backgroundColor = CompanionPalette.primary.opacity(0.14)
+                result[attrLower..<attrUpper].inlinePresentationIntent = .stronglyEmphasized
+            }
+        }
+        return result
+    }
+}
