@@ -23,6 +23,8 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from .modules import chat_branch
+from .modules import chat_export as chat_export_module
 from .modules import chat_search as chat_search_module
 from .modules import automations, avatars, companion_state, computer, connections, creations, feed, helpers, ideas, memory, memory_learn, model_catalog, models, oauth_login, permissions, plans, push, routines, skills_page, stt_sensevoice, triggers, vault, widgets
 from .approvals import SCOPES as APPROVAL_SCOPES
@@ -448,6 +450,21 @@ async def _memory_remember(adapter: "CompanionAdapter", payload: dict[str, Any])
         raise ApiError(400, str(exc)) from None
 
 
+async def _memory_pin(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
+    file, line = payload.get("file"), payload.get("line")
+    pinned = payload.get("pinned")
+    if not isinstance(file, str) or not isinstance(line, str) or not line.strip():
+        raise ApiError(400, "缺少记忆文件或条目内容")
+    if pinned is not None and not isinstance(pinned, bool):
+        raise ApiError(400, "置顶状态格式不正确")
+    try:
+        return await asyncio.to_thread(memory.pin_memory, file, line, pinned)
+    except ValueError as exc:
+        msg = str(exc)
+        status = 400 if ("不支持" in msg or "缺少" in msg) else 404 if "不在了" in msg else 409
+        raise ApiError(status, msg) from None
+
+
 def _companion_events(adapter: "CompanionAdapter") -> list[dict[str, Any]]:
     chat_id = companion_state.read_companion_state().get("chat_id")
     return adapter.store.events(chat_id) if chat_id and adapter.store.exists(chat_id) else []
@@ -476,6 +493,28 @@ async def _creations_hide(adapter: "CompanionAdapter", payload: dict[str, Any]) 
     except ValueError as exc:
         raise ApiError(404, str(exc)) from None
     return await asyncio.to_thread(_creations, adapter)
+
+
+async def _creations_save(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
+    title = str(payload.get("title") or "").strip()
+    content = payload.get("content")
+    fmt = str(payload.get("fmt") or payload.get("format") or "md").strip() or "md"
+    prompt = payload.get("prompt")
+    if not isinstance(content, str) or not content.strip():
+        raise ApiError(400, "作品内容不能为空")
+    if prompt is not None and not isinstance(prompt, str):
+        raise ApiError(400, "提示词格式不正确")
+    try:
+        rel = await asyncio.to_thread(
+            creations.save_artifact,
+            title=title or "画布作品",
+            content=content,
+            fmt=fmt,
+            prompt=prompt,
+        )
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from None
+    return {**(await asyncio.to_thread(_creations, adapter)), "saved_id": rel}
 
 
 def _soul_payload() -> dict[str, Any]:
@@ -721,13 +760,36 @@ async def _feed_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -> 
 
 
 async def _chats_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
-    """A side chat (旁聊): rename or delete it (the main chat is neither); or, in any chat, delete
-    one message (long-press → 删除): the user's, or a reply with what it did on the way."""
+    """A side chat (旁聊): rename or delete it (the main chat is neither); or, in any chat, fork,
+    edit & resubmit a user message, regenerate the last answer, or delete one message."""
     chat_id, action = str(payload.get("id") or ""), payload.get("action")
     if action == "delete" and chat_id and not adapter.store.exists(chat_id):
         return {"sessions": adapter.store.list()}  # already gone (deleted on another device, say)
-    if action not in {"rename", "delete", "delete_message", "regenerate"} or not adapter.store.exists(chat_id):
+    if action not in {"rename", "delete", "delete_message", "regenerate", "fork", "edit_message"} or not chat_id:
         raise ApiError(400, "找不到这个对话，或操作类型不正确")
+    if not adapter.store.exists(chat_id):
+        status = 404 if action in {"fork", "edit_message"} else 400
+        raise ApiError(status, "找不到这个对话" if status == 404 else "找不到这个对话，或操作类型不正确")
+    if action == "fork":
+        turn_id = str(payload.get("turn_id") or payload.get("up_to_turn_id") or "").strip() or None
+        title = str(payload.get("title") or "").strip() or None
+        try:
+            return await asyncio.to_thread(chat_branch.fork_chat, adapter, chat_id, turn_id=turn_id, title=title)
+        except ValueError as exc:
+            raise ApiError(getattr(exc, "status", 404), str(exc)) from None
+    if action == "edit_message":
+        raw_content = payload.get("content") if "content" in payload else payload.get("text")
+        try:
+            return await chat_branch.edit_and_resubmit(
+                adapter,
+                chat_id,
+                turn_id=str(payload.get("turn_id") or ""),
+                content=str(raw_content or ""),
+            )
+        except chat_branch.ChatBusyError as exc:
+            raise ApiError(409, str(exc)) from None
+        except ValueError as exc:
+            raise ApiError(getattr(exc, "status", 400), str(exc)) from None
     if action == "regenerate":  # 重新生成 the last answer
         try:
             await adapter.regenerate(chat_id, str(payload.get("turn_id") or ""))
@@ -861,9 +923,11 @@ MUTATIONS: dict[str, Mutation] = {
     "companion.avatars.from_creation": _avatar_action("from_creation"),
     "companion.avatars.delete": _avatar_action("delete"),
     "companion.creations.hide": _creations_hide,
+    "companion.creations.save": _creations_save,
     "companion.ideas.refresh": _ideas_refresh,
     "companion.memory.forget": _memory_forget,
     "companion.memory.remember": _memory_remember,
+    "companion.memory.pin": _memory_pin,
     "companion.memory.tidy": _memory_tidy,
     "companion.memory.learn": _memory_learn,
     "companion.soul.update": _soul_update,
@@ -990,6 +1054,29 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
         if request.headers.get("if-none-match", "").strip().removeprefix("W/").strip('"') == payload["revision"]:
             return Response(status_code=304, headers={**NO_STORE, "ETag": f'"{payload["revision"]}"'})
         return JSONResponse(payload, headers={**NO_STORE, "ETag": f'"{payload["revision"]}"'})
+
+    async def session_export(request: Request) -> Response:
+        if not authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401, headers=NO_STORE)
+        chat_id = chat_id_of(request.path_params["key"])
+        if not chat_id or not adapter.store.exists(chat_id):
+            return JSONResponse({"error": "not found"}, status_code=404, headers=NO_STORE)
+        fmt = (request.query_params.get("format") or "md").strip().lower()
+        if fmt not in ("md", "json"):
+            return JSONResponse({"error": "不支持的导出格式，仅支持 md 或 json"}, status_code=400, headers=NO_STORE)
+        exported = await asyncio.to_thread(chat_export_module.export_chat, adapter.store, chat_id)
+        if fmt == "json":
+            return JSONResponse(exported, headers=NO_STORE)
+        from urllib.parse import quote
+
+        filename = chat_export_module.export_filename(exported["title"], chat_id, "md")
+        ascii_name = f"chat-{chat_id[:8]}.md"
+        disposition = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
+        return Response(
+            exported["markdown"],
+            media_type="text/markdown; charset=utf-8",
+            headers={**NO_STORE, "Content-Disposition": disposition},
+        )
 
     async def companion(request: Request) -> Response:
         if not authorized(request):
@@ -1187,6 +1274,7 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
         Route("/api/webui/devices", guarded(lambda: {"devices": adapter.devices.list()})),
         Route("/api/sessions", sessions),
         Route("/api/sessions/{key}/webui-thread", thread),
+        Route("/api/sessions/{key}/export", session_export),
         Route("/api/webui/companion", companion),
         Route("/api/webui/approvals", approvals),
         Route("/api/webui/companion/search", chat_search),
@@ -1252,6 +1340,32 @@ async def _handle_frame(adapter: "CompanionAdapter", socket: WebSocket, frame: d
         chat_id = adapter.store.create()
         adapter.attach(chat_id, socket)
         await socket.send_json({"event": "attached", "chat_id": chat_id})
+    elif kind == "fork_chat":
+        src_chat_id = str(frame.get("source_chat_id") or frame.get("chat_id") or "").strip()
+        up_to_turn_id = str(frame.get("up_to_turn_id") or frame.get("turn_id") or "").strip() or None
+        raw_before = frame.get("before_user_index")
+        before_idx = int(raw_before) if isinstance(raw_before, int) and not isinstance(raw_before, bool) else None
+        title = str(frame.get("title") or "").strip() or None
+        try:
+            forked = await asyncio.to_thread(
+                chat_branch.fork_chat,
+                adapter,
+                src_chat_id,
+                turn_id=up_to_turn_id,
+                title=title,
+                before_user_index=before_idx,
+            )
+        except ValueError as exc:
+            await socket.send_json({"event": "error", "detail": "fork_failed", "reason": str(exc), "chat_id": src_chat_id})
+            return
+        adapter.attach(forked["chat_id"], socket)
+        await socket.send_json({
+            "event": "chat_forked",
+            "chat_id": forked["chat_id"],
+            "source_chat_id": src_chat_id,
+            "key": forked["key"],
+            "sessions": forked["sessions"],
+        })
     elif kind == "attach":
         chat_id = str(frame.get("chat_id") or "")
         if chat_id:

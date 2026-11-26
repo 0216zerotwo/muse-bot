@@ -30,7 +30,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .llm import ask_json
-from .memory import _LOCK, _entries, _store
+from .memory import _LOCK, _entries, _store, is_pinned
 from .memory_tidy import _CHANGES_KEPT, _META_LOCK, _read_meta, _write_meta, mark_seen
 
 logger = logging.getLogger(__name__)
@@ -136,7 +136,7 @@ def _plan(entries: list[str], proposal: dict[str, Any], protected: set[str]) -> 
 
     def usable(index: Any) -> bool:
         return isinstance(index, int) and 1 <= index <= len(entries) and index not in used \
-            and entries[index - 1] not in protected
+            and entries[index - 1] not in protected and not is_pinned("USER.md", entries[index - 1])
 
     for item in proposal.get("update") or []:
         if not isinstance(item, dict) or not usable(item.get("id")):
@@ -231,7 +231,7 @@ def learn(chat_store: Any, force: bool = False) -> dict[str, Any]:
         store = _store()
         entries = [e for e in _entries(store, "user") if e.strip()]
         notes = [e for e in _entries(store, "memory") if e.strip()]
-        protected = set(meta["user_written"])
+        protected = set(meta["user_written"]) | {e for e in entries if is_pinned("USER.md", e)}
         lines = "\n".join(f"{i}. {'【用户写的】' if e in protected else ''}{' '.join(e.split())}"
                           for i, e in enumerate(entries, 1))
         if notes:

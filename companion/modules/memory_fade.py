@@ -19,7 +19,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-from .memory import _LOCK, _TARGETS, _entries, _store
+from .memory import _LOCK, _TARGETS, _entries, _store, is_pinned
 from .memory_tidy import (_CHANGES_KEPT, _META_LOCK, _failed, _only_source_words, _read_meta, _write_meta,
                           entry_key, seen_at)
 
@@ -54,14 +54,16 @@ def plan(entries: dict[str, list[str]], meta: dict[str, Any], now: float) -> tup
     never seen before starts its clock now (recorded in ``meta``)."""
     protected = set(meta["user_written"])
     faded = set(meta["faded"])
+    target_files = {target: file for file, (target, _) in _TARGETS.items()}
     shorten, forget = [], []
     for target, items in entries.items():
+        file = target_files.get(target, "")
         for entry in items:
             since = seen_at(meta, entry)
             if since is None:
                 meta["seen_at"][entry_key(entry)] = since = now
             policy = _policy(target, entry)
-            if policy is None or entry in protected:
+            if policy is None or entry in protected or (file and is_pinned(file, entry)):
                 continue
             idle = int((now - since) // _DAY_S)
             if idle >= policy[1]:

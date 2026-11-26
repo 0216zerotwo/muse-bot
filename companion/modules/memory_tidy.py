@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .fs_atomic import atomic_write_json
-from .memory import _LOCK, _TARGETS, _entries, _store
+from .memory import _LOCK, _TARGETS, _entries, _store, is_pinned
 from .paths import get_webui_dir
 
 logger = logging.getLogger(__name__)
@@ -149,15 +149,26 @@ def _only_source_words(text: str, sources: list[str]) -> bool:
     return all(token.lower() in pool for token in _WORD.findall(text))
 
 
-def _plan(entries: list[str], proposal: dict[str, Any], protected: set[str]) -> list[dict[str, Any]]:
+def _plan(
+    entries: list[str],
+    proposal: dict[str, Any],
+    protected: set[str],
+    *,
+    file: Optional[str] = None,
+) -> list[dict[str, Any]]:
     """The allowed changes, in order, within this pass's budget."""
     budget = max(2, len(entries) // 5)
     used: set[int] = set()
     changes: list[dict[str, Any]] = []
+    check_files = (file,) if file else tuple(_TARGETS)
 
     def usable(index: Any) -> bool:
-        return isinstance(index, int) and 1 <= index <= len(entries) and index not in used \
-            and entries[index - 1] not in protected
+        if not (isinstance(index, int) and 1 <= index <= len(entries) and index not in used):
+            return False
+        entry = entries[index - 1]
+        if entry in protected:
+            return False
+        return not any(is_pinned(f, entry) for f in check_files)
 
     for merge in proposal.get("merge") or []:
         if not isinstance(merge, dict):
@@ -228,13 +239,14 @@ def tidy(force: bool = False) -> dict[str, Any]:
             entries = _all_entries()[target]
             if len(entries) < 2:
                 continue
+            file_protected = protected | {e for e in entries if is_pinned(file, e)}
             try:
-                proposal = _propose(entries, protected)
+                proposal = _propose(entries, file_protected)
             except Exception as exc:  # no model right now: try again at the next due time
                 logger.info("companion: memory tidy has no model (%s)", type(exc).__name__)
                 failed_targets.add(target)
                 continue
-            for change in _plan(entries, proposal, protected):
+            for change in _plan(entries, proposal, file_protected, file=file):
                 with _LOCK:
                     error = _failed(_store().apply_batch(target, _ops(change)))
                 if error:
