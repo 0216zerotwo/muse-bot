@@ -10,13 +10,123 @@ scan on new entries apply to what the user adds here too.
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
+from pathlib import Path
 from typing import Any
+
+from .fs_atomic import atomic_write_json
+from .paths import get_webui_dir
 
 # file -> (Hermes memory target, section title in the app)
 _TARGETS = {"USER.md": ("user", "关于你"), "MEMORY.md": ("memory", "我记下的")}
 _MAX_REMEMBER_CHARS = 500
 _LOCK = threading.Lock()
+_PIN_LOCK = threading.RLock()
+
+
+def _pins_path() -> Path:
+    return get_webui_dir() / "memory_pins.json"
+
+
+def _norm_pin_entry(entry: str) -> str:
+    return " ".join(str(entry or "").split())
+
+
+def _read_pins() -> dict[str, list[str]]:
+    try:
+        raw = json.loads(_pins_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    out: dict[str, list[str]] = {}
+    for file in _TARGETS:
+        items = raw.get(file)
+        if isinstance(items, list):
+            out[file] = [str(x) for x in items if isinstance(x, str) and x.strip()]
+        else:
+            out[file] = []
+    return out
+
+
+def _write_pins(data: dict[str, list[str]]) -> None:
+    atomic_write_json(_pins_path(), {file: data.get(file, []) for file in _TARGETS})
+
+
+def is_pinned(file: str, entry: str) -> bool:
+    """True when ``entry`` in ``file`` is pinned by the user and protected from tidy/fade."""
+    if file not in _TARGETS or not isinstance(entry, str) or not entry.strip():
+        return False
+    norm = _norm_pin_entry(entry)
+    stripped = entry.strip()
+    with _PIN_LOCK:
+        saved = _read_pins().get(file, [])
+    return any(item == entry or item.strip() == stripped or _norm_pin_entry(item) == norm for item in saved)
+
+
+def _drop_pins(file: str, entries: list[str]) -> None:
+    if file not in _TARGETS:
+        return
+    gone_raw = {str(e) for e in entries if e}
+    gone_norm = {_norm_pin_entry(e) for e in gone_raw if e.strip()}
+    if not gone_norm:
+        return
+    with _PIN_LOCK:
+        pins = _read_pins()
+        current = pins.get(file, [])
+        kept = [
+            item
+            for item in current
+            if item not in gone_raw and item.strip() not in gone_raw and _norm_pin_entry(item) not in gone_norm
+        ]
+        if len(kept) != len(current):
+            pins[file] = kept
+            _write_pins(pins)
+
+
+def pin_memory(file: str, line: str, pinned: bool | None = None) -> dict[str, Any]:
+    """Pin, unpin, or toggle ``line`` in ``file``, persisted atomically in ``memory_pins.json``."""
+    if file not in _TARGETS:
+        raise ValueError("不支持这个记忆文件")
+    if not isinstance(line, str) or not line.strip():
+        raise ValueError("缺少记忆条目内容")
+    target = _TARGETS[file][0]
+    norm_line = _norm_pin_entry(line)
+    with _LOCK:
+        entries = _entries(_store(), target)
+    canonical = next(
+        (
+            e
+            for e in entries
+            if e == line or e.strip() == line.strip() or _norm_pin_entry(e) == norm_line
+        ),
+        None,
+    )
+    if canonical is None:
+        if pinned is False and is_pinned(file, line):
+            _drop_pins(file, [line, line.strip()])
+            return {**read_memory(), "pinned": False}
+        raise ValueError("这条记忆已经不在了，刷新一下再试")
+
+    with _PIN_LOCK:
+        pins = _read_pins()
+        current = pins.get(file, [])
+        already = any(
+            item == canonical or item.strip() == canonical.strip() or _norm_pin_entry(item) == norm_line
+            for item in current
+        )
+        next_pinned = (not already) if pinned is None else bool(pinned)
+        filtered = [
+            item
+            for item in current
+            if item != canonical and item.strip() != canonical.strip() and _norm_pin_entry(item) != norm_line
+        ]
+        if next_pinned:
+            filtered.append(canonical)
+        pins[file] = filtered
+        _write_pins(pins)
+    return {**read_memory(), "pinned": next_pinned}
 
 
 def _store():
@@ -42,7 +152,13 @@ def read_memory() -> dict[str, Any]:
     sections = []
     for file, (target, title) in _TARGETS.items():
         items = [
-            {"id": _item_id(file, entry), "file": file, "line": entry, "text": " ".join(entry.split())}
+            {
+                "id": _item_id(file, entry),
+                "file": file,
+                "line": entry,
+                "text": " ".join(entry.split()),
+                "pinned": is_pinned(file, entry),
+            }
             for entry in _entries(store, target) if entry.strip()
         ]
         if items:
@@ -74,6 +190,7 @@ def forget_memory(file: str, line: str) -> dict[str, Any]:
     from .memory_tidy import drop_user_written
 
     drop_user_written([line, line.strip()])
+    _drop_pins(file, [line, line.strip()])
     return read_memory()
 
 
@@ -217,6 +334,7 @@ def write_memory_doc(text: str) -> dict[str, Any]:
                 raise ValueError(f"{_TARGETS[file][1]}：{error}")
             if removed:
                 drop_user_written([*removed, *(e.strip() for e in removed)])
+                _drop_pins(file, [*removed, *(e.strip() for e in removed)])
             for entry in added:
                 note_user_written(entry)
     return read_memory_doc()

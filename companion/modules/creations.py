@@ -49,9 +49,35 @@ _JSON_MEDIA_KEYS = frozenset({
 _MEDIA_TOOL = re.compile(r"(image|video|audio|music|speech|tts)", re.IGNORECASE)
 _SCREENSHOT = re.compile(r"screenshot|^page-\d", re.IGNORECASE)
 _MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024
+_MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 _DOWNLOAD_TIMEOUT_S = 180
 _MAX_REDIRECTS = 3
 _LOCK = threading.Lock()
+_ARTIFACT_FORMATS: dict[str, str] = {
+    "html": ".html",
+    "htm": ".html",
+    "svg": ".svg",
+    "md": ".md",
+    "markdown": ".md",
+    "mermaid": ".mmd",
+    "mmd": ".mmd",
+    "txt": ".txt",
+    "text": ".txt",
+    "json": ".json",
+    "csv": ".csv",
+    "py": ".py",
+    "python": ".py",
+    "js": ".js",
+    "javascript": ".js",
+    "ts": ".ts",
+    "typescript": ".ts",
+    "tsx": ".tsx",
+    "css": ".css",
+    "sh": ".sh",
+    "bash": ".sh",
+    "yaml": ".yaml",
+    "yml": ".yaml",
+}
 
 
 def creations_root() -> Path:
@@ -85,10 +111,10 @@ def _read_index(root: Path) -> dict[str, Any]:
 
 
 def _write_index(root: Path, data: dict[str, Any]) -> None:
+    from .fs_atomic import atomic_write_json
+
     root.mkdir(parents=True, exist_ok=True)
-    tmp = root / f"{_INDEX}.tmp"
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, root / _INDEX)
+    atomic_write_json(root / _INDEX, data)
 
 
 def safe_title(text: str, limit: int = 40) -> str:
@@ -137,6 +163,53 @@ def import_file(source: Path, *, key: str, title: str, origin: str, prompt: Opti
         data["entries"][rel] = {
             "title": title, "origin": origin, "prompt": prompt,
             "created_at": created_at or datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        _write_index(root, data)
+        return rel
+
+
+def save_artifact(
+    *,
+    title: str,
+    content: str,
+    fmt: str = "md",
+    prompt: str | None = None,
+) -> str:
+    """Save a canvas/code artifact directly into ``创意`` and return its relative id."""
+    from muse.interceptors import scrub_url_secrets
+    from .fs_atomic import atomic_write_text
+
+    norm_fmt = str(fmt or "md").strip().lower().lstrip(".")
+    suffix = _ARTIFACT_FORMATS.get(norm_fmt)
+    if suffix is None:
+        raise ValueError(f"不支持的作品格式：{fmt}")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("作品内容不能为空")
+    try:
+        encoded = content.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("作品内容不是有效的 UTF-8 文本") from exc
+    if len(encoded) > _MAX_ARTIFACT_BYTES:
+        raise ValueError("作品内容不能超过 2MB")
+
+    clean_content = scrub_url_secrets(content)
+    clean_prompt = scrub_url_secrets(prompt.strip()) if isinstance(prompt, str) and prompt.strip() else None
+    clean_title = safe_title(str(title or "").strip() or "画布作品", 40)
+    kind = "image" if suffix == ".svg" else "document"
+
+    root = creations_root()
+    with _LOCK:
+        target = _place(root, kind, clean_title, suffix)
+        if root.resolve() not in target.resolve().parents:
+            raise ValueError("保存路径不合法")
+        atomic_write_text(target, clean_content)
+        rel = target.relative_to(root).as_posix()
+        data = _read_index(root)
+        data["entries"][rel] = {
+            "title": clean_title,
+            "origin": "canvas",
+            "prompt": clean_prompt,
+            "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         }
         _write_index(root, data)
         return rel

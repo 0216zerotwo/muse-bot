@@ -159,12 +159,82 @@ class ChatStore:
                 # A helper's working chat (see modules.helpers): not one of the user's side chats.
                 **({"helper": meta["helper"]} if meta.get("helper") else {}),
                 **({"group": True} if meta.get("group") else {}),
+                **({"forked_from": meta["forked_from"]} if meta.get("forked_from") else {}),
             }
             for chat_id, meta in self._read_index().items()
             if not meta.get("desk") and not meta.get("cron") and not chat_id.startswith("cron:")
         ]
         rows.sort(key=lambda row: row["updated_at"] or "", reverse=True)
         return rows
+
+    def clone_chat(
+        self,
+        src_chat_id: str,
+        events: list[dict[str, Any]],
+        *,
+        title: Optional[str] = None,
+        forked_from: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """Atomically create a new side chat pre-populated with ``events`` cloned from ``src_chat_id``."""
+        new_chat_id = str(uuid.uuid4())
+        now_ms = int(time.time() * 1000)
+        stamped = [
+            {**e, "chat_id": new_chat_id, "created_at_ms": e.get("created_at_ms") or now_ms}
+            for e in events
+        ]
+        with self._lock:
+            index = self._read_index()
+            src_meta = index.get(src_chat_id) or {}
+            clean_title = " ".join((title or "").split())[:30]
+            if not clean_title:
+                orig_title = str(src_meta.get("title") or "").strip()
+                clean_title = f"{(orig_title or '对话')[:10]} · 分叉"
+            _atomic_write_text(
+                self._path(new_chat_id),
+                "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in stamped),
+            )
+            now = _now_iso()
+            entry: dict[str, Any] = {
+                "created_at": now,
+                "updated_at": now,
+                "title": clean_title,
+                "preview": _latest_preview(stamped),
+                "rev": 1,
+            }
+            if forked_from is not None:
+                entry["forked_from"] = dict(forked_from)
+            index[new_chat_id] = entry
+            self._write_index(index)
+        return new_chat_id
+
+    def replace_events(self, chat_id: str, events: list[dict[str, Any]]) -> None:
+        """Atomically replace ``chat_id``'s transcript events and bump revision / ``removed_at_ms``."""
+        now_ms = int(time.time() * 1000)
+        stamped = [
+            {**e, "chat_id": e.get("chat_id") or chat_id, "created_at_ms": e.get("created_at_ms") or now_ms}
+            for e in events
+        ]
+        with self._lock:
+            path = self._path(chat_id)
+            prev_max_ms = 0
+            if path.is_file():
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    with contextlib.suppress(ValueError):
+                        prev_max_ms = max(prev_max_ms, int(json.loads(line).get("created_at_ms") or 0))
+            _atomic_write_text(
+                path,
+                "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in stamped),
+            )
+            index = self._read_index()
+            if chat_id in index:
+                meta = index[chat_id]
+                meta["updated_at"] = _now_iso()
+                meta["preview"] = _latest_preview(stamped)
+                meta["rev"] = int(meta.get("rev") or 0) + 1
+                meta["removed_at_ms"] = max(now_ms, prev_max_ms + 1)
+                self._write_index(index)
 
     def _touch(self, chat_id: str, preview: str | None, *, bump_rev: bool = True) -> None:
         index = self._read_index()
