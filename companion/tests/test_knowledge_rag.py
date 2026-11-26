@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import sqlite3
-import sys
 import tempfile
-import types
 import unittest
 import zipfile
 from pathlib import Path
 from unittest import mock
 
-from _loader import load, temp_dir  # noqa: E402
+from starlette.testclient import TestClient
+
+from _loader import chat_store, load, temp_dir  # noqa: E402
 from muse.paths import muse_home_override
 from muse.tools import CORE_TOOLSETS, create_default_tool_registry
+from muse.tools.citations import get_turn_citations, turn_citations_scope
 from muse.tools.knowledge import knowledge_list_handler, knowledge_search_handler
+from test_auth_devices import _companion_pkg
 
 
 def _make_minimal_docx(paragraphs: list[str]) -> bytes:
@@ -414,20 +417,19 @@ class KnowledgeEngineAndRagTests(unittest.TestCase):
             self.assertTrue(listed["success"])
             self.assertEqual(listed["stats"]["doc_count"], 1)
 
-            # Simulate muse.tools.citations presence (Phase 2 integration check)
-            recorded: list[list[dict[str, str]]] = []
-            fake_citations = types.ModuleType("muse.tools.citations")
-            fake_citations.record_citations = lambda items: recorded.append(list(items))
-            with mock.patch.dict(sys.modules, {"muse.tools.citations": fake_citations}):
+            # Real muse.tools.citations ContextVar propagation across asyncio.to_thread
+            with turn_citations_scope():
                 raw_hit = asyncio.run(reg.dispatch("knowledge_search", {"query": "差旅发票", "limit": 3}))
+                citations = get_turn_citations()
             parsed = json.loads(raw_hit)
             self.assertTrue(parsed["success"])
             self.assertEqual(parsed["count"], 1)
             self.assertIn("[K1] 《员工手册》（行政 / 入职手册 / 报销规范）", parsed["formatted"])
-            self.assertEqual(len(recorded), 1)
-            self.assertEqual(recorded[0][0]["url"], f"#knowledge:{doc['id']}")
-            self.assertEqual(recorded[0][0]["domain"], "知识库 · 行政")
-            self.assertEqual(recorded[0][0]["title"], "员工手册 · 入职手册 / 报销规范")
+            self.assertEqual(len(citations), 1)
+            self.assertEqual(citations[0]["id"], 1)
+            self.assertEqual(citations[0]["url"], f"#knowledge:{doc['id']}")
+            self.assertEqual(citations[0]["domain"], "知识库 · 行政")
+            self.assertEqual(citations[0]["title"], "员工手册 · 入职手册 / 报销规范")
 
             # Empty query returns structured error; no-hit query succeeds cleanly
             err = json.loads(knowledge_search_handler({"query": ""}))
@@ -435,6 +437,171 @@ class KnowledgeEngineAndRagTests(unittest.TestCase):
             empty_list = json.loads(knowledge_list_handler({"collection": "不存在"}))
             self.assertTrue(empty_list["success"])
             self.assertEqual(empty_list["stats"]["doc_count"], 0)
+
+
+class KnowledgeServerApiTests(unittest.TestCase):
+    def setUp(self):
+        pkg = _companion_pkg()
+        auth_mod = importlib.import_module(f"{pkg}.auth")
+        devices_mod = importlib.import_module(f"{pkg}.devices")
+        media_mod = importlib.import_module(f"{pkg}.media")
+        approvals_mod = importlib.import_module(f"{pkg}.approvals")
+        self.server_mod = importlib.import_module(f"{pkg}.server")
+        self.folder = temp_dir("companion-kb-srv-")
+
+        class Adapter:
+            def __init__(self, folder_path: Path):
+                self.tokens = auth_mod.TokenIssuer("kb-secret")
+                self.devices = devices_mod.Devices(folder_path)
+                self.store = chat_store(folder_path)
+                self.media = media_mod.MediaStore(folder_path)
+                self.approvals = approvals_mod.Approvals(self, folder_path)
+                self.socket_devices = {}
+                self._turns = {}
+                self._subs = {}
+                self.web_dist = folder_path / "no-dist"
+
+            def attach(self, chat_id, socket):
+                self._subs.setdefault(chat_id, set()).add(socket)
+
+            def detach_all(self, socket):
+                for s in self._subs.values():
+                    s.discard(socket)
+
+        self.adapter = Adapter(self.folder)
+        self.api_token = self.adapter.tokens.issue("dev-kb", purpose="api")
+        self.ws_token = self.adapter.tokens.issue("dev-kb", purpose="ws")
+        self.app = self.server_mod.build_app(self.adapter)
+
+    def test_http_get_upload_auth_bounds_and_ws_mutations(self):
+        from companion.modules import creations, knowledge
+
+        with tempfile.TemporaryDirectory() as tmp, muse_home_override(tmp):
+            with TestClient(self.app, client=("127.0.0.1", 51234), base_url="http://127.0.0.1:8766") as client:
+                # 1) Auth & Origin guards
+                self.assertEqual(client.get("/api/webui/companion/knowledge").status_code, 401)
+                self.assertEqual(
+                    client.post("/api/webui/companion/knowledge/upload?filename=a.md", content=b"hi").status_code,
+                    401,
+                )
+                self.assertEqual(
+                    client.post(
+                        "/api/webui/companion/knowledge/upload?filename=a.md",
+                        content=b"hi",
+                        headers={"Authorization": f"Bearer {self.api_token}", "Origin": "https://evil.example"},
+                    ).status_code,
+                    403,
+                )
+
+                headers = {"Authorization": f"Bearer {self.api_token}"}
+
+                # 2) Raw binary upload (iOS-friendly) + query search & collection filter
+                up_raw = client.post(
+                    "/api/webui/companion/knowledge/upload?filename=notes.md&collection=%E7%A0%94%E7%A9%B6&title=%E5%8E%9F%E5%A7%8B%E7%AC%94%E8%AE%B0",
+                    content="# 第一章\n\n本地 SQLite FTS5 混合检索记录。".encode("utf-8"),
+                    headers={**headers, "Content-Type": "application/octet-stream"},
+                )
+                self.assertEqual(up_raw.status_code, 200, up_raw.text)
+                body_raw = up_raw.json()
+                doc_raw = body_raw["added"]
+                self.assertEqual(doc_raw["title"], "原始笔记")
+                self.assertEqual(doc_raw["collection"], "研究")
+                self.assertEqual(body_raw["stats"]["doc_count"], 1)
+
+                # 3) Multipart FormData upload (Web-friendly), including >1MB payload verifying max_part_size override
+                big_md = ("# 大文件\n\n" + ("重要知识库段落内容。" * 60000)).encode("utf-8")
+                self.assertGreater(len(big_md), 1_200_000)
+                up_mp = client.post(
+                    "/api/webui/companion/knowledge/upload",
+                    files={"file": ("large.md", big_md, "text/markdown")},
+                    data={"collection": "项目", "title": "超1MB表单文档"},
+                    headers=headers,
+                )
+                self.assertEqual(up_mp.status_code, 200, up_mp.text)
+                self.assertEqual(up_mp.json()["added"]["title"], "超1MB表单文档")
+                self.assertEqual(up_mp.json()["stats"]["doc_count"], 2)
+
+                # 4) Body size cap -> 413, empty/invalid -> 400
+                with mock.patch.object(self.server_mod.knowledge, "MAX_DOCUMENT_BYTES", 64):
+                    too_big = client.post(
+                        "/api/webui/companion/knowledge/upload?filename=big.txt",
+                        content=b"x" * 128,
+                        headers=headers,
+                    )
+                    self.assertEqual(too_big.status_code, 413)
+                self.assertEqual(
+                    client.post("/api/webui/companion/knowledge/upload?filename=empty.txt", content=b"", headers=headers).status_code,
+                    400,
+                )
+
+                # 5) GET /api/webui/companion/knowledge?q=...&collection=...
+                listed = client.get("/api/webui/companion/knowledge?q=FTS5&collection=%E7%A0%94%E7%A9%B6", headers=headers)
+                self.assertEqual(listed.status_code, 200)
+                listed_json = listed.json()
+                self.assertEqual(len(listed_json["documents"]), 1)
+                self.assertEqual(len(listed_json["hits"]), 1)
+                self.assertEqual(listed_json["hits"][0]["doc_id"], doc_raw["id"])
+
+                # 6) WS mutations: companion.knowledge.change (import_creation, search, update, delete)
+                src = Path(tmp) / "draft.md"
+                src.write_text("# 作品标题\n\n从创意导入的文档正文。", encoding="utf-8")
+                cid = creations.import_file(src, key="kb-cr-1", title="作品稿", origin="chat")
+                self.assertIsNotNone(cid)
+
+                with client.websocket_connect(f"ws://127.0.0.1:8766/ws?token={self.ws_token}") as ws:
+                    self.assertEqual(ws.receive_json()["event"], "ready")
+
+                    ws.send_json({
+                        "type": "webui_request",
+                        "request_id": "req-imp",
+                        "action": "companion.knowledge.change",
+                        "payload": {"action": "import_creation", "creation_id": cid, "collection": "作品"},
+                    })
+                    res_imp = ws.receive_json()
+                    self.assertTrue(res_imp["ok"], res_imp)
+                    imp_id = res_imp["result"]["added"]["id"]
+                    self.assertEqual(res_imp["result"]["added"]["origin"], "creation")
+
+                    ws.send_json({
+                        "type": "webui_request",
+                        "request_id": "req-sch",
+                        "action": "companion.knowledge.change",
+                        "payload": {"action": "search", "query": "作品稿", "collection": "作品"},
+                    })
+                    res_sch = ws.receive_json()
+                    self.assertTrue(res_sch["ok"], res_sch)
+                    self.assertEqual(len(res_sch["result"]["hits"]), 1)
+
+                    ws.send_json({
+                        "type": "webui_request",
+                        "request_id": "req-upd",
+                        "action": "companion.knowledge.change",
+                        "payload": {"action": "update", "id": imp_id, "title": "修订作品稿", "collection": "归档"},
+                    })
+                    res_upd = ws.receive_json()
+                    self.assertTrue(res_upd["ok"], res_upd)
+                    self.assertEqual(res_upd["result"]["document"]["title"], "修订作品稿")
+                    self.assertEqual(res_upd["result"]["document"]["collection"], "归档")
+
+                    ws.send_json({
+                        "type": "webui_request",
+                        "request_id": "req-del",
+                        "action": "companion.knowledge.change",
+                        "payload": {"action": "delete", "id": imp_id},
+                    })
+                    res_del = ws.receive_json()
+                    self.assertTrue(res_del["ok"], res_del)
+                    self.assertEqual(knowledge.search_knowledge("修订作品稿"), [])
+
+                    ws.send_json({
+                        "type": "webui_request",
+                        "request_id": "req-404",
+                        "action": "companion.knowledge.change",
+                        "payload": {"action": "delete", "id": imp_id},
+                    })
+                    res_404 = ws.receive_json()
+                    self.assertFalse(res_404["ok"])
+                    self.assertEqual(res_404["error"]["status"], 404)
 
 
 if __name__ == "__main__":

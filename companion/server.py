@@ -26,7 +26,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from .modules import chat_branch
 from .modules import chat_export as chat_export_module
 from .modules import chat_search as chat_search_module
-from .modules import automations, avatars, companion_state, computer, connections, creations, feed, followups, helpers, ideas, memory, memory_learn, model_catalog, models, oauth_login, permissions, plans, push, routines, skills_page, stt_sensevoice, triggers, tts_api, vault, widgets
+from .modules import automations, avatars, companion_state, computer, connections, creations, feed, followups, helpers, ideas, knowledge, memory, memory_learn, model_catalog, models, oauth_login, permissions, plans, push, routines, skills_page, stt_sensevoice, triggers, tts_api, vault, widgets
 from .approvals import SCOPES as APPROVAL_SCOPES
 from .media import child_file
 from .store import chat_id_of
@@ -518,6 +518,62 @@ async def _creations_save(adapter: "CompanionAdapter", payload: dict[str, Any]) 
     return {**(await asyncio.to_thread(_creations, adapter)), "saved_id": rel}
 
 
+async def _knowledge_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
+    action = payload.get("action")
+    list_collection = str(payload.get("list_collection") or "").strip() or None
+    if action == "delete":
+        doc_id = str(payload.get("id") or "").strip()
+        if not doc_id:
+            raise ApiError(400, "缺少文档 ID")
+        try:
+            await asyncio.to_thread(knowledge.delete_document, doc_id)
+        except ValueError as exc:
+            raise ApiError(404, str(exc)) from None
+        return await asyncio.to_thread(knowledge.list_knowledge, collection=list_collection)
+    if action == "update":
+        doc_id = str(payload.get("id") or "").strip()
+        if not doc_id:
+            raise ApiError(400, "缺少文档 ID")
+        title = payload.get("title") if "title" in payload else None
+        collection = payload.get("collection") if "collection" in payload else None
+        if title is not None and not isinstance(title, str):
+            raise ApiError(400, "标题格式不正确")
+        if collection is not None and not isinstance(collection, str):
+            raise ApiError(400, "分组格式不正确")
+        if title is None and collection is None:
+            raise ApiError(400, "请提供要修改的标题或分组")
+        try:
+            updated = await asyncio.to_thread(knowledge.update_document, doc_id, title=title, collection=collection)
+        except ValueError as exc:
+            msg = str(exc)
+            status = 404 if "找不到" in msg else 409 if "已存在" in msg else 400
+            raise ApiError(status, msg) from None
+        return {**(await asyncio.to_thread(knowledge.list_knowledge, collection=list_collection)), "document": updated}
+    if action == "import_creation":
+        creation_id = str(payload.get("creation_id") or payload.get("id") or "").strip()
+        if not creation_id:
+            raise ApiError(400, "缺少作品 ID")
+        collection = str(payload.get("collection") or "").strip() or knowledge.DEFAULT_COLLECTION
+        try:
+            added = await asyncio.to_thread(knowledge.import_from_creation, creation_id, collection=collection)
+        except ValueError as exc:
+            msg = str(exc)
+            raise ApiError(404 if "找不到" in msg else 400, msg) from None
+        return {**(await asyncio.to_thread(knowledge.list_knowledge, collection=list_collection)), "added": added}
+    if action == "search":
+        query = str(payload.get("query") or payload.get("q") or "").strip()
+        collection = str(payload.get("collection") or "").strip() or None
+        raw_limit = payload.get("limit")
+        limit = (
+            int(raw_limit)
+            if isinstance(raw_limit, int) and not isinstance(raw_limit, bool)
+            else knowledge.DEFAULT_SEARCH_LIMIT
+        )
+        hits = await asyncio.to_thread(knowledge.search_knowledge, query, collection=collection, limit=limit)
+        return {"query": query, "collection": collection or "", "hits": hits}
+    raise ApiError(400, "不支持的知识库操作")
+
+
 def _soul_payload() -> dict[str, Any]:
     """SOUL.md as the user edits it, and when it last changed (ms; None while it is the first draft)."""
     try:
@@ -925,6 +981,7 @@ MUTATIONS: dict[str, Mutation] = {
     "companion.avatars.delete": _avatar_action("delete"),
     "companion.creations.hide": _creations_hide,
     "companion.creations.save": _creations_save,
+    "companion.knowledge.change": _knowledge_change,
     "companion.ideas.refresh": _ideas_refresh,
     "companion.memory.forget": _memory_forget,
     "companion.memory.remember": _memory_remember,
@@ -1217,6 +1274,98 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
         except Exception as exc:
             return JSONResponse({"error": str(exc) or "没有想出合适的建议，稍后再试"}, status_code=503)
 
+    async def knowledge_view(request: Request) -> Response:
+        if not authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        query = (request.query_params.get("q") or "").strip() or None
+        collection = (request.query_params.get("collection") or "").strip() or None
+        payload = await asyncio.to_thread(knowledge.list_knowledge, collection=collection, query=query)
+        return JSONResponse(payload, headers=NO_STORE)
+
+    async def knowledge_upload(request: Request) -> Response:
+        if not _origin_allowed(request):
+            return JSONResponse({"error": "forbidden_origin"}, status_code=403, headers=NO_STORE)
+        if not authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401, headers=NO_STORE)
+
+        from urllib.parse import unquote
+
+        ctype = (request.headers.get("content-type") or "").strip()
+        is_multipart = ctype.lower().startswith("multipart/form-data")
+        read_limit = knowledge.MAX_DOCUMENT_BYTES + (256 * 1024 if is_multipart else 0)
+        raw = await _read_body_bounded(request, read_limit)
+        if raw is None:
+            return JSONResponse({"error": "文件大小超过 20 MB 上限"}, status_code=413, headers=NO_STORE)
+        if not raw:
+            return JSONResponse({"error": "上传内容为空"}, status_code=400, headers=NO_STORE)
+
+        qp = request.query_params
+        filename = unquote(qp.get("filename") or request.headers.get("x-filename") or "").strip()
+        collection = (
+            unquote(qp.get("collection") or request.headers.get("x-collection") or "").strip()
+            or knowledge.DEFAULT_COLLECTION
+        )
+        title = unquote(qp.get("title") or request.headers.get("x-title") or "").strip() or None
+        file_bytes = raw
+
+        if is_multipart:
+            from starlette.datastructures import UploadFile
+            from starlette.formparsers import MultiPartParser
+
+            async def _raw_stream():
+                yield raw
+
+            form = None
+            try:
+                parser = MultiPartParser(
+                    request.headers,
+                    _raw_stream(),
+                    max_part_size=knowledge.MAX_DOCUMENT_BYTES,
+                )
+                form = await parser.parse()
+                upload_item = form.get("file")
+                if not isinstance(upload_item, UploadFile):
+                    upload_item = next(
+                        (val for _, val in form.multi_items() if isinstance(val, UploadFile)),
+                        None,
+                    )
+                if not isinstance(upload_item, UploadFile):
+                    return JSONResponse({"error": "缺少上传文件字段 file"}, status_code=400, headers=NO_STORE)
+                file_bytes = await upload_item.read()
+                if len(file_bytes) > knowledge.MAX_DOCUMENT_BYTES:
+                    return JSONResponse({"error": "文件大小超过 20 MB 上限"}, status_code=413, headers=NO_STORE)
+                form_filename = str(form.get("filename") or "").strip()
+                filename = form_filename or str(upload_item.filename or "").strip() or filename
+                form_collection = str(form.get("collection") or "").strip()
+                if form_collection:
+                    collection = form_collection
+                form_title = str(form.get("title") or "").strip()
+                if form_title:
+                    title = form_title
+            except Exception as exc:
+                status = 413 if "exceeded" in str(exc).lower() else 400
+                return JSONResponse({"error": f"上传表单格式不正确：{type(exc).__name__}"}, status_code=status, headers=NO_STORE)
+            finally:
+                if form is not None:
+                    await form.close()
+
+        if not filename:
+            return JSONResponse({"error": "缺少文件名（filename）"}, status_code=400, headers=NO_STORE)
+        try:
+            added = await asyncio.to_thread(
+                knowledge.ingest_bytes,
+                filename,
+                file_bytes,
+                title=title,
+                collection=collection,
+                origin="upload",
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400, headers=NO_STORE)
+
+        listing = await asyncio.to_thread(knowledge.list_knowledge)
+        return JSONResponse({**listing, "added": added}, headers=NO_STORE)
+
     async def creation_file(request: Request) -> Response:
         # Signed links: <img>/<video> and the save button can't send a bearer token.
         rel = adapter.media.verify(CREATIONS_PREFIX, request.path_params["sig"], request.path_params["payload"])
@@ -1354,6 +1503,8 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
         Route("/api/webui/companion/triggers/{trigger_id}/state", trigger_state),
         Route("/hooks/{trigger_id}", hook, methods=["POST"]),
         Route("/api/webui/companion/ideas", ideas_view),
+        Route("/api/webui/companion/knowledge", knowledge_view),
+        Route("/api/webui/companion/knowledge/upload", knowledge_upload, methods=["POST"]),
         Route("/api/webui/companion/creations", guarded(lambda: _creations(adapter))),
         Route(CREATIONS_PREFIX + "/{sig}/{payload}", creation_file),
         Route("/api/webui/companion/avatars", guarded(lambda: _avatars(adapter))),
