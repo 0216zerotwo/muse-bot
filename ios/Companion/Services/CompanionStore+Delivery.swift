@@ -474,6 +474,72 @@ extension CompanionStore {
         } catch { show(error) }
     }
 
+    @discardableResult
+    func forkChat(chatId: String, turnId: String? = nil) async -> String? {
+        guard !chatId.isEmpty, connected else { show(ServiceError.message("连接后再试一次")); return nil }
+        var payload: [String: JSONValue] = [
+            "id": .string(chatId),
+            "action": .string("fork"),
+        ]
+        if let turnId, !turnId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            payload["turn_id"] = .string(turnId)
+        }
+        do {
+            let result = try await requestMutation("companion.chats.change", payload: payload, timeout: 30)
+            await refreshSessions()
+            guard let newChatID = result["chat_id"].nonemptyString else { return nil }
+            revealTurn = nil
+            await changeChat(newChatID, forceHistory: true)
+            return newChatID
+        } catch {
+            show(error)
+            return nil
+        }
+    }
+
+    @discardableResult
+    func editAndResend(chatId: String, turnId: String, content: String) async -> Bool {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !chatId.isEmpty, !turnId.isEmpty, !trimmed.isEmpty else { return false }
+        guard connected else { show(ServiceError.message("连接后再试一次")); return false }
+        guard !runningChats.contains(chatId) else {
+            show(ServiceError.message("正在回复中，请先停止当前回复再修改"))
+            return false
+        }
+        do {
+            _ = try await requestMutation("companion.chats.change", payload: [
+                "id": .string(chatId),
+                "action": .string("edit_message"),
+                "turn_id": .string(turnId),
+                "content": .string(trimmed),
+            ], timeout: 30)
+            savedEvents.removeValue(forKey: chatId)
+            historyEvents.removeValue(forKey: chatId)
+            projections.removeValue(forKey: chatId)
+            clearFollowupsCache(for: chatId)
+            LocalStore.remove(LocalStore.url("chats", server: serverAddress, name: chatId))
+            runningChats.insert(chatId)
+            publishChat(chatId)
+            await hydrate(chatId)
+            await refreshSessions()
+            return true
+        } catch {
+            show(error)
+            return false
+        }
+    }
+
+    func exportChatMarkdown(chatId: String) async throws -> String {
+        guard let api, !api.apiToken.isEmpty else { throw ServiceError.message("连接后再试一次") }
+        guard !chatId.isEmpty else { throw ServiceError.message("找不到这个对话") }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let encodedKey = ("websocket:" + chatId).addingPercentEncoding(withAllowedCharacters: allowed) ?? chatId
+        return try await api.getText(
+            "/api/sessions/\(encodedKey)/export",
+            query: [URLQueryItem(name: "format", value: "md")]
+        )
+    }
+
     func deleteMessage(_ message: ChatMessage, chatID: String? = nil) async {
         guard let turnID = message.turnId, !turnID.isEmpty else { return }
         let id = chatID ?? currentChatID

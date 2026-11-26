@@ -276,6 +276,68 @@ final class APIClient {
         return try await perform(request)
     }
 
+    func getText(_ path: String, query: [URLQueryItem] = []) async throws -> String {
+        var request = URLRequest(url: try url(path, query: query))
+        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let (data, response) = try await session.data(for: request)
+        guard let response = response as? HTTPURLResponse else { throw ServiceError.message("服务器没有响应") }
+        guard (200..<300).contains(response.statusCode) else {
+            if ![401, 403].contains(response.statusCode),
+               let body = try? JSONValue.parse(data),
+               let message = body["error"].nonemptyString {
+                throw ServiceError.message(message)
+            }
+            throw ServiceError.http(response.statusCode)
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw ServiceError.message("无法解码导出内容")
+        }
+        return text
+    }
+
+    func getData(_ path: String, query: [URLQueryItem] = [], authenticated: Bool = false) async throws -> Data {
+        var request = URLRequest(url: try url(path, query: query))
+        if authenticated && !apiToken.isEmpty {
+            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        }
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let (data, response) = try await session.data(for: request)
+        guard let response = response as? HTTPURLResponse else { throw ServiceError.message("服务器没有响应") }
+        guard (200..<300).contains(response.statusCode) else { throw ServiceError.http(response.statusCode) }
+        return data
+    }
+
+    func uploadKnowledge(data: Data, filename: String, collection: String = "默认", title: String? = nil) async throws -> JSONValue {
+        guard !data.isEmpty, data.count <= 20 * 1024 * 1024 else {
+            throw ServiceError.message("单个文档不能超过 20 MB")
+        }
+        var queryItems = [
+            URLQueryItem(name: "filename", value: filename),
+            URLQueryItem(name: "collection", value: collection),
+        ]
+        if let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            queryItems.append(URLQueryItem(name: "title", value: title))
+        }
+        var request = URLRequest(url: try url("/api/webui/companion/knowledge/upload", query: queryItems))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 180
+        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        let (responseData, response) = try await session.data(for: request)
+        guard let response = response as? HTTPURLResponse else { throw ServiceError.message("服务器没有响应") }
+        guard (200..<300).contains(response.statusCode) else {
+            if ![401, 403].contains(response.statusCode),
+               let body = try? JSONValue.parse(responseData),
+               let message = body["error"].nonemptyString {
+                throw ServiceError.message(message)
+            }
+            throw ServiceError.http(response.statusCode)
+        }
+        return try JSONValue.parse(responseData)
+    }
+
     func pair(code: String) async throws -> JSONValue {
         var request = URLRequest(url: try url("/api/pair"))
         request.httpMethod = "POST"

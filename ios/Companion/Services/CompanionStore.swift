@@ -53,6 +53,7 @@ final class CompanionStore: ObservableObject {
     @Published var helperLoadingHistory = false
     @Published private(set) var helperGoal: GoalState?
     @Published private(set) var sttAvailable = true
+    @Published private(set) var ttsAvailable = false
     @Published private(set) var modelsChecked = false
     @Published private(set) var hasConfiguredChatModel = true
     @Published private(set) var pendingDeepLink: PendingDeepLink?
@@ -124,6 +125,7 @@ final class CompanionStore: ObservableObject {
     var reconcileAtTurnEnd: Set<String> = []
     var needsHistoryRefresh: Set<String> = []
     var loadingChats: Set<String> = []
+    var followupsCache: [String: [String]] = [:]
     var outbox: [QueuedTurn] = []
     var trackedOutboxBlobs: Set<String> = []
     var pendingMutations: [String: PendingMutation] = [:]
@@ -803,6 +805,111 @@ final class CompanionStore: ObservableObject {
         if case .bool(let flag) = payload["capabilities"]["stt"] {
             if sttAvailable != flag { sttAvailable = flag }
         }
+        if case .bool(let flag) = payload["capabilities"]["tts"] {
+            if ttsAvailable != flag { ttsAvailable = flag }
+        }
+    }
+
+    func cachedFollowups(chatId: String, turnId: String) -> [String]? {
+        followupsCache["\(chatId)|\(turnId)"]
+    }
+
+    func clearFollowupsCache(for chatID: String) {
+        let prefix = chatID + "|"
+        followupsCache = followupsCache.filter { !$0.key.hasPrefix(prefix) }
+    }
+
+    func fetchFollowups(chatId: String, turnId: String) async -> [String] {
+        guard !chatId.isEmpty, !turnId.isEmpty else { return [] }
+        let cacheKey = "\(chatId)|\(turnId)"
+        if let cached = followupsCache[cacheKey] { return cached }
+        guard let api, !api.apiToken.isEmpty else { return [] }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let encodedKey = ("websocket:" + chatId).addingPercentEncoding(withAllowedCharacters: allowed) ?? chatId
+        do {
+            let value = try await api.get(
+                "/api/sessions/\(encodedKey)/followups",
+                query: [URLQueryItem(name: "turn_id", value: turnId)]
+            )
+            let parsed = FollowupsResponse(json: value)
+            if !parsed.suggestions.isEmpty {
+                followupsCache[cacheKey] = parsed.suggestions
+            }
+            return parsed.suggestions
+        } catch {
+            return []
+        }
+    }
+
+    /// Expands `visibleCounts` (and fetches older pages if needed) so a search hit turn is guaranteed to be rendered.
+    @discardableResult
+    func ensureTurnVisible(_ turnID: String, in chatID: String) async -> ChatMessage? {
+        guard !turnID.isEmpty, !chatID.isEmpty else { return nil }
+        for attempt in 0..<4 {
+            let all = projections[chatID]?.messages ?? []
+            if let index = all.firstIndex(where: { $0.turnId == turnID && Presentation.isVisible($0) }) {
+                let needed = max(60, all.count - index + 8)
+                if (visibleCounts[chatID] ?? 60) < needed {
+                    visibleCounts[chatID] = needed
+                    publishChat(chatID)
+                }
+                return all[index]
+            }
+            guard attempt < 3, connected, serverHasOlder.contains(chatID), !loadingChats.contains(chatID) else {
+                break
+            }
+            let loaded = await hydrate(chatID, older: true)
+            if !loaded { break }
+        }
+        return nil
+    }
+
+    func pinMemory(file: String, line: String, pinned: Bool) async throws -> JSONValue {
+        try await changeResource("companion.memory.pin", payload: [
+            "file": .string(file),
+            "line": .string(line),
+            "pinned": .bool(pinned),
+        ])
+    }
+
+    func fetchKnowledge(collection: String? = nil, query: String? = nil) async throws -> KnowledgePayload {
+        guard let api, !api.apiToken.isEmpty else { throw ServiceError.message("连接后再试一次") }
+        var items: [URLQueryItem] = []
+        if let collection, !collection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            items.append(URLQueryItem(name: "collection", value: collection))
+        }
+        if let query, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            items.append(URLQueryItem(name: "q", value: query))
+        }
+        let raw = try await api.get("/api/webui/companion/knowledge", query: items)
+        return KnowledgePayload(json: raw)
+    }
+
+    func uploadKnowledgeFile(data: Data, filename: String, collection: String = "默认", title: String? = nil) async throws -> (payload: KnowledgePayload, deduplicated: Bool) {
+        guard let api, connected else { throw ServiceError.message("连接后再试一次") }
+        let raw = try await api.uploadKnowledge(data: data, filename: filename, collection: collection, title: title)
+        return (KnowledgePayload(json: raw), raw["added"]["deduplicated"].boolValue)
+    }
+
+    func deleteKnowledgeDocument(id: String, listCollection: String? = nil) async throws -> KnowledgePayload {
+        var payload: [String: JSONValue] = [
+            "action": .string("delete"),
+            "id": .string(id),
+        ]
+        if let listCollection, !listCollection.isEmpty {
+            payload["list_collection"] = .string(listCollection)
+        }
+        let raw = try await changeResource("companion.knowledge.change", payload: payload)
+        return KnowledgePayload(json: raw)
+    }
+
+    func importCreationToKnowledge(creationID: String, collection: String = "默认") async throws -> (payload: KnowledgePayload, deduplicated: Bool) {
+        let raw = try await changeResource("companion.knowledge.change", payload: [
+            "action": .string("import_creation"),
+            "creation_id": .string(creationID),
+            "collection": .string(collection),
+        ])
+        return (KnowledgePayload(json: raw), raw["added"]["deduplicated"].boolValue)
     }
 
     @discardableResult
@@ -1010,6 +1117,7 @@ final class CompanionStore: ObservableObject {
         serverHasOlder.remove(id)
         reconcileAtTurnEnd.remove(id)
         needsHistoryRefresh.remove(id)
+        clearFollowupsCache(for: id)
         LocalStore.remove(LocalStore.url("chats", server: serverAddress, name: id))
         if helperChatID == id { closeHelperChat() }
     }
@@ -1036,6 +1144,7 @@ final class CompanionStore: ObservableObject {
         suggestedDraft = nil
         closeHelperChat()
         sttAvailable = true
+        ttsAvailable = false
         modelsChecked = false
         hasConfiguredChatModel = true
         pendingDeepLink = nil
@@ -1048,6 +1157,7 @@ final class CompanionStore: ObservableObject {
         savedEvents = [:]
         duringHistory = [:]
         loadingChats = []
+        followupsCache = [:]
         visibleCounts = [:]
         beforeCursors = [:]
         serverHasOlder = []

@@ -35,6 +35,7 @@ struct StreamProjection: Sendable {
             turn = turnAliases[rawTurn]
         }
         let source = event["source"] == .null ? nil : event["source"]
+        let incomingSources = CitationSource.parseList(event["sources"])
 
         switch name {
         case "user_message":
@@ -61,6 +62,9 @@ struct StreamProjection: Sendable {
             messages[index].isStreaming = true
             Self.stamp(&messages[index], event: event, turn: turn, phase: "answer")
             if let source { messages[index].source = source }
+            if let merged = Self.mergeSources(messages[index].sources, with: incomingSources) {
+                messages[index].sources = merged
+            }
             activeAssistantID = messages[index].id
             closedAssistantIDs.remove(messages[index].id)
             mergeReasoning = false
@@ -78,6 +82,9 @@ struct StreamProjection: Sendable {
             if let target {
                 Self.stamp(&messages[target], event: event, turn: turn, phase: "answer")
                 if let source { messages[target].source = source }
+                if let merged = Self.mergeSources(messages[target].sources, with: incomingSources) {
+                    messages[target].sources = merged
+                }
                 activeAssistantID = messages[target].id
             }
             let mergeNext = event["resuming"].boolValue && event["merge_next"].boolValue
@@ -111,17 +118,23 @@ struct StreamProjection: Sendable {
             Self.stamp(&row, event: event, turn: turn, phase: "answer")
             row.source = source
             row.media = media
+            var carriedSources: [CitationSource]? = nil
             if !independent {
                 let active = activeAssistantID
+                if let active, let draft = messages.first(where: { $0.id == active }) {
+                    carriedSources = draft.sources
+                }
                 closeAnswer()
                 if let active { messages.removeAll(where: { $0.id == active }) }
             }
+            row.sources = Self.mergeSources(carriedSources, with: incomingSources)
             // A reasoning-only placeholder adopts its final answer instead of duplicating a row.
             if let index = messages.indices.last, messages[index].role == "assistant",
                messages[index].kind != "trace", messages[index].content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                messages[index].reasoning != nil, !messages[index].reasoningStreaming, matches(messages[index], turn: turn) {
                 row.id = messages[index].id
                 row.reasoning = messages[index].reasoning
+                row.sources = Self.mergeSources(messages[index].sources, with: row.sources)
                 messages[index] = row
             } else { messages.append(row) }
             if !independent && !media.isEmpty { suppressUntilTurnEnd = true }
@@ -139,6 +152,12 @@ struct StreamProjection: Sendable {
 
         case "turn_end":
             suppressUntilTurnEnd = false
+            if let incomingSources,
+               let targetIdx = messages.indices.last(where: {
+                   messages[$0].role == "assistant" && messages[$0].kind != "trace" && matches(messages[$0], turn: turn)
+               }) {
+                messages[targetIdx].sources = Self.mergeSources(messages[targetIdx].sources, with: incomingSources)
+            }
             for index in messages.indices {
                 messages[index].isStreaming = false
                 messages[index].reasoningStreaming = false
@@ -204,6 +223,20 @@ struct StreamProjection: Sendable {
 
     private mutating func closeReasoning() {
         if let index = messages.lastIndex(where: { $0.reasoningStreaming }) { messages[index].reasoningStreaming = false }
+    }
+
+    private static func mergeSources(_ existing: [CitationSource]?, with incoming: [CitationSource]?) -> [CitationSource]? {
+        guard let incoming, !incoming.isEmpty else { return existing }
+        guard let existing, !existing.isEmpty else { return incoming }
+        var merged = existing
+        var seen = Set(existing.map { $0.url.isEmpty ? "\($0.id)|\($0.title)" : $0.url })
+        for item in incoming {
+            let key = item.url.isEmpty ? "\(item.id)|\(item.title)" : item.url
+            if seen.insert(key).inserted {
+                merged.append(item)
+            }
+        }
+        return merged
     }
 
     private static func stamp(_ row: inout ChatMessage, event: JSONValue, turn: String?, phase: String) {

@@ -1,0 +1,62 @@
+{
+  "documents": [
+    {
+      "id": "kb_doc_001",
+      "title": "Muse 架构白皮书",
+      "filename": "muse-architecture.pdf",
+      "collection": "工作资料",
+      "mime": "application/pdf",
+      "size_bytes": 428190,
+      "char_count": 18420,
+      "chunk_count": 22,
+      "content_sha256": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "origin": "upload",
+      "created_at": 1793275000.5,
+      "updated_at": 1793275800.25
+    },
+    {
+      "id": "kb_doc_002",
+      "title": "SwiftUI 性能优化笔记",
+      "filename": "swiftui-perf.md",
+      "collection": "默认",
+      "mime": "text/markdown",
+      "size_bytes": 12480,
+      "char_count": 4120,
+      "chunk_count": 5,
+      "content_sha256": "09f8e7d6c5b4a39281706f5e4d3c2b1a",
+      "origin": "creation",
+      "created_at": 1793271000.0,
+      "updated_at": 1793272000.0
+    }
+  ],
+  "collections": [
+    "默认",
+    "工作资料"
+  ],
+  "collection_counts": {
+    "默认": 1,
+    "工作资料": 1
+  },
+  "stats": {
+    "doc_count": 2,
+    "chunk_count": 27,
+    "total_bytes": 440670
+  },
+  "hits": [
+    {
+      "doc_id": "kb_doc_001",
+      "title": "Muse 架构白皮书",
+      "filename": "muse-architecture.pdf",
+      "collection": "工作资料",
+      "chunk_index": 3,
+      "heading": "[Page 4] / 混合检索设计",
+      "snippet": "采用 SQLite FTS5 trigram 索引结合 CJK LIKE 混合检索，兼顾长文与短词召回。",
+      "content": "采用 SQLite FTS5 trigram 索引结合 CJK LIKE 混合检索，兼顾长文与短词召回。完整分段内容如下。",
+      "score": 14.82,
+      "matches": [
+        [3, 14],
+        [34, 38]
+      ]
+    }
+  ]
+}

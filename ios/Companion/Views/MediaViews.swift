@@ -106,6 +106,7 @@ struct MediaDestination: Identifiable {
     let id = UUID()
     let item: MediaAttachment
     let baseURL: URL?
+    var creationID: String? = nil
 }
 
 /// A picture, clip, sound or file in the chat, each shown as itself: a file by its first page.
@@ -114,7 +115,7 @@ struct AttachmentView: View {
     let baseURL: URL?
     var open: () -> Void
     var body: some View {
-        if item.kind == "image" {
+        if item.kind == "image" && !FileKinds.isSVG(name: item.name, url: item.url) {
             Button(action: open) {
                 RemotePicture(path: item.url, baseURL: baseURL, maxPixel: 2_048)
                     .frame(maxWidth: 280, maxHeight: 300).clipShape(RoundedRectangle(cornerRadius: 20))
@@ -131,33 +132,116 @@ struct AttachmentView: View {
 
 @MainActor
 struct MediaViewer: View {
+    enum WebMode: Int, CaseIterable {
+        case preview, source
+        var label: String { self == .preview ? "预览" : "源码" }
+    }
+
     let destination: MediaDestination
+    @EnvironmentObject private var store: CompanionStore
     @Environment(\.dismiss) private var dismiss
     @State private var localURL: URL?
     @State private var image: UIImage?
+    @State private var textContent: String?
+    @State private var webMode: WebMode = .preview
     @State private var player: AVPlayer?
     @State private var sharing = false
     @State private var busy = false
+    @State private var copied = false
+    @State private var importingKB = false
     @State private var message: String?
 
     private var item: MediaAttachment { destination.item }
     private var remoteURL: URL? { resolvedURL(item.url, baseURL: destination.baseURL) }
+    private var isSVG: Bool { FileKinds.isSVG(name: item.name, url: item.url) }
+    private var isHTML: Bool { FileKinds.isHTML(name: item.name, url: item.url) }
+    private var isCodeOrText: Bool { !isSVG && !isHTML && FileKinds.isCodeOrText(name: item.name, url: item.url) }
+    private var isBitmapImage: Bool { item.kind == "image" && !isSVG }
+    private var isDarkMediaStage: Bool { isBitmapImage || item.kind == "video" }
+    private var canImportKnowledge: Bool {
+        destination.creationID != nil && store.connected && FileKinds.canImportToKnowledge(name: item.name, url: item.url)
+    }
 
     var body: some View {
         NavigationStack {
             ZStack {
-                Color.black.ignoresSafeArea()
-                if item.kind == "image", let image { ZoomablePicture(image: image).accessibilityLabel(item.name ?? "图片") }
-                else if item.kind == "video", let player { VideoPlayer(player: player).onAppear { player.play() } }
-                else if item.kind != "image" && item.kind != "video", let localURL { DocumentPreview(url: localURL) }
-                else { ProgressView("正在载入…").tint(.white).foregroundStyle(.white) }
+                if isDarkMediaStage {
+                    Color.black.ignoresSafeArea()
+                } else {
+                    CompanionPalette.background.ignoresSafeArea()
+                }
+
+                if isSVG || isHTML {
+                    if let textContent {
+                        VStack(spacing: 0) {
+                            Picker("模式", selection: $webMode) {
+                                ForEach(WebMode.allCases, id: \.self) { option in
+                                    Text(option.label).tag(option)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            Divider()
+                            if webMode == .preview {
+                                SandboxedArtifactWebView(code: textContent, isSVG: isSVG)
+                                    .ignoresSafeArea(edges: .bottom)
+                            } else {
+                                CodeSourceScrollView(text: textContent, badge: isSVG ? "SVG" : "HTML")
+                            }
+                        }
+                    } else {
+                        ProgressView("正在载入…")
+                    }
+                } else if isCodeOrText {
+                    if let textContent {
+                        CodeTextReaderView(text: textContent, filename: item.name ?? item.url)
+                    } else {
+                        ProgressView("正在载入…")
+                    }
+                } else if isBitmapImage, let image {
+                    ZoomablePicture(image: image).accessibilityLabel(item.name ?? "图片")
+                } else if item.kind == "video", let player {
+                    VideoPlayer(player: player).onAppear { player.play() }
+                } else if !isBitmapImage && item.kind != "video", let localURL {
+                    DocumentPreview(url: localURL)
+                } else {
+                    ProgressView("正在载入…")
+                        .tint(isDarkMediaStage ? .white : CompanionPalette.primary)
+                        .foregroundStyle(isDarkMediaStage ? Color.white : Color.primary)
+                }
             }
-            .navigationTitle(item.name ?? (item.kind == "image" ? "图片" : item.kind == "video" ? "视频" : "文件"))
+            .navigationTitle(item.name ?? (isSVG ? "矢量图" : isHTML ? "网页" : isBitmapImage ? "图片" : item.kind == "video" ? "视频" : "文件"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() }.tint(.white) }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                        .tint(isDarkMediaStage ? .white : CompanionPalette.primary)
+                }
                 ToolbarItemGroup(placement: .primaryAction) {
-                    if item.kind == "image" || item.kind == "video" {
+                    if canImportKnowledge {
+                        Button { Task { await importToKnowledge() } } label: {
+                            if importingKB {
+                                ProgressView().controlSize(.small).frame(minWidth: 32, minHeight: 40)
+                            } else {
+                                Image(systemName: "books.vertical.fill").frame(minWidth: 32, minHeight: 40)
+                            }
+                        }
+                        .accessibilityLabel("加入知识库")
+                        .disabled(importingKB || busy)
+                    }
+                    if let textContent, !textContent.isEmpty {
+                        Button {
+                            UIPasteboard.general.string = textContent
+                            Haptics.selection()
+                            copied = true
+                            Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
+                        } label: {
+                            Image(systemName: copied ? "checkmark" : "doc.on.doc").frame(minWidth: 32, minHeight: 40)
+                        }
+                        .accessibilityLabel(copied ? "已复制文本" : "复制文本")
+                    }
+                    if isBitmapImage || item.kind == "video" {
                         Button { Task { await save() } } label: { Image(systemName: "square.and.arrow.down").frame(minWidth: 36, minHeight: 44) }
                             .accessibilityLabel("保存到照片").disabled(busy)
                     }
@@ -165,8 +249,9 @@ struct MediaViewer: View {
                         .accessibilityLabel("分享或保存文件").disabled(busy)
                 }
             }
-            .toolbarBackground(.black, for: .navigationBar).toolbarBackground(.visible, for: .navigationBar)
-            .toolbarColorScheme(.dark, for: .navigationBar)
+            .toolbarBackground(isDarkMediaStage ? Color.black : CompanionPalette.background, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarColorScheme(isDarkMediaStage ? .dark : nil, for: .navigationBar)
             .overlay(alignment: .bottom) {
                 if busy { ProgressView("正在准备…").padding(16).background(.regularMaterial, in: Capsule()).padding() }
             }
@@ -188,8 +273,15 @@ struct MediaViewer: View {
         if item.kind == "video", let remoteURL { player = AVPlayer(url: remoteURL); return }
         do {
             let file = try await download()
-            if item.kind == "video" { player = AVPlayer(url: file) }
-            else if item.kind == "image" {
+            if item.kind == "video" {
+                player = AVPlayer(url: file)
+            } else if isSVG || isHTML || isCodeOrText {
+                let data = try Data(contentsOf: file)
+                let decoded = await Task.detached(priority: .userInitiated) {
+                    FileKinds.text(data, limit: 2_000_000)
+                }.value
+                textContent = decoded
+            } else if isBitmapImage {
                 let data = try Data(contentsOf: file)
                 if let source = CGImageSourceCreateWithData(data as CFData, nil), let frame = CGImageSourceCreateImageAtIndex(source, 0, nil) {
                     image = UIImage(cgImage: frame)
@@ -197,6 +289,19 @@ struct MediaViewer: View {
             }
         } catch is CancellationError { }
         catch { message = "载入失败，请检查连接后重新打开。" }
+    }
+
+    private func importToKnowledge() async {
+        guard let creationID = destination.creationID, !importingKB else { return }
+        importingKB = true
+        defer { importingKB = false }
+        do {
+            let result = try await store.importCreationToKnowledge(creationID: creationID)
+            Haptics.selection()
+            message = result.deduplicated ? "这篇文档已在知识库中，已同步更新。" : "已加入知识库，现在可以在对话中直接检索引用。"
+        } catch {
+            message = error.localizedDescription
+        }
     }
 
     private func download() async throws -> URL {

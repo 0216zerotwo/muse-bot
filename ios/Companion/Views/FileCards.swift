@@ -116,7 +116,7 @@ struct FileCard: View {
                 Menu {
                     Button("打开", systemImage: "doc.text.magnifyingglass", action: open)
                     Button("分享或存储…", systemImage: "square.and.arrow.up") { Task { await share() } }
-                    if kind.isText || kind == .web {
+                    if kind.isText || kind == .web || kind == .svg {
                         Button("复制文字", systemImage: "doc.on.doc") { Task { await copyText() } }
                     }
                 } label: {
@@ -163,7 +163,7 @@ struct FileCard: View {
             let made = await Task.detached(priority: .userInitiated) { FilePages.pdf(data, scale: scale, draw: !drawn) }.value
             pages = made.pages > 0 ? made.pages : nil
             if let picture = made.picture { keep(picture) }
-        case .web:
+        case .web, .svg:
             if !drawn { look = .web(await Task.detached(priority: .userInitiated) { FileKinds.text(data, limit: 400_000) }.value) }
         case .word, .sheet, .slides:
             if !drawn, let picture = await FilePages.quickLook(data, name: name, scale: scale).picture { keep(picture) }
@@ -233,7 +233,7 @@ struct FilePaper: View {
                 case .text(let text): textPage(text)
                 case .table(let rows): tablePage(rows)
                 case .picture(let picture): picturePage(picture)
-                case .web(let html): FileWebPage(html: html, onPicture: onPicture)
+                case .web(let html): FileWebPage(html: html, isSVG: kind == .svg, onPicture: onPicture)
                 }
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -328,6 +328,7 @@ struct FileBadge: View {
         case .sheet, .table: return Color(red: 0.13, green: 0.56, blue: 0.33)
         case .slides: return Color(red: 0.92, green: 0.45, blue: 0.16)
         case .web: return Color(red: 0.52, green: 0.34, blue: 0.84)
+        case .svg: return Color(red: 0.16, green: 0.58, blue: 0.55)
         case .markdown, .text: return Color(red: 0.36, green: 0.43, blue: 0.53)
         case .code: return Color(red: 0.23, green: 0.28, blue: 0.37)
         case .audio: return Color(red: 0.86, green: 0.29, blue: 0.52)
@@ -367,7 +368,7 @@ struct DraftCard: View, Equatable {
     private func look(_ kind: FileKind) -> FileLook {
         switch kind {
         case .table: return .table(FileKinds.rows(draft.content, separator: FileKinds.ext(draft.name) == "tsv" ? "\t" : ","))
-        case .web: return .web(draft.content)
+        case .web, .svg: return .web(draft.content)
         case .markdown: return .text(FileKinds.markdownPreview(String(draft.content.prefix(1_800))))
         default: return .text(String(draft.content.prefix(1_800)))
         }
@@ -379,6 +380,7 @@ struct DraftCard: View, Equatable {
 @MainActor
 struct FileWebPage: UIViewRepresentable {
     let html: String
+    var isSVG: Bool = false
     var onPicture: ((UIImage) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -424,7 +426,8 @@ struct FileWebPage: UIViewRepresentable {
         func load() {
             guard ready, loaded != parent.html else { return }
             loaded = parent.html
-            webView?.loadHTMLString(FileKinds.webPage(loaded), baseURL: nil)
+            let wrapped = parent.isSVG ? FileKinds.svgPage(loaded) : FileKinds.webPage(loaded)
+            webView?.loadHTMLString(wrapped, baseURL: nil)
         }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             guard parent.onPicture != nil else { return }

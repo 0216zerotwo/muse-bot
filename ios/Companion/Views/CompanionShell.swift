@@ -27,6 +27,9 @@ struct CompanionRootView: View {
     @State private var keyboardUp = false
     @State private var editSide = false
     @State private var sideName = ""
+    @State private var exportedChatFile: SharedFile?
+    @State private var exportCleanupFolder: URL?
+    @State private var exportingChat = false
     @State private var selectedTab = CompanionTab.chat
     @ObservedObject private var inbox = IntentInbox.shared
     @State private var accentRevision = 0
@@ -72,6 +75,9 @@ struct CompanionRootView: View {
         }
         .sheet(isPresented: $identity) {
             IdentityView().presentationDetents([.large]).presentationDragIndicator(.hidden).tint(CompanionPalette.primary)
+        }
+        .sheet(item: $exportedChatFile, onDismiss: { exportedChatFile = nil; cleanupExportedChat() }) { file in
+            ShareSheet(items: [file.url])
         }
         .alert("旁聊设置", isPresented: $editSide) {
             TextField("旁聊名称", text: $sideName)
@@ -206,11 +212,40 @@ struct CompanionRootView: View {
                 HStack(alignment: .top) {
                     roundButton("line.3.horizontal", "打开菜单") { toggleMenu(true) }
                     Spacer()
-                    if selectedTab == .chat && store.currentChatID != store.mainChatID {
-                        roundButton("slider.horizontal.3", "旁聊设置") {
-                            sideName = store.sideChats.first { $0.id == store.currentChatID }?.title ?? "新的旁聊"
-                            editSide = true
+                    if selectedTab == .chat && !store.currentChatID.isEmpty {
+                        Menu {
+                            Button {
+                                Task { await exportCurrentChat() }
+                            } label: {
+                                Label(exportingChat ? "正在导出…" : "导出分享对话", systemImage: "square.and.arrow.up")
+                            }
+                            .disabled(exportingChat || !store.connected)
+
+                            Button {
+                                Haptics.selection()
+                                Task { await store.forkChat(chatId: store.currentChatID) }
+                            } label: {
+                                Label("分叉为新旁聊", systemImage: "arrow.triangle.branch")
+                            }
+                            .disabled(!store.connected)
+
+                            if store.currentChatID != store.mainChatID {
+                                Divider()
+                                Button {
+                                    sideName = store.sideChats.first { $0.id == store.currentChatID }?.title ?? "新的旁聊"
+                                    editSide = true
+                                } label: {
+                                    Label("旁聊改名 / 删除", systemImage: "slider.horizontal.3")
+                                }
+                            }
+                        } label: {
+                            Image(systemName: store.currentChatID != store.mainChatID ? "slider.horizontal.3" : "ellipsis")
+                                .font(.system(size: 20))
+                                .frame(width: 44, height: 44)
+                                .modifier(FloatingPanel(radius: 22))
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(store.currentChatID != store.mainChatID ? "旁聊操作与导出" : "对话操作与导出")
                     }
                 }.padding(.horizontal, 16)
             }.padding(.top, 6)
@@ -319,5 +354,37 @@ struct CompanionRootView: View {
             if posts != feedPosts { feedPosts = posts }  // an unchanged list redraws nothing
         }
         catch { /* The feed itself presents errors and a retry button. */ }
+    }
+
+    private func exportCurrentChat() async {
+        let chatID = store.currentChatID
+        guard !chatID.isEmpty, !exportingChat else { return }
+        exportingChat = true
+        defer { exportingChat = false }
+        do {
+            let markdown = try await store.exportChatMarkdown(chatId: chatID)
+            cleanupExportedChat()
+            let folder = FileManager.default.temporaryDirectory
+                .appendingPathComponent("CompanionExport", isDirectory: true)
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let rawTitle = chatID == store.mainChatID
+                ? "\(store.companionName)-对话记录"
+                : (store.sideChats.first { $0.id == chatID }?.title ?? "旁聊记录")
+            let filename = FileKinds.safeName(rawTitle) + ".md"
+            let fileURL = folder.appendingPathComponent(filename)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data(markdown.utf8).write(to: fileURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            exportCleanupFolder = folder
+            exportedChatFile = SharedFile(url: fileURL)
+            Haptics.selection()
+        } catch {
+            store.show(error)
+        }
+    }
+
+    private func cleanupExportedChat() {
+        guard let folder = exportCleanupFolder else { return }
+        exportCleanupFolder = nil
+        try? FileManager.default.removeItem(at: folder)
     }
 }

@@ -54,6 +54,15 @@ struct ChatView: View {
     @State private var openTask: ActivityTask?
     /// 选择文字: a message's text in a sheet where any part of it can be selected.
     @State private var selecting: SelectableText?
+    /// 编辑并重发: user message being edited in a lightweight sheet.
+    @State private var editingMessage: ChatMessage?
+    /// 来源详情: citation drawer / knowledge snippet details sheet.
+    @State private var citationSheet: CitationSheetContext?
+    /// Contextual follow-up prompt chips shown after the latest completed reply.
+    @State private var followupSuggestions: [String] = []
+    /// Search-jump target message ID briefly highlighted with a soft pulse.
+    @State private var highlightedMessageID: String?
+    @State private var highlightTask: Task<Void, Never>?
     /// Learned skills refreshed whenever `/` autocomplete opens.
     @State private var learnedSkills: [JSONValue] = []
     @State private var skillsLoadedOnce = false
@@ -122,6 +131,29 @@ struct ChatView: View {
     /// The one reply whose cards still answer (worked out once per update, not once per row).
     private var answerableID: String? { chatRunning ? nil : Presentation.answerableReplyID(messages: chatMessages) }
 
+    /// Latest completed assistant reply turn eligible for contextual follow-up chips.
+    private var latestFollowupTurnID: String? {
+        guard !chatRunning, store.connected, !activeChatID.isEmpty else { return nil }
+        let current = chatMessages
+        let lastUserIndex = current.lastIndex { $0.role == "user" } ?? -1
+        for idx in stride(from: current.count - 1, through: max(0, lastUserIndex), by: -1) {
+            let msg = current[idx]
+            if msg.role != "user",
+               msg.kind != "trace",
+               !msg.isStreaming,
+               msg.source?["kind"].stringValue != "notice",
+               let tid = msg.turnId, !tid.isEmpty,
+               !msg.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return tid
+            }
+        }
+        return nil
+    }
+
+    private var followupTriggerKey: String {
+        "\(activeChatID)|\(latestFollowupTurnID ?? "")|\(chatRunning)|\(store.connected)"
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -146,15 +178,26 @@ struct ChatView: View {
                                 .frame(maxWidth: .infinity).padding(.vertical, 8)
                         }
                         if let message = entry.message {
+                            let targetChat = activeChatID
                             MessageRow(store: store, message: message,
                                        answerable: answerable == message.id,
+                                       isRunning: chatRunning,
+                                       highlighted: highlightedMessageID == message.id,
                                        speaker: message.role == "user" ? nil : messenger?.speaker(message),
                                        messenger: messenger != nil,
-                                       chatID: activeChatID,
-                                       chatKey: "\(store.serverAddress).\(activeChatID)",
+                                       chatID: targetChat,
+                                       chatKey: "\(store.serverAddress).\(targetChat)",
                                        onQuote: { quote = quoteText(message); focused = true; Haptics.selection() },
                                        onMedia: { media = MediaDestination(item: $0, baseURL: store.baseURL) },
-                                       onSelect: { selecting = SelectableText(text: $0) })
+                                       onSelect: { selecting = SelectableText(text: $0) },
+                                       onEdit: { editingMessage = message; Haptics.selection() },
+                                       onFork: {
+                                           Haptics.selection()
+                                           Task { await store.forkChat(chatId: targetChat, turnId: message.turnId) }
+                                       },
+                                       onOpenCitations: { sources, focusID in
+                                           citationSheet = CitationSheetContext(sources: sources, focusedID: focusID)
+                                       })
                                 .equatable()
                             if !entry.remembered.isEmpty {
                                 VStack(alignment: .leading, spacing: 4) {
@@ -173,11 +216,17 @@ struct ChatView: View {
                                         }
                                     }
                                     if latest {
-                                        let targetChat = activeChatID
                                         let again: (() -> Void)? = canRegenerate(message) ? { Task { await store.regenerate(message, chatID: targetChat) } } : nil
-                                        ReplyActions(message: message, regenerate: again)
+                                        ReplyActions(store: store, message: message, regenerate: again)
                                     }
                                 }.padding(.top, -6)
+                            }
+                            if latest && !followupSuggestions.isEmpty {
+                                FollowupChipsRow(suggestions: followupSuggestions) { prompt in
+                                    followupSuggestions = []
+                                    _ = store.send(text: prompt, chatID: targetChat)
+                                    Haptics.send()
+                                }
                             }
                         } else if let approval = entry.approval {
                             let targetChat = activeChatID
@@ -230,6 +279,9 @@ struct ChatView: View {
             .onChange(of: chatLoadingHistory) { _, loading in if !loading && !positioned { followIfNeeded(proxy) } }
             .onChange(of: activeChatID) { _, _ in
                 voice.cancel()
+                highlightTask?.cancel()
+                highlightedMessageID = nil
+                followupSuggestions = []
                 drafts.forEach { $0.removeStagedBlob() }
                 positioned = false; settlingBottom = false; settleGeneration = UUID()
                 revealed = false; followingBottom = true; quote = nil; drafts = []; restoreDraft()
@@ -251,8 +303,13 @@ struct ChatView: View {
             .onChange(of: store.suggestedDraft) { _, _ in acceptDraft() }
             .onChange(of: revealed) { _, _ in revealSearchHit(proxy) }
             .onChange(of: store.revealTurn) { _, _ in revealSearchHit(proxy) }
+            .onChange(of: chatLoadingHistory) { _, loading in if !loading { revealSearchHit(proxy) } }
+            .task(id: followupTriggerKey) { await loadFollowups() }
         }
-        .onDisappear { voice.cancel() }
+        .onDisappear {
+            voice.cancel()
+            highlightTask?.cancel()
+        }
         .onChange(of: scenePhase) { _, phase in if phase == .background { voice.cancel() } }
         .sheet(isPresented: $attach, onDismiss: openChosenPicker) {
             AttachSheet(onChoice: { attachChoice = $0; attach = false },
@@ -280,7 +337,26 @@ struct ChatView: View {
         .inAppLinks()
         .fullScreenCover(item: $media) { MediaViewer(destination: $0) }
         .sheet(item: $openTask) { TaskSheet(task: $0) }
-        .sheet(item: $selecting) { SelectTextSheet(text: $0.text) }
+        .sheet(item: $selecting) { item in
+            SelectTextSheet(text: item.text) { quoted in
+                quote = quoted
+                focused = true
+                Haptics.selection()
+            }
+        }
+        .sheet(item: $editingMessage) { target in
+            let targetChat = activeChatID
+            EditMessageSheet(message: target) { updatedText in
+                guard let turnID = target.turnId else { return false }
+                followupSuggestions = []
+                let ok = await store.editAndResend(chatId: targetChat, turnId: turnID, content: updatedText)
+                if ok { Haptics.send() }
+                return ok
+            }
+        }
+        .sheet(item: $citationSheet) { context in
+            CitationSourcesSheet(context: context)
+        }
         .onChange(of: text) { _, value in if value.isEmpty { dictated = false } }
         .onChange(of: chatRunning) { was, now in
             // The answer to a question asked by voice, read out when it is done.
@@ -289,7 +365,7 @@ struct ChatView: View {
             let currentMessages = chatMessages
             let lastAsked = currentMessages.lastIndex { $0.role == "user" } ?? -1
             if let reply = currentMessages.indices.last(where: { $0 > lastAsked && currentMessages[$0].role != "user" && Presentation.isVisibleReply(currentMessages[$0]) }) {
-                ReadAloud.shared.speak(currentMessages[reply].id, text: currentMessages[reply].content)
+                ReadAloud.shared.speak(currentMessages[reply].id, text: currentMessages[reply].content, store: store)
             }
         }
     }
@@ -664,19 +740,63 @@ struct ChatView: View {
             if settleGeneration == token { settlingBottom = false }
         }
     }
-    /// 查找聊天记录 → a message: once the chat has opened, it scrolls to that turn (when it is among
-    /// the messages loaded) and stops following the bottom.
+    /// 查找聊天记录 → a message: expands `visibleCounts` (and older pages if needed), scrolls cleanly
+    /// to the hit turn, and applies a gentle highlight pulse on the target bubble.
     private func revealSearchHit(_ proxy: ScrollViewProxy) {
         guard !isIsolatedHelperChat, let turn = store.revealTurn, revealed, !chatLoadingHistory else { return }
+        let targetChat = activeChatID
+        guard !targetChat.isEmpty else { return }
         store.revealTurn = nil
-        guard let message = chatMessages.first(where: { $0.turnId == turn && Presentation.isVisible($0) }) else { return }
         settlingBottom = false
         settleGeneration = UUID()
         followingBottom = false
         Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(700))  // after the opening settles at the bottom
-            withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("message-" + message.id, anchor: .top) }
+            guard let target = await store.ensureTurnVisible(turn, in: targetChat),
+                  targetChat == activeChatID else { return }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(260))
+            guard targetChat == activeChatID else { return }
+            if reduceMotion {
+                proxy.scrollTo("message-" + target.id, anchor: .center)
+            } else {
+                withAnimation(.easeOut(duration: 0.28)) {
+                    proxy.scrollTo("message-" + target.id, anchor: .center)
+                }
+            }
+            pulseHighlight(messageID: target.id)
         }
+    }
+
+    private func pulseHighlight(messageID: String) {
+        highlightTask?.cancel()
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
+            highlightedMessageID = messageID
+        }
+        highlightTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(2_200))
+            guard !Task.isCancelled else { return }
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.45)) {
+                if highlightedMessageID == messageID {
+                    highlightedMessageID = nil
+                }
+            }
+        }
+    }
+
+    private func loadFollowups() async {
+        guard let turnID = latestFollowupTurnID else {
+            followupSuggestions = []
+            return
+        }
+        let targetChat = activeChatID
+        if let cached = store.cachedFollowups(chatId: targetChat, turnId: turnID) {
+            followupSuggestions = cached
+            return
+        }
+        followupSuggestions = []
+        let items = await store.fetchFollowups(chatId: targetChat, turnId: turnID)
+        guard !Task.isCancelled, targetChat == activeChatID, latestFollowupTurnID == turnID else { return }
+        followupSuggestions = items
     }
     /// Whatever happens, the chat shows within a moment (a chat with nothing to settle on included).
     private func revealSoon() {
@@ -852,6 +972,8 @@ private struct MessageRow: View, Equatable {
     let store: CompanionStore  // for actions only; deliberately not observed
     let message: ChatMessage
     let answerable: Bool
+    let isRunning: Bool
+    let highlighted: Bool
     /// Chat-app style: who said this reply (their face beside it, and in a group their name).
     let speaker: Speaker?
     let messenger: Bool
@@ -860,14 +982,24 @@ private struct MessageRow: View, Equatable {
     var onQuote: () -> Void
     var onMedia: (MediaAttachment) -> Void
     var onSelect: (String) -> Void
+    var onEdit: () -> Void
+    var onFork: () -> Void
+    var onOpenCitations: ([CitationSource], Int?) -> Void
 
     nonisolated static func == (a: MessageRow, b: MessageRow) -> Bool {
-        a.message == b.message && a.answerable == b.answerable && a.speaker == b.speaker
+        a.message == b.message && a.answerable == b.answerable && a.isRunning == b.isRunning
+            && a.highlighted == b.highlighted && a.speaker == b.speaker
             && a.messenger == b.messenger && a.chatID == b.chatID && a.chatKey == b.chatKey
     }
 
     private var isUser: Bool { message.role == "user" }
     private var isNotice: Bool { message.source?["kind"].stringValue == "notice" }
+    private var canEdit: Bool {
+        isUser && !isRunning && store.connected && !(message.turnId ?? "").isEmpty && message.deliveryStatus != "sending"
+    }
+    private var canFork: Bool {
+        !messenger && store.connected && !(message.turnId ?? "").isEmpty && message.deliveryStatus != "sending"
+    }
     private var media: [MediaAttachment] {
         var result = message.media
         if !message.isStreaming {
@@ -890,6 +1022,11 @@ private struct MessageRow: View, Equatable {
                             Text(name).font(.system(size: 12.5)).foregroundStyle(.secondary).padding(.horizontal, 4)
                         } else if speaker == nil { sourceLabel }
                         if isUser { userContent } else { replyContent }
+                        if !isUser, let citations = message.sources, !citations.isEmpty {
+                            CitationPillsRow(sources: citations) { focusID in
+                                onOpenCitations(citations, focusID)
+                            }
+                        }
                         ForEach(media) { attachment in
                             AttachmentView(item: attachment, baseURL: store.baseURL) { onMedia(attachment) }
                         }
@@ -902,14 +1039,30 @@ private struct MessageRow: View, Equatable {
                     if isUser && messenger { MeFace(size: 36) }
                     if !isUser { Spacer(minLength: 20) }
                 }
+                .padding(.vertical, highlighted ? 4 : 0)
+                .padding(.horizontal, highlighted ? 6 : 0)
+                .background(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(highlighted ? CompanionPalette.primary.opacity(0.13) : .clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(highlighted ? CompanionPalette.primary.opacity(0.55) : .clear, lineWidth: 1.5)
+                )
                 .contextMenu {
                     Button("引用", systemImage: "quote.bubble", action: onQuote)
                     Button("复制", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.content; Haptics.selection() }
                     Button("选择文字", systemImage: "selection.pin.in.out") {
                         onSelect(isUser ? UserQuote.parse(message.content).content : ReplyContent.textWithoutCards(message.content))
                     }
+                    if canEdit {
+                        Button("编辑并重发", systemImage: "pencil.line", action: onEdit)
+                    }
+                    if canFork {
+                        Button("从这里分叉旁聊", systemImage: "arrow.triangle.branch", action: onFork)
+                    }
                     if !isUser {
-                        Button("朗读", systemImage: "speaker.wave.2") { ReadAloud.shared.toggle(message.id, text: message.content) }
+                        Button("朗读", systemImage: "speaker.wave.2") { ReadAloud.shared.toggle(message.id, text: message.content, store: store) }
                     }
                     if message.deliveryStatus == "failed" {
                         Button("重新发送", systemImage: "arrow.clockwise") { Task { await store.retryMessage(message, chatID: chatID) } }
@@ -1084,6 +1237,7 @@ private struct TaskChip: View {
 /// Under the newest reply: copy it, read it out, ask again (as ChatGPT and Claude show them).
 @MainActor
 private struct ReplyActions: View {
+    let store: CompanionStore
     let message: ChatMessage
     var regenerate: (() -> Void)?
     @ObservedObject private var reader = ReadAloud.shared
@@ -1098,8 +1252,19 @@ private struct ReplyActions: View {
                 Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
             }
             let reading = reader.speakingID == message.id
-            action(reading ? "stop.circle" : "speaker.wave.2", reading ? "停止朗读" : "朗读") {
-                reader.toggle(message.id, text: message.content)
+            let loadingAudio = reader.loadingID == message.id
+            if loadingAudio {
+                Button {
+                    reader.stop()
+                } label: {
+                    ProgressView().controlSize(.mini).frame(width: 34, height: 30)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("取消生成语音")
+            } else {
+                action(reading ? "stop.circle" : "speaker.wave.2", reading ? "停止朗读" : "朗读") {
+                    reader.toggle(message.id, text: message.content, store: store)
+                }
             }
             if let regenerate {
                 action("arrow.clockwise", "重新生成") { Haptics.selection(); regenerate() }
@@ -1122,10 +1287,11 @@ struct SelectableText: Identifiable {
     let text: String
 }
 
-/// 选择文字: the message in full, where any part of it can be selected and copied.
+/// 选择文字: the message in full, where any part of it can be selected, copied, or quoted for follow-up.
 @MainActor
 private struct SelectTextSheet: View {
     let text: String
+    var onQuote: ((String) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -1137,7 +1303,15 @@ private struct SelectTextSheet: View {
             .navigationTitle("选择文字").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    if let onQuote {
+                        Button("引用追问") {
+                            let clip = (UIPasteboard.general.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                            let chosen = (!clip.isEmpty && text.contains(clip)) ? clip : text
+                            onQuote(chosen)
+                            dismiss()
+                        }
+                    }
                     Button("全部复制") { UIPasteboard.general.string = text; Haptics.selection(); dismiss() }
                 }
             }
@@ -1146,17 +1320,34 @@ private struct SelectTextSheet: View {
     }
 }
 
-/// A code block in a reply: its language, a 复制 button, and the code scrolling sideways instead of
-/// wrapping (as the chat apps show code).
+/// A code block in a reply: its language, an interactive 预览 button for HTML/SVG, a 复制 button,
+/// and the code scrolling sideways instead of wrapping.
 private struct ChatCodeBlock: View {
     let configuration: CodeBlockConfiguration
     @State private var copied = false
+    @State private var previewItem: ArtifactPreviewItem?
+
+    private var previewLanguage: String? {
+        ArtifactPreviewItem.previewableLanguage(configuration.language, content: configuration.content)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(spacing: 12) {
                 Text(configuration.language.flatMap { $0.isEmpty ? nil : $0 } ?? "代码").font(.caption).foregroundStyle(.secondary)
                 Spacer()
+                if let lang = previewLanguage {
+                    Button {
+                        Haptics.selection()
+                        let title = lang == "svg" ? "SVG 预览" : "HTML 预览"
+                        previewItem = ArtifactPreviewItem(title: title, language: lang, code: configuration.content)
+                    } label: {
+                        Label("预览", systemImage: "eye").font(.caption.weight(.medium))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(CompanionPalette.primary)
+                    .accessibilityLabel("预览 \(lang.uppercased()) 代码")
+                }
                 Button {
                     UIPasteboard.general.string = configuration.content
                     Haptics.selection()
@@ -1178,6 +1369,277 @@ private struct ChatCodeBlock: View {
         }
         .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
         .markdownMargin(top: 4, bottom: 8)
+        .sheet(item: $previewItem) { item in
+            ArtifactPreviewSheet(item: item)
+        }
+    }
+}
+
+/// Perplexity-style horizontal scrolling citation capsules under an assistant reply.
+@MainActor
+private struct CitationPillsRow: View {
+    let sources: [CitationSource]
+    var onOpenSheet: (Int?) -> Void
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(sources) { source in
+                    Button {
+                        Haptics.selection()
+                        if source.isKnowledge {
+                            onOpenSheet(source.id)
+                        } else if let url = source.webURL {
+                            openURL(url)
+                        } else {
+                            onOpenSheet(source.id)
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Text("\(source.id)")
+                                .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                                .foregroundStyle(CompanionPalette.primary)
+                                .frame(minWidth: 16, minHeight: 16)
+                                .background(CompanionPalette.primary.opacity(0.14), in: Circle())
+                            Image(systemName: source.isKnowledge ? "books.vertical.fill" : "globe")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                                .accessibilityHidden(true)
+                            Text(source.displayDomain)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background(CompanionPalette.surface, in: Capsule())
+                        .overlay(Capsule().strokeBorder(CompanionPalette.border))
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("查看来源详情", systemImage: "doc.text.magnifyingglass") { onOpenSheet(source.id) }
+                        if let url = source.webURL {
+                            Button("在应用内打开", systemImage: "safari") { openURL(url) }
+                            Button("复制链接", systemImage: "link") { UIPasteboard.general.string = url.absoluteString; Haptics.selection() }
+                        }
+                        if !source.snippet.isEmpty {
+                            Button("复制摘录", systemImage: "doc.on.doc") { UIPasteboard.general.string = source.snippet; Haptics.selection() }
+                        }
+                    }
+                    .accessibilityLabel("来源 \(source.id)：\(source.title)")
+                }
+
+                Button {
+                    Haptics.selection()
+                    onOpenSheet(nil)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.text.magnifyingglass").font(.system(size: 10.5))
+                        Text("来源详情").font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.05), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("查看全部 \(sources.count) 个来源详情")
+            }
+            .padding(.vertical, 2)
+        }
+    }
+}
+
+private struct CitationSheetContext: Identifiable {
+    let id = UUID()
+    let sources: [CitationSource]
+    let focusedID: Int?
+}
+
+@MainActor
+private struct CitationSourcesSheet: View {
+    let context: CitationSheetContext
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(context.sources) { source in
+                        let focused = context.focusedID == source.id
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(alignment: .top, spacing: 8) {
+                                Text("\(source.id)")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .foregroundStyle(CompanionPalette.primaryText)
+                                    .frame(width: 22, height: 22)
+                                    .background(CompanionPalette.primary, in: Circle())
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(source.title.isEmpty ? source.displayDomain : source.title)
+                                        .font(.system(size: 15, weight: .semibold))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    HStack(spacing: 6) {
+                                        Label(source.isKnowledge ? "个人知识库" : source.displayDomain,
+                                              systemImage: source.isKnowledge ? "books.vertical.fill" : "globe")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                                if let url = source.webURL {
+                                    Button {
+                                        openURL(url)
+                                    } label: {
+                                        Image(systemName: "arrow.up.right.square")
+                                            .font(.system(size: 16))
+                                            .frame(width: 34, height: 34)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(CompanionPalette.primary)
+                                    .accessibilityLabel("打开网页 \(source.title)")
+                                }
+                            }
+                            if !source.snippet.isEmpty {
+                                Text(source.snippet)
+                                    .font(.system(size: 13.5))
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 16))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16)
+                                .strokeBorder(focused ? CompanionPalette.primary : CompanionPalette.border, lineWidth: focused ? 1.5 : 1)
+                        )
+                    }
+                }
+                .padding(16)
+            }
+            .background(CompanionPalette.background)
+            .navigationTitle("参考来源（\(context.sources.count)）")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
+            }
+        }
+        .inAppLinks()
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .tint(CompanionPalette.primary)
+    }
+}
+
+/// Contextual follow-up suggestion pills displayed under the latest completed reply.
+@MainActor
+private struct FollowupChipsRow: View {
+    let suggestions: [String]
+    var onSelect: (String) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(suggestions, id: \.self) { prompt in
+                    Button { onSelect(prompt) } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 11))
+                                .foregroundStyle(CompanionPalette.primary)
+                                .accessibilityHidden(true)
+                            Text(prompt)
+                                .font(.system(size: 13.5))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(CompanionPalette.surface, in: Capsule())
+                        .overlay(Capsule().strokeBorder(CompanionPalette.border))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("追问：\(prompt)")
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+}
+
+/// Lightweight sheet to edit an existing user message and resubmit from that turn.
+@MainActor
+private struct EditMessageSheet: View {
+    let message: ChatMessage
+    var onSubmit: (String) async -> Bool
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft = ""
+    @State private var quoteHeader: String?
+    @State private var busy = false
+
+    private var cleanDraft: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("修改后将从这条消息重新生成后续回复。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                if let quoteHeader, !quoteHeader.isEmpty {
+                    HStack(spacing: 8) {
+                        Rectangle().fill(CompanionPalette.primary).frame(width: 2)
+                        Text(quoteHeader).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                    }
+                    .padding(.horizontal, 16)
+                }
+                TextEditor(text: $draft)
+                    .font(.body)
+                    .scrollContentBackground(.hidden)
+                    .padding(12)
+                    .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 16))
+                    .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(CompanionPalette.border))
+                    .padding(.horizontal, 16)
+                    .disabled(busy)
+                Spacer(minLength: 0)
+            }
+            .padding(.bottom, 16)
+            .background(CompanionPalette.background)
+            .navigationTitle("编辑并重发")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }.disabled(busy)
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button(busy ? "发送中…" : "重发") {
+                        Task { await submit() }
+                    }
+                    .fontWeight(.semibold)
+                    .disabled(busy || cleanDraft.isEmpty)
+                }
+            }
+        }
+        .onAppear {
+            let parsed = UserQuote.parse(message.content)
+            quoteHeader = parsed.quote
+            draft = parsed.content
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .tint(CompanionPalette.primary)
+    }
+
+    private func submit() async {
+        guard !busy, !cleanDraft.isEmpty else { return }
+        busy = true
+        let finalContent = UserQuote.format(content: cleanDraft, quotedContext: quoteHeader)
+        let ok = await onSubmit(finalContent)
+        busy = false
+        if ok { dismiss() }
     }
 }
 
