@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .notices import render_notice
+from .tools.citations import get_turn_citations
 
 APPROVE_COMMAND = "/approve"
 CANCEL_COMMAND = "/cancel"
@@ -306,6 +307,7 @@ class DraftSegmentStreamer:
 
     async def close_segment(
         self, *, final_raw: Optional[str] = None, for_tools: bool = False,
+        sources: Optional[Sequence[dict[str, Any]]] = None,
     ) -> tuple[str, list[str]]:
         """Close draft: WS `stream_end` (`persist=False`) + `append_store()` ONLY (no duplicate WS `message`)."""
         await self.close_reasoning()
@@ -313,6 +315,9 @@ class DraftSegmentStreamer:
         final_text = self.sink.transform_cards(self.chat_id, clean, include_pick_card=not for_tools).strip()
         stream_id, emitted = self.stream_id, self.emitted_text
         self.stream_id, self.raw_text, self.emitted_text = None, "", ""
+        raw_sources = sources if sources is not None else ([] if for_tools else get_turn_citations())
+        src_list = [dict(item) for item in raw_sources if isinstance(item, dict)]
+        src_extra: dict[str, Any] = {"sources": src_list} if src_list else {}
 
         if stream_id is not None:
             if final_text:
@@ -320,16 +325,18 @@ class DraftSegmentStreamer:
                     await self._ws_emit(
                         "delta", text=final_text[len(emitted) :], stream_id=stream_id, turn_phase="answer",
                     )
-                    await self._ws_emit("stream_end", stream_id=stream_id)
+                    await self._ws_emit("stream_end", stream_id=stream_id, **src_extra)
                 elif final_text != emitted.strip():
-                    await self._ws_emit("stream_end", stream_id=stream_id, text=final_text, turn_phase="answer")
+                    await self._ws_emit(
+                        "stream_end", stream_id=stream_id, text=final_text, turn_phase="answer", **src_extra,
+                    )
                 else:
-                    await self._ws_emit("stream_end", stream_id=stream_id)
+                    await self._ws_emit("stream_end", stream_id=stream_id, **src_extra)
                 self.emitted_any_text = True
                 self.sink.note_turn_output(self.chat_id, self.turn_id)
                 self.sink.append_store(self.chat_id, {
                     "event": "message", "text": final_text, "turn_id": self.turn_id,
-                    "turn_phase": "answer", "projection_id": new_history_id(),
+                    "turn_phase": "answer", "projection_id": new_history_id(), **src_extra,
                 })
             else:
                 await self._ws_emit("stream_end", stream_id=stream_id, text="")
@@ -339,7 +346,7 @@ class DraftSegmentStreamer:
             self.sink.note_turn_output(self.chat_id, self.turn_id)
             await self.sink.emit(self.chat_id, {
                 "event": "message", "text": final_text, "turn_id": self.turn_id,
-                "turn_phase": "answer", "projection_id": new_history_id(),
+                "turn_phase": "answer", "projection_id": new_history_id(), **src_extra,
             }, persist=True)
             self.draft_id += 1
 

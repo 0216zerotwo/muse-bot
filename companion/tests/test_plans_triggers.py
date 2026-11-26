@@ -147,6 +147,7 @@ class CapabilitiesAndLocalizedErrorsTest(unittest.TestCase):
         media_mod = importlib.import_module(f"{pkg}.media")
         server_mod = importlib.import_module(f"{pkg}.server")
         stt_mod = importlib.import_module(f"{pkg}.modules.stt_sensevoice")
+        tts_mod = importlib.import_module(f"{pkg}.modules.tts_api")
         push_mod = importlib.import_module(f"{pkg}.modules.push")
         computer_mod = importlib.import_module(f"{pkg}.modules.computer")
         store = chat_store(folder)
@@ -176,6 +177,7 @@ class CapabilitiesAndLocalizedErrorsTest(unittest.TestCase):
         with (
             mock.patch.object(paths_mod, "get_webui_dir", return_value=folder),
             mock.patch.object(stt_mod, "stt_available", return_value=False),
+            mock.patch.object(tts_mod, "tts_available", return_value=True),
             mock.patch.object(push_mod, "available", return_value=True),
             mock.patch.object(computer_mod, "_executable", return_value="/usr/bin/chromium"),
         ):
@@ -185,7 +187,7 @@ class CapabilitiesAndLocalizedErrorsTest(unittest.TestCase):
                 boot_json = boot.json()
                 self.assertEqual(
                     boot_json["capabilities"],
-                    {"stt": False, "push": True, "browser": True},
+                    {"stt": False, "tts": True, "push": True, "browser": True},
                 )
 
                 api_tok = boot_json["api_token"]
@@ -194,7 +196,7 @@ class CapabilitiesAndLocalizedErrorsTest(unittest.TestCase):
                 self.assertEqual(comp.status_code, 200)
                 self.assertEqual(
                     comp.json()["capabilities"],
-                    {"stt": False, "push": True, "browser": True},
+                    {"stt": False, "tts": True, "push": True, "browser": True},
                 )
 
                 with client.websocket_connect(f"ws://127.0.0.1:8766/ws?token={ws_tok}") as ws:
@@ -213,7 +215,7 @@ class CapabilitiesAndLocalizedErrorsTest(unittest.TestCase):
                     self.assertEqual(updated["result"]["name"], "小橘")
                     self.assertEqual(
                         updated["result"]["capabilities"],
-                        {"stt": False, "push": True, "browser": True},
+                        {"stt": False, "tts": True, "push": True, "browser": True},
                     )
 
                     # Invalid mutation returns Chinese error message rather than raw English.
