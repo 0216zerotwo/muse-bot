@@ -50,6 +50,7 @@ import { usePetMood } from "./usePetMood";
 import { usePetScale } from "./appearance";
 import { LazyBoundary, lazyScreen } from "./Screen";
 import { ViewerProvider } from "./Viewer";
+import { ArtifactProvider, useArtifact } from "./muse/ArtifactContext";
 
 const FeedScreen = lazyScreen(() => import("./muse/Feed").then((m) => ({ default: m.FeedScreen })));
 const FeedSettingsSheet = lazyScreen(() => import("./muse/Feed").then((m) => ({ default: m.FeedSettingsSheet })));
@@ -57,6 +58,17 @@ const GoalsScreen = lazyScreen(() => import("./muse/GoalsScreen").then((m) => ({
 const HelpersScreen = lazyScreen(() => import("./muse/Helpers").then((m) => ({ default: m.HelpersScreen })));
 const TeachSheet = lazyScreen(() => import("./muse/TeachSheet").then((m) => ({ default: m.TeachSheet })));
 const CreationsView = lazyScreen(() => import("./Creations").then((m) => ({ default: m.CreationsView })));
+const ArtifactPane = lazyScreen(() => import("./muse/ArtifactPane").then((m) => ({ default: m.ArtifactPane })));
+
+function ArtifactPaneSlot() {
+  const ctx = useArtifact();
+  if (!ctx?.artifact) return null;
+  return (
+    <LazyBoundary onClose={ctx.closeArtifact}>
+      <ArtifactPane />
+    </LazyBoundary>
+  );
+}
 
 export type CompanionTab = MuseTab;
 
@@ -145,9 +157,18 @@ export function CompanionScreen({
 }) {
   const history = useSessionHistory(session.key);
   const [draft, setDraft] = useState("");
+  const [localFocusAt, setLocalFocusAt] = useState<number | undefined>(undefined);
   useEffect(() => {
     if (draftRequest) setDraft(draftRequest.text);
   }, [draftRequest]);
+  const handleRefineDraft = useCallback(
+    (text: string) => {
+      setDraft(text);
+      setLocalFocusAt(Date.now());
+      onTab("chat");
+    },
+    [onTab],
+  );
   const { refresh } = history;
 
   useEffect(() => {
@@ -186,8 +207,9 @@ export function CompanionScreen({
       teachRequest={teachRequest}
       jumpRequest={jumpRequest}
       draft={draft}
-      focusRequest={draftRequest?.at}
+      focusRequest={Math.max(draftRequest?.at ?? 0, localFocusAt ?? 0) || undefined}
       onDraft={setDraft}
+      onRefineDraft={handleRefineDraft}
       onOpenMenu={onOpenMenu}
       onUpdateCompanion={onUpdateCompanion}
       onChangeLook={onChangeLook}
@@ -218,6 +240,7 @@ export function LiveScreen({
   draft,
   focusRequest,
   onDraft,
+  onRefineDraft,
   onOpenMenu,
   onUpdateCompanion,
   onChangeLook,
@@ -246,6 +269,7 @@ export function LiveScreen({
   draft: string;
   focusRequest?: number;
   onDraft: (draft: string) => void;
+  onRefineDraft?: (draft: string) => void;
   onOpenMenu: () => void;
   onUpdateCompanion: (changes: CompanionChanges) => Promise<void>;
   /** 换形象: to the main chat with “把虚拟形象改为” in the box. */
@@ -675,9 +699,22 @@ export function LiveScreen({
     submit(text);
   };
 
+  const refineDraft = useCallback(
+    (text: string) => {
+      if (onRefineDraft) onRefineDraft(text);
+      else {
+        onDraft(text);
+        onTab("chat");
+      }
+    },
+    [onDraft, onRefineDraft, onTab],
+  );
+
   return (
     <ViewerProvider>
-    <div className="relative h-full overflow-hidden">
+    <ArtifactProvider onRefine={refineDraft}>
+    <div className="flex h-full overflow-hidden">
+    <div className="relative min-w-0 flex-1 overflow-hidden">
       <div
         ref={chatScrollRef}
         onScroll={onChatScroll}
@@ -961,6 +998,9 @@ export function LiveScreen({
         </LazyBoundary>
       )}
     </div>
+    <ArtifactPaneSlot />
+    </div>
+    </ArtifactProvider>
     </ViewerProvider>
   );
 }

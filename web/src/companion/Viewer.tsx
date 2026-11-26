@@ -1,27 +1,46 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode, type TouchEvent } from "react";
+import { createContext, lazy, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type TouchEvent } from "react";
 import {
   AlertCircle,
+  Check,
   ChevronLeft,
   ChevronRight,
+  Code2,
+  Copy,
   Download,
   ExternalLink,
+  Eye,
   FileText,
   ImageOff,
   Loader2,
   Music,
   RotateCcw,
   Share,
+  Table2,
   Trash2,
+  WrapText,
   X,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
 
 import { MarkdownText } from "@/components/MarkdownText";
+import { useThemeValue } from "@/hooks/useTheme";
+import { copyTextToClipboard } from "@/lib/clipboard";
 
 import { androidShell } from "./android-shell";
 import type { CreationKind } from "./companion-api";
+import {
+  artifactHtmlDocument,
+  csvRows,
+  fileBadge,
+  fileEnding,
+  fileKind,
+  isPreviewableDocument,
+  svgPageDocument,
+} from "./fileKinds";
 import { useBackKey, useDialogFocus } from "./Screen";
+
+const LazyMermaidDiagram = lazy(() => import("@/components/MermaidDiagram"));
 
 /** Something to look at full screen: a file in 创意 or media from the chat. */
 export interface ViewerItem {
@@ -36,9 +55,8 @@ export interface ViewerItem {
   downloadUrl?: string;
 }
 
-const TEXT_SUFFIXES = [".md", ".markdown", ".txt", ".csv", ".json", ".log"];
-/** Larger text files open elsewhere instead of in the preview. */
-const MAX_PREVIEW_BYTES = 1024 * 1024;
+/** Larger text/web files open elsewhere instead of in the inline preview. */
+const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
 const SWIPE_PX = 50;
 const DOUBLE_TAP_MS = 300;
 export const MIN_ZOOM = 1;
@@ -47,13 +65,8 @@ export const ZOOM_STEP = 0.5;
 const FOCUS_RING =
   "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--c-primary)]";
 
-function isTextFile(name: string): boolean {
-  const lower = name.toLowerCase();
-  return TEXT_SUFFIXES.some((suffix) => lower.endsWith(suffix));
-}
-
 function isPdfFile(name: string): boolean {
-  return name.toLowerCase().endsWith(".pdf");
+  return fileKind(name) === "pdf";
 }
 
 function clampZoom(value: number): number {
@@ -101,7 +114,7 @@ async function shareItem(item: ViewerItem) {
 
 /**
  * Full-screen look at one item at a time: images zoom with a double tap and
- * swipe to the next one, videos and audio play, text documents show inline.
+ * swipe to the next one, videos and audio play, web/svg/mermaid/markdown/code/text documents show inline.
  */
 export function Viewer({
   items,
@@ -528,12 +541,64 @@ function ViewerBody({ item, zoom, onToggleZoom }: { item: ViewerItem; zoom: numb
   return <DocumentBody item={item} />;
 }
 
+function MonospaceSourceView({
+  text,
+  wrap,
+  showLineNumbers,
+}: {
+  text: string;
+  wrap: boolean;
+  showLineNumbers: boolean;
+}) {
+  const lines = useMemo(() => text.split("\n"), [text]);
+  return (
+    <div
+      className="c-card mx-auto max-w-3xl overflow-auto rounded-2xl p-4 font-mono text-[13px] leading-relaxed"
+      data-testid="viewer-code-body"
+      data-wrapped={wrap ? "true" : "false"}
+    >
+      <pre className={`m-0 ${wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre"}`}>
+        <code>
+          {showLineNumbers
+            ? lines.map((line, idx) => (
+                <span key={idx} className={`flex ${wrap ? "min-w-0" : "min-w-max"}`}>
+                  <span
+                    aria-hidden="true"
+                    className="c-muted w-10 shrink-0 select-none pr-3 text-right text-[12px] opacity-60 tabular-nums"
+                  >
+                    {idx + 1}
+                  </span>
+                  <span className={wrap ? "min-w-0 flex-1 whitespace-pre-wrap break-words" : "whitespace-pre"}>
+                    {line || " "}
+                  </span>
+                  {idx < lines.length - 1 ? "\n" : null}
+                </span>
+              ))
+            : text}
+        </code>
+      </pre>
+    </div>
+  );
+}
+
 function DocumentBody({ item }: { item: ViewerItem }) {
-  const previewable = isTextFile(item.name);
+  const kind = fileKind(item.name);
+  const previewable = isPreviewableDocument(item.name);
   const pdf = isPdfFile(item.name);
+  const isDark = useThemeValue() === "dark";
+  const hasDualMode = kind === "web" || kind === "svg" || kind === "mermaid" || kind === "markdown" || kind === "table";
+
   const [text, setText] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [mode, setMode] = useState<"preview" | "source">("preview");
+  const [wrap, setWrap] = useState(true);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    setMode("preview");
+    setCopied(false);
+  }, [item.key, item.url]);
 
   useEffect(() => {
     if (!previewable) return;
@@ -553,21 +618,174 @@ function DocumentBody({ item }: { item: ViewerItem }) {
     };
   }, [attempt, item.url, previewable]);
 
+  const handleCopy = useCallback(() => {
+    if (text === null) return;
+    void copyTextToClipboard(text).then((ok) => {
+      if (!ok) return;
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_500);
+    });
+  }, [text]);
+
+  const htmlSrcDoc = useMemo(
+    () => (kind === "web" && text !== null ? artifactHtmlDocument(text, isDark) : ""),
+    [kind, text, isDark],
+  );
+  const svgSrcDoc = useMemo(
+    () => (kind === "svg" && text !== null ? svgPageDocument(text, isDark) : ""),
+    [kind, text, isDark],
+  );
+  const tableRows = useMemo(
+    () => (kind === "table" && text !== null ? csvRows(text, fileEnding(item.name) === "tsv" ? "\t" : ",", 200, 30) : []),
+    [kind, item.name, text],
+  );
+
   if (previewable && !failed) {
+    if (text === null) {
+      return (
+        <div className="flex flex-col items-center justify-center gap-2 pt-12 text-center" role="status">
+          <Loader2 className="c-muted h-5 w-5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+          <p className="c-muted text-sm">正在打开…</p>
+        </div>
+      );
+    }
+
+    const lineCount = text.split("\n").length;
+    const showSource = !hasDualMode || mode === "source";
+
     return (
-      <div className="absolute inset-0 overflow-y-auto overscroll-contain px-5 pb-6">
-        {text === null ? (
-          <div className="flex flex-col items-center justify-center gap-2 pt-12 text-center" role="status">
-            <Loader2 className="c-muted h-5 w-5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-            <p className="c-muted text-sm">正在打开…</p>
+      <div className="absolute inset-0 flex flex-col overflow-hidden">
+        <div className="mx-auto flex w-full max-w-3xl shrink-0 flex-wrap items-center justify-between gap-2 px-4 pb-2.5">
+          <div className="flex items-center gap-2">
+            <span
+              className="rounded-full px-2.5 py-0.5 font-mono text-[11px] font-semibold"
+              style={{ background: "var(--c-fill)", color: "var(--c-text-muted)" }}
+            >
+              {fileBadge(item.name)}
+            </span>
+            <span className="c-muted text-[12px] tabular-nums">{lineCount} 行</span>
           </div>
-        ) : item.name.toLowerCase().endsWith(".md") || item.name.toLowerCase().endsWith(".markdown") ? (
-          <div className="mx-auto max-w-2xl text-[15px] leading-relaxed">
-            <MarkdownText>{text}</MarkdownText>
+
+          <div className="flex items-center gap-1.5">
+            {hasDualMode && (
+              <div
+                role="tablist"
+                aria-label="预览模式切换"
+                className="inline-flex items-center rounded-full p-0.5"
+                style={{ background: "var(--c-segment)" }}
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={mode === "preview"}
+                  onClick={() => setMode("preview")}
+                  className={`inline-flex min-h-8 items-center gap-1 rounded-full px-3 text-[12.5px] font-medium ${FOCUS_RING}`}
+                  style={mode === "preview" ? { background: "var(--c-segment-on)", color: "var(--c-text)" } : undefined}
+                >
+                  {kind === "table" ? <Table2 className="h-3.5 w-3.5" aria-hidden="true" /> : <Eye className="h-3.5 w-3.5" aria-hidden="true" />}
+                  {kind === "table" ? "表格" : "预览"}
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={mode === "source"}
+                  onClick={() => setMode("source")}
+                  className={`inline-flex min-h-8 items-center gap-1 rounded-full px-3 text-[12.5px] font-medium ${FOCUS_RING}`}
+                  style={mode === "source" ? { background: "var(--c-segment-on)", color: "var(--c-text)" } : undefined}
+                >
+                  <Code2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  源码
+                </button>
+              </div>
+            )}
+
+            {showSource && (
+              <button
+                type="button"
+                aria-pressed={wrap}
+                onClick={() => setWrap((v) => !v)}
+                className={`c-pressable inline-flex min-h-8 items-center gap-1 rounded-full px-2.5 text-[12px] font-medium ${FOCUS_RING}`}
+                style={{ background: wrap ? "var(--c-fill)" : "transparent" }}
+              >
+                <WrapText className="h-3.5 w-3.5" aria-hidden="true" />
+                自动换行
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={handleCopy}
+              className={`c-pressable inline-flex min-h-8 items-center gap-1 rounded-full px-3 text-[12.5px] font-medium ${FOCUS_RING}`}
+              style={{ background: "var(--c-fill)" }}
+            >
+              {copied ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : <Copy className="h-3.5 w-3.5" aria-hidden="true" />}
+              {copied ? "已复制" : "复制"}
+            </button>
           </div>
-        ) : (
-          <pre className="mx-auto max-w-2xl whitespace-pre-wrap break-words text-[14px] leading-relaxed">{text}</pre>
-        )}
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-6">
+          {!showSource && kind === "web" ? (
+            <div className="mx-auto h-full max-w-4xl">
+              <iframe
+                title={`预览：${item.title}`}
+                sandbox="allow-scripts"
+                referrerPolicy="no-referrer"
+                srcDoc={htmlSrcDoc}
+                className="h-full min-h-[360px] w-full rounded-2xl border border-om-border bg-white"
+              />
+            </div>
+          ) : !showSource && kind === "svg" ? (
+            <div className="mx-auto h-full max-w-4xl">
+              <iframe
+                title={`预览：${item.title}`}
+                sandbox=""
+                referrerPolicy="no-referrer"
+                srcDoc={svgSrcDoc}
+                className="h-full min-h-[360px] w-full rounded-2xl border border-om-border bg-transparent"
+              />
+            </div>
+          ) : !showSource && kind === "mermaid" ? (
+            <div className="mx-auto max-w-4xl">
+              <Suspense
+                fallback={
+                  <div className="flex min-h-[200px] items-center justify-center gap-2 text-sm c-muted" role="status">
+                    <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                    正在加载图表引擎…
+                  </div>
+                }
+              >
+                <LazyMermaidDiagram code={text} interactive />
+              </Suspense>
+            </div>
+          ) : !showSource && kind === "markdown" ? (
+            <div className="c-bubble-text mx-auto max-w-2xl text-[15px] leading-relaxed">
+              <MarkdownText>{text}</MarkdownText>
+            </div>
+          ) : !showSource && kind === "table" ? (
+            <div className="c-card mx-auto max-w-4xl overflow-x-auto rounded-2xl">
+              <table className="w-full border-collapse text-left text-[13px]">
+                <tbody>
+                  {tableRows.map((row, r) => (
+                    <tr
+                      key={r}
+                      className={r === 0 ? "font-semibold" : ""}
+                      style={{ borderBottom: "0.5px solid var(--c-border)", background: r === 0 ? "var(--c-fill)" : undefined }}
+                    >
+                      {row.map((cell, c) => (
+                        <td key={c} className="whitespace-nowrap px-3 py-2">
+                          {cell}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <MonospaceSourceView text={text} wrap={wrap} showLineNumbers={kind !== "text"} />
+          )}
+        </div>
       </div>
     );
   }
