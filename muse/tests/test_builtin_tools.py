@@ -133,6 +133,7 @@ class ToolRegistryAndOverflowTest(unittest.TestCase):
                 "cronjob",
                 "file",
                 "image_gen",
+                "knowledge",
                 "memory",
                 "session_search",
                 "skills",

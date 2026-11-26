@@ -16,6 +16,7 @@ MAX_DIRECT_TOOLS = 128
 CORE_TOOLSETS = frozenset({
     "companion",
     "clarify",
+    "knowledge",
     "memory",
     "session_search",
     "terminal",

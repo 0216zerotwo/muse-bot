@@ -638,6 +638,7 @@ _DEFAULT_TOOLSET_BY_NAME: dict[str, str] = {
     "terminal": "terminal", "process": "terminal",
     "web_search": "web", "web_extract": "web",
     "clarify": "clarify", "memory": "memory", "session_search": "session_search",
+    "knowledge_search": "knowledge", "knowledge_list": "knowledge",
     "skills_list": "skills", "skill_view": "skills", "skill_manage": "skills",
     "browser_vault": "browser", "vision_analyze": "vision",
     "image_generate": "image_gen", "video_generate": "video_gen", "text_to_speech": "tts",
