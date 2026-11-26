@@ -6,8 +6,6 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-from companion.modules.knowledge import list_knowledge, search_knowledge
-
 TOOLSET = "knowledge"
 MAX_CHUNK_EXCERPT_CHARS = 1000
 
@@ -62,6 +60,9 @@ def knowledge_search_handler(
     raw_limit = args.get("limit")
     limit = max(1, min(20, int(raw_limit if raw_limit is not None else 5)))
 
+    # 延迟导入知识库引擎，保持 muse.tools 与 companion.modules 解耦
+    from companion.modules.knowledge import search_knowledge
+
     hits = search_knowledge(query, collection=collection, limit=limit, home=home)
     _emit_knowledge_citations(hits)
 
@@ -90,6 +91,8 @@ def knowledge_list_handler(
     **_: Any,
 ) -> str:
     """List documents, collections, and chunk stats stored in the user's personal knowledge base."""
+    from companion.modules.knowledge import list_knowledge
+
     collection = str(args.get("collection") or "").strip() or None
     listing = list_knowledge(collection=collection, home=home)
     docs = listing.get("documents") or []

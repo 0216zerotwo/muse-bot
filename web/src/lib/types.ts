@@ -1494,6 +1494,13 @@ export type InboundEvent =
       usage?: TurnUsage;
     }
   | {
+      event: "chat_forked";
+      chat_id: string;
+      source_chat_id?: string;
+      key?: string;
+      sessions?: unknown[];
+    }
+  | {
       event: "message_accepted";
       chat_id: string;
       turn_id: string;

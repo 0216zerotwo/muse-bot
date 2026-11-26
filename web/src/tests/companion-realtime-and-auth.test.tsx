@@ -185,6 +185,39 @@ describe("NanobotClient realtime resilience & cross-stack events", () => {
     await uploadPromise;
     client.close();
   });
+
+  it("resolves forkChat on chat_forked server frame and rejects promptly on fork_failed error", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = new NanobotClient({
+      url: "ws://127.0.0.1:8766/ws",
+      reconnect: false,
+      socketFactory: (url) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        return s as unknown as WebSocket;
+      },
+    });
+    client.connect();
+    sockets[0].open();
+    sockets[0].receive({ event: "ready", chat_id: "main", client_id: "c1" });
+
+    const forkPromise = client.forkChat("main", 1, "分叉测试");
+    const sentFork = JSON.parse(sockets[0].sent.at(-1) || "{}") as { type: string; source_chat_id: string; before_user_index: number; title?: string };
+    expect(sentFork).toEqual({
+      type: "fork_chat",
+      source_chat_id: "main",
+      before_user_index: 1,
+      title: "分叉测试",
+    });
+
+    sockets[0].receive({ event: "chat_forked", chat_id: "forked-1", source_chat_id: "main" });
+    await expect(forkPromise).resolves.toBe("forked-1");
+
+    const failPromise = client.forkChat("missing", 0);
+    sockets[0].receive({ event: "error", detail: "fork_failed", reason: "找不到对话", chat_id: "missing" });
+    await expect(failPromise).rejects.toThrow("fork_failed:找不到对话");
+    client.close();
+  });
 });
 
 describe("useNanobotStream non-destructive history reconciliation & Android notifications", () => {
