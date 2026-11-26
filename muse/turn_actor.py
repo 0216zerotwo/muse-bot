@@ -26,6 +26,7 @@ from .streaming import (
     extract_media_lines, failure_notice_zh, format_clarify_card, format_slash_confirm_card,
     new_history_id, strip_card_fences, translate_retry_status,
 )
+from .tools.citations import get_turn_citations, turn_citations_scope
 
 logger = logging.getLogger(__name__)
 
@@ -648,7 +649,7 @@ class ChatTurnActor:
         last_final_text = ""
 
         try:
-            with turn_context_scope(ctx):
+            with turn_context_scope(ctx), turn_citations_scope():
                 prior_history = db_rows_to_llm_messages(self.db.get_messages(session_id, active_only=True))
                 pre_llm_context = await self._collect_pre_llm_context(
                     msg.text, session_id, prior_history[:-1] if prior_history else [], internal=msg.internal,
@@ -681,6 +682,9 @@ class ChatTurnActor:
                         wire_msgs, sys_prompt, session_id, current_turn_id, streamer, scope,
                     )
                     self._record_usage(session_id, usage)
+                    turn_sources = get_turn_citations() if not tool_calls else []
+                    if turn_sources:
+                        msg_extra = {**msg_extra, "sources": turn_sources}
                     if not tool_calls:
                         self._flush_deferred_proactive(session_id)
                     self.db.append_message(
@@ -689,7 +693,7 @@ class ChatTurnActor:
                     )
 
                     if not tool_calls:
-                        final_text, media = await streamer.close_segment(final_raw=raw_text, for_tools=False)
+                        final_text, media = await streamer.close_segment(final_raw=raw_text, for_tools=False, sources=turn_sources or None)
                         await streamer.flush_media(media, reply_context=final_text)
                         last_final_text = final_text or raw_text
                         self._flush_deferred_proactive(session_id)

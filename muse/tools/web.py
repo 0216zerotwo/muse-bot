@@ -1,7 +1,8 @@
-"""Web tools: `web_search` (`data.web` contract) and SSRF-guarded `web_extract`."""
+"""Web tools: `web_search` (`data.web` contract), concurrent SSRF-guarded `web_extract`, and `deep_research`."""
 
 from __future__ import annotations
 
+import contextvars
 import html
 import ipaddress
 import json
@@ -9,10 +10,14 @@ import os
 import re
 import socket
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from typing import Any, Optional
 
 import httpx
+
+from muse.interceptors import scrub_url_secrets
+from muse.tools.citations import record_citations
 
 TOOLSET = "web"
 MAX_REDIRECTS = 5
@@ -260,6 +265,25 @@ def _search_ddgs(
     return out
 
 
+def _run_search_query(
+    query: str,
+    limit: int,
+    *,
+    requested: str = "auto",
+    region: str = "wt-wt",
+    timelimit: Optional[str] = None,
+) -> tuple[str, list[dict[str, str]]]:
+    from muse.config_store import get_env_value
+
+    tavily_key = (get_env_value("TAVILY_API_KEY") or "").strip()
+    brave_key = (get_env_value("BRAVE_API_KEY") or "").strip()
+    if requested == "tavily" or (requested == "auto" and tavily_key):
+        return "tavily", _search_tavily(query, limit, tavily_key)
+    if requested == "brave" or (requested == "auto" and brave_key):
+        return "brave", _search_brave(query, limit, brave_key)
+    return "ddgs", _search_ddgs(query, limit, region=region, timelimit=timelimit)
+
+
 def web_search_handler(args: dict[str, Any], **_: Any) -> str:
     """Search the web and strictly return `{"success": True, "data": {"web": [...]}}`."""
     query = str(args.get("query") or "").strip()
@@ -275,25 +299,26 @@ def web_search_handler(args: dict[str, Any], **_: Any) -> str:
     timelimit = str(args["timelimit"]).strip() if args.get("timelimit") else None
     requested = str(args.get("backend") or get_env_value("MUSE_WEB_SEARCH_BACKEND") or "auto").lower()
 
-    tavily_key = (get_env_value("TAVILY_API_KEY") or "").strip()
-    brave_key = (get_env_value("BRAVE_API_KEY") or "").strip()
-
     try:
-        if requested == "tavily" or (requested == "auto" and tavily_key):
-            rows = _search_tavily(query, limit, tavily_key)
-            chosen = "tavily"
-        elif requested == "brave" or (requested == "auto" and brave_key):
-            rows = _search_brave(query, limit, brave_key)
-            chosen = "brave"
-        else:
-            rows = _search_ddgs(query, limit, region=region, timelimit=timelimit)
-            chosen = "ddgs"
+        chosen, rows = _run_search_query(query, limit, requested=requested, region=region, timelimit=timelimit)
+        top_rows = rows[:limit]
+        if top_rows:
+            record_citations(
+                [
+                    {
+                        "title": item.get("title") or "",
+                        "url": item.get("url") or "",
+                        "snippet": item.get("description") or "",
+                    }
+                    for item in top_rows
+                ]
+            )
         return json.dumps(
             {
                 "success": True,
                 "backend": chosen,
                 "query": query,
-                "data": {"web": rows[:limit]},
+                "data": {"web": top_rows},
             },
             ensure_ascii=False,
         )
@@ -371,11 +396,67 @@ def _fetch_and_extract_one(
         return {"url": current, "content": "", "error": f"{type(exc).__name__}: {exc}"}
 
 
+def _extract_snippet(content: str, max_len: int = 240) -> str:
+    cleaned = re.sub(r"(?m)^\s*#{1,6}\s+", "", str(content or ""))
+    cleaned = " ".join(cleaned.split()).strip()
+    if len(cleaned) > max_len:
+        return cleaned[: max_len - 1].rstrip() + "…"
+    return cleaned
+
+
+def _normalize_dedup_url(url: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(scrub_url_secrets(str(url or "").strip()))
+    except ValueError:
+        return ""
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if scheme not in ("http", "https") or not host:
+        return ""
+    port = f":{parsed.port}" if parsed.port else ""
+    netloc = f"[{host}]{port}" if ":" in host else f"{host}{port}"
+    return urllib.parse.urlunsplit((scheme, netloc, (parsed.path or "").rstrip("/"), parsed.query or "", ""))
+
+
+def _url_domain(url: str) -> str:
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").strip().lower().rstrip(".")
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") and len(host) > 4 else host
+
+
+def _extract_urls_parallel(
+    urls: list[str],
+    *,
+    max_chars: int = DEFAULT_EXTRACT_CHARS,
+    url_validator: Any = is_safe_public_url,
+) -> list[dict[str, Any]]:
+    if not urls:
+        return []
+    workers = min(5, len(urls))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(
+                contextvars.copy_context().run,
+                _fetch_and_extract_one,
+                u,
+                max_chars=max_chars,
+                url_validator=url_validator,
+            )
+            for u in urls
+        ]
+        return [fut.result() for fut in futures]
+
+
 def web_extract_handler(args: dict[str, Any], **_: Any) -> str:
-    """Fetch and extract clean Markdown/text from one or more public URLs with SSRF protection."""
+    """Fetch and extract clean Markdown/text from one or more public URLs concurrently with SSRF protection."""
     raw_urls: list[str] = []
     if isinstance(args.get("urls"), list):
-        raw_urls.extend(str(u).strip() for u in args["urls"] if str(u).strip())
+        for item in args["urls"]:
+            s = str(item).strip()
+            if s and s not in raw_urls:
+                raw_urls.append(s)
     if args.get("url"):
         single = str(args["url"]).strip()
         if single and single not in raw_urls:
@@ -387,7 +468,20 @@ def web_extract_handler(args: dict[str, Any], **_: Any) -> str:
         )
 
     max_chars = max(500, min(100_000, int(args.get("max_chars") or DEFAULT_EXTRACT_CHARS)))
-    results = [_fetch_and_extract_one(u, max_chars=max_chars) for u in raw_urls[:10]]
+    results = _extract_urls_parallel(raw_urls[:10], max_chars=max_chars)
+
+    cited_items = [
+        {
+            "title": r.get("title") or "",
+            "url": r.get("url") or "",
+            "snippet": _extract_snippet(str(r.get("content") or "")),
+        }
+        for r in results
+        if r.get("content") and not r.get("error")
+    ]
+    if cited_items:
+        record_citations(cited_items)
+
     any_ok = any(bool(r.get("content")) and not r.get("error") for r in results)
     payload: dict[str, Any] = {"success": any_ok, "results": results}
     if len(results) == 1:
@@ -397,6 +491,187 @@ def web_extract_handler(args: dict[str, Any], **_: Any) -> str:
         if results[0].get("error"):
             payload["error"] = results[0]["error"]
     return json.dumps(payload, ensure_ascii=False)
+
+
+def deep_research_handler(args: dict[str, Any], **_: Any) -> str:
+    """Run parallel multi-query web search + SSRF-safe extraction and return a numbered `[1]..[N]` digest."""
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return json.dumps(
+            {"success": False, "error": "Parameter 'query' is required.", "sources": [], "digest": ""},
+            ensure_ascii=False,
+        )
+
+    queries: list[str] = [query]
+    seen_q = {query.casefold()}
+    raw_subs = args.get("sub_queries")
+    if isinstance(raw_subs, list):
+        for item in raw_subs:
+            sub = str(item or "").strip()
+            if sub and sub.casefold() not in seen_q:
+                seen_q.add(sub.casefold())
+                queries.append(sub)
+            if len(queries) >= 4:
+                break
+
+    raw_max = args.get("max_sources")
+    try:
+        max_sources = 5 if raw_max is None or raw_max == "" else max(1, min(8, int(raw_max)))
+    except (TypeError, ValueError):
+        max_sources = 5
+
+    from muse.config_store import get_env_value
+
+    requested = str(args.get("backend") or get_env_value("MUSE_WEB_SEARCH_BACKEND") or "auto").lower()
+    per_query_limit = max(5, max_sources + 2)
+
+    def _search_one(q: str) -> tuple[str, list[dict[str, str]], Optional[str]]:
+        try:
+            _, rows = _run_search_query(q, per_query_limit, requested=requested)
+            return q, rows[:per_query_limit], None
+        except Exception as exc:
+            return q, [], f"{type(exc).__name__}: {exc}"
+
+    with ThreadPoolExecutor(max_workers=min(4, len(queries))) as pool:
+        search_futs = [pool.submit(contextvars.copy_context().run, _search_one, q) for q in queries]
+        search_outputs = [f.result() for f in search_futs]
+
+    merged: dict[str, dict[str, Any]] = {}
+    search_errors: list[str] = []
+    skipped_unsafe = 0
+    order_seq = 0
+    for q_text, rows, err in search_outputs:
+        if err:
+            search_errors.append(f"{q_text}: {err}")
+            continue
+        for row in rows:
+            raw_url = str(row.get("url") or "").strip()
+            norm_key = _normalize_dedup_url(raw_url)
+            if not norm_key:
+                continue
+            if norm_key in merged:
+                merged[norm_key]["hits"] += 1
+                if not merged[norm_key]["title"] and row.get("title"):
+                    merged[norm_key]["title"] = str(row["title"]).strip()
+                if not merged[norm_key]["description"] and row.get("description"):
+                    merged[norm_key]["description"] = str(row["description"]).strip()
+                continue
+            if not is_safe_public_url(raw_url):
+                skipped_unsafe += 1
+                continue
+            merged[norm_key] = {
+                "url": raw_url,
+                "title": str(row.get("title") or "").strip(),
+                "description": str(row.get("description") or "").strip(),
+                "hits": 1,
+                "rank": order_seq,
+            }
+            order_seq += 1
+
+    ranked = sorted(merged.values(), key=lambda item: (-item["hits"], item["rank"]))
+    selected = ranked[:max_sources]
+    if not selected:
+        return json.dumps(
+            {
+                "success": False,
+                "query": query,
+                "queries": queries,
+                "count": 0,
+                "sources": [],
+                "digest": "",
+                "skipped_unsafe": skipped_unsafe,
+                "errors": search_errors,
+            },
+            ensure_ascii=False,
+        )
+
+    per_source_chars = min(4000, max(1200, 16_000 // max_sources))
+    extracted_list = _extract_urls_parallel(
+        [item["url"] for item in selected],
+        max_chars=per_source_chars,
+    )
+
+    draft_sources: list[dict[str, Any]] = []
+    for cand, ext in zip(selected, extracted_list):
+        err = str(ext.get("error") or "")
+        if err and ("SSRF" in err or "Blocked" in err):
+            skipped_unsafe += 1
+            continue
+        content = str(ext.get("content") or "").strip()
+        final_url = scrub_url_secrets(str(ext.get("url") or cand["url"]).strip())
+        title = str(ext.get("title") or cand["title"] or _url_domain(final_url) or final_url).strip()
+        snippet = str(cand["description"] or (_extract_snippet(content) if content else "")).strip()
+        if not content and not snippet:
+            continue
+        draft_sources.append(
+            {
+                "title": title,
+                "url": final_url,
+                "domain": _url_domain(final_url),
+                "snippet": snippet,
+                "excerpt": content if content else snippet,
+                "extracted": bool(content) and not err,
+            }
+        )
+
+    recorded = record_citations(
+        [
+            {"title": s["title"], "url": s["url"], "domain": s["domain"], "snippet": s["snippet"]}
+            for s in draft_sources
+        ]
+    )
+    recorded_by_key = {_normalize_dedup_url(str(c.get("url") or "")): c for c in recorded}
+    next_fallback_id = max((int(c.get("id") or 0) for c in recorded), default=0)
+
+    sources: list[dict[str, Any]] = []
+    for src in draft_sources:
+        cited = recorded_by_key.get(_normalize_dedup_url(src["url"]))
+        if cited is not None:
+            sid = int(cited["id"])
+        else:
+            next_fallback_id += 1
+            sid = next_fallback_id
+        sources.append(
+            {
+                "id": sid,
+                "title": str(cited["title"]) if cited else src["title"],
+                "url": str(cited["url"]) if cited else src["url"],
+                "domain": str(cited["domain"]) if cited else src["domain"],
+                "snippet": str(cited["snippet"]) if cited else src["snippet"],
+                "excerpt": src["excerpt"],
+                "extracted": src["extracted"],
+            }
+        )
+
+    digest_parts = [
+        f"Deep Research: {query}",
+        f"Queries ({len(queries)}): " + " | ".join(queries),
+        f"Sources ({len(sources)}):",
+    ]
+    for src in sources:
+        block = [
+            f"\n[{src['id']}] {src['title']} ({src['domain']})",
+            f"URL: {src['url']}",
+        ]
+        if src["snippet"]:
+            block.append(f"Summary: {src['snippet']}")
+        if src["excerpt"] and src["excerpt"] != src["snippet"]:
+            block.append(f"Excerpt:\n{src['excerpt']}")
+        digest_parts.append("\n".join(block))
+
+    return json.dumps(
+        {
+            "success": bool(sources),
+            "query": query,
+            "queries": queries,
+            "count": len(sources),
+            "sources": sources,
+            "digest": "\n".join(digest_parts).strip(),
+            "skipped_unsafe": skipped_unsafe,
+            **({"errors": search_errors} if search_errors else {}),
+        },
+        ensure_ascii=False,
+    )
 
 
 WEB_SEARCH_SCHEMA: dict[str, Any] = {
@@ -423,7 +698,7 @@ WEB_SEARCH_SCHEMA: dict[str, Any] = {
 
 WEB_EXTRACT_SCHEMA: dict[str, Any] = {
     "name": "web_extract",
-    "description": "Fetch one or more public HTTP(S) URLs and extract clean Markdown/text.",
+    "description": "Fetch one or more public HTTP(S) URLs concurrently and extract clean Markdown/text.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -431,7 +706,7 @@ WEB_EXTRACT_SCHEMA: dict[str, Any] = {
             "urls": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Batch of public URLs to extract (up to 10).",
+                "description": "Batch of public URLs to extract concurrently (up to 10).",
             },
             "max_chars": {
                 "type": "integer",
@@ -442,16 +717,44 @@ WEB_EXTRACT_SCHEMA: dict[str, Any] = {
     },
 }
 
+DEEP_RESEARCH_SCHEMA: dict[str, Any] = {
+    "name": "deep_research",
+    "description": (
+        "Run parallel multi-query web search, deduplicate safe public URLs, concurrently extract "
+        "full page content, record structured citations, and return a `[1]..[N]` numbered research digest."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Primary research question or topic."},
+            "sub_queries": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Up to 3 focused sub-queries to search in parallel alongside the main query.",
+            },
+            "max_sources": {
+                "type": "integer",
+                "description": "Maximum number of distinct public web sources to extract (1 to 8, default 5).",
+                "default": 5,
+            },
+        },
+        "required": ["query"],
+    },
+}
+
 
 def register_web_tools(registry: Any) -> None:
     registry.register("web_search", toolset=TOOLSET, schema=WEB_SEARCH_SCHEMA, handler=web_search_handler)
     registry.register("web_extract", toolset=TOOLSET, schema=WEB_EXTRACT_SCHEMA, handler=web_extract_handler)
+    registry.register("deep_research", toolset=TOOLSET, schema=DEEP_RESEARCH_SCHEMA, handler=deep_research_handler)
 
 
 __all__ = [
+    "DEEP_RESEARCH_SCHEMA",
     "TOOLSET",
     "WEB_EXTRACT_SCHEMA",
     "WEB_SEARCH_SCHEMA",
+    "deep_research_handler",
     "html_to_markdown",
     "is_safe_public_url",
     "register_web_tools",
