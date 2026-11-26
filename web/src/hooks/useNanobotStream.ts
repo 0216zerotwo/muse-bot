@@ -388,6 +388,7 @@ export function useNanobotStream(
     turn?: UIMessageTurnFields;
     source?: UIMessage["source"];
     responseSources?: UIMessage["responseSources"];
+    sources?: UIMessage["sources"];
   }) => {
     lastStreamFlushRef.current = 0;
     if (streamFrameRef.current !== null) {
@@ -403,8 +404,9 @@ export function useNanobotStream(
     const turn = options?.turn ?? {};
     const source = options?.source;
     const responseSources = options?.responseSources;
-    if (events.length === 0 && finalAnswerText === undefined && source === undefined && responseSources === undefined
-      && !options?.mergeReasoning) {
+    const sources = options?.sources;
+    if (events.length === 0 && finalAnswerText === undefined && source === undefined
+      && responseSources === undefined && sources === undefined && !options?.mergeReasoning) {
       if (options?.closeAnswerSegment) closeActiveAssistantStream();
       return;
     }
@@ -416,6 +418,7 @@ export function useNanobotStream(
         finalAnswerText !== undefined
         || source !== undefined
         || responseSources !== undefined
+        || sources !== undefined
         || options?.mergeReasoning
         || options?.closeAnswerSegment
       ) {
@@ -425,6 +428,7 @@ export function useNanobotStream(
           ...(finalAnswerText !== undefined ? { text: finalAnswerText } : {}),
           ...(source ? { source } : {}),
           ...(responseSources !== undefined ? { response_sources: responseSources } : {}),
+          ...(sources !== undefined ? { sources } : {}),
           ...(options?.mergeReasoning ? { resuming: true, merge_next: true } : {}),
           turn_id: turn.turnId,
           turn_phase: turn.turnPhase,
@@ -823,6 +827,7 @@ export function useNanobotStream(
           turn,
           source: ev.source,
           responseSources: ev.response_sources,
+          ...(ev.sources !== undefined ? { sources: ev.sources } : {}),
         });
         if (projectionRef.current.suppressUntilTurnEnd) return;
         if (ev.resuming) {

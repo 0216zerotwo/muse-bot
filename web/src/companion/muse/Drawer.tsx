@@ -3,7 +3,7 @@
  * 旁聊 (side chats on a topic of their own, kept apart from the main chat); and at the bottom
  * settings, search and a new side chat.
  */
-import { Clock, Loader2, MoreHorizontal, Search, Settings, SquarePen, X } from "lucide-react";
+import { Clock, Download, Loader2, MoreHorizontal, Search, Settings, SquarePen, X } from "lucide-react";
 import { Fragment, useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import type { ChatSummary } from "@/lib/types";
@@ -296,6 +296,7 @@ export function MuseDrawer({
   onDeleteChat,
   search,
   onOpenHit,
+  onExportCurrentChat,
 }: {
   open: boolean;
   onClose: () => void;
@@ -317,6 +318,8 @@ export function MuseDrawer({
   /** 查找聊天记录: messages in any chat that say the words (searched once typing pauses). */
   search?: (words: string) => Promise<ChatSearchHit[]>;
   onOpenHit?: (hit: ChatSearchHit) => void;
+  /** Export the currently open conversation as Markdown. */
+  onExportCurrentChat?: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
@@ -409,7 +412,24 @@ export function MuseDrawer({
         aria-hidden={!open}
       >
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
-          <h1 className="px-3 pb-6 pt-8 text-[32px] font-bold leading-tight">{name}</h1>
+          <div className="flex items-center justify-between gap-2 px-3 pb-6 pt-8">
+            <h1 className="min-w-0 truncate text-[32px] font-bold leading-tight">{name}</h1>
+            {onExportCurrentChat && (
+              <button
+                type="button"
+                aria-label="导出当前对话"
+                onClick={() => {
+                  onExportCurrentChat();
+                  onClose();
+                }}
+                className="c-pressable flex shrink-0 items-center gap-1 rounded-full px-3 py-1.5 text-[12.5px] font-medium"
+                style={{ background: "var(--c-fill)" }}
+              >
+                <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                导出
+              </button>
+            )}
+          </div>
           <p className="c-muted px-3 text-[13px] font-medium">选项卡</p>
           <p className="c-muted px-3 pb-3 pt-1 text-[15px]">你可以长按来重新排序</p>
           <TabList
@@ -497,7 +517,9 @@ export function MuseDrawer({
                             </span>
                             <span className="c-muted ml-auto shrink-0">{hitTime(hit.at_ms)}</span>
                           </span>
-                          <span className="line-clamp-3 block text-[14.5px] leading-snug">{marked(hit.text, found.words)}</span>
+                          <span className="line-clamp-3 block text-[14.5px] leading-snug">
+                            {marked(hit.text, found.words, hit.matches, hit.snippet)}
+                          </span>
                         </button>
                       </li>
                     );
@@ -692,7 +714,41 @@ export function buildSearchSnippet(text: string, words: string, maxLen = 96): Se
 }
 
 /** The words searched for, highlighted in the accent colour inside a centered window. */
-function marked(text: string, words: string): ReactNode {
+function marked(text: string, words: string, matches?: Array<[number, number]>, snippetText?: string): ReactNode {
+  const source = snippetText || text;
+  if (Array.isArray(matches) && matches.length > 0 && source) {
+    const merged: Array<[number, number]> = [];
+    for (const [rawS, rawE] of [...matches].sort((a, b) => a[0] - b[0] || a[1] - b[1])) {
+      const start = Math.max(0, Math.min(source.length, Number(rawS)));
+      const end = Math.max(0, Math.min(source.length, Number(rawE)));
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+      const prev = merged[merged.length - 1];
+      if (prev && start <= prev[1]) prev[1] = Math.max(prev[1], end);
+      else merged.push([start, end]);
+    }
+    if (merged.length > 0) {
+      const nodes: ReactNode[] = [];
+      let cursor = 0;
+      merged.forEach(([start, end], index) => {
+        if (start > cursor) nodes.push(<Fragment key={`t-${index}`}>{source.slice(cursor, start)}</Fragment>);
+        nodes.push(
+          <b
+            key={`m-${index}`}
+            className="rounded px-0.5 font-semibold"
+            style={{
+              color: "var(--c-primary)",
+              background: "color-mix(in srgb, var(--c-primary) 14%, transparent)",
+            }}
+          >
+            {source.slice(start, end)}
+          </b>,
+        );
+        cursor = end;
+      });
+      if (cursor < source.length) nodes.push(<Fragment key="t-tail">{source.slice(cursor)}</Fragment>);
+      return <>{nodes}</>;
+    }
+  }
   const snippet = buildSearchSnippet(text, words);
   return (
     <>

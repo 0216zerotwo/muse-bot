@@ -302,6 +302,16 @@ function hasValidProjectionMetadata(value: Record<string, unknown>): boolean {
   );
 }
 
+function isCitationSource(value: unknown): boolean {
+  return isRecord(value)
+    && (typeof value.url === "string" || typeof value.title === "string")
+    && (value.id === undefined || typeof value.id === "number")
+    && (value.title === undefined || typeof value.title === "string")
+    && (value.url === undefined || typeof value.url === "string")
+    && (value.domain === undefined || typeof value.domain === "string")
+    && (value.snippet === undefined || typeof value.snippet === "string");
+}
+
 function isProjectionTraceDetail(value: unknown): boolean {
   return isRecord(value)
     && typeof value.ref === "string"
@@ -359,6 +369,9 @@ function parseThreadProjectionEvent(value: unknown): ThreadProjectionEvent {
       if (value.media_urls !== undefined && (
         !Array.isArray(value.media_urls) || !value.media_urls.every(isProjectionMedia)
       )) break;
+      if (value.sources !== undefined && (
+        !Array.isArray(value.sources) || !value.sources.every(isCitationSource)
+      )) break;
       return value as unknown as ThreadProjectionEvent;
     case "file_edit":
       if (!Array.isArray(value.edits) || !value.edits.every(isProjectionFileEdit)) break;
@@ -368,6 +381,11 @@ function parseThreadProjectionEvent(value: unknown): ThreadProjectionEvent {
       if (typeof value.text !== "string") break;
       return value as unknown as ThreadProjectionEvent;
     case "stream_end":
+      if (value.text !== undefined && typeof value.text !== "string") break;
+      if (value.sources !== undefined && (
+        !Array.isArray(value.sources) || !value.sources.every(isCitationSource)
+      )) break;
+      return value as unknown as ThreadProjectionEvent;
     case "reasoning_end":
       if (value.text !== undefined && typeof value.text !== "string") break;
       return value as unknown as ThreadProjectionEvent;

@@ -1,15 +1,18 @@
 import { memo, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
-import { BellRing, Brain, ChevronDown, ChevronRight, ListChecks, Target } from "lucide-react";
+import { BellRing, Brain, ChevronDown, ChevronRight, ListChecks, Quote, Target } from "lucide-react";
 
 import { MarkdownText } from "@/components/MarkdownText";
-import { parseQuotedUserMessage } from "@/lib/user-message-quote";
+import { formatQuotedUserMessage, parseQuotedUserMessage } from "@/lib/user-message-quote";
 import type { UIMediaAttachment, UIMessage } from "@/lib/types";
 
+import { androidShell } from "./android-shell";
 import { ApprovalCard } from "./ApprovalCard";
 import { EmojiIcon } from "./EmojiIcon";
 import { DraftCard, FileCard } from "./FileCard";
 import { spokenText, type FileDraft } from "./fileKinds";
 import { Pressable, type MessageAction } from "./MessageActions";
+import { SourcesBar } from "./SourcesBar";
+import type { SpeechPlayerStatus } from "./useSpeechPlayer";
 import { usePetScale } from "./appearance";
 import { CardPlaceholder, CardView } from "./Cards";
 import type { ApprovalRecord, ApprovalScope, RoutingDecision } from "./companion-api";
@@ -129,7 +132,24 @@ function mediaOf(message: UIMessage): UIMediaAttachment[] {
   return [...images, ...(message.media ?? [])];
 }
 
-function UserTurn({ message, me, relay }: { message: UIMessage; me?: ReactNode; relay?: Speaker }) {
+function UserTurn({
+  message,
+  me,
+  relay,
+  editing,
+}: {
+  message: UIMessage;
+  me?: ReactNode;
+  relay?: Speaker;
+  editing?: {
+    draft: string;
+    busy: boolean;
+    error: string | null;
+    onDraftChange: (value: string) => void;
+    onConfirm: () => void;
+    onCancel: () => void;
+  };
+}) {
   const media = mediaOf(message);
   const failed = message.deliveryStatus === "failed";
   const goal = isGoalMessage(message.content);
@@ -168,12 +188,59 @@ function UserTurn({ message, me, relay }: { message: UIMessage; me?: ReactNode; 
           <span className="line-clamp-3 whitespace-pre-wrap">{parsed.quotedContext}</span>
         </div>
       )}
-      {text.trim() && (
-        <div
-          className={`c-bubble-user c-bubble-text max-w-[80%] whitespace-pre-wrap rounded-[20px] px-4 py-2.5 ${me ? "rounded-tr-[6px]" : "rounded-br-[6px]"}`}
-        >
-          {text}
+      {editing ? (
+        <div className="c-card flex w-full min-w-[240px] max-w-[92%] flex-col gap-2 rounded-2xl p-3">
+          <textarea
+            value={editing.draft}
+            onChange={(event) => editing.onDraftChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                editing.onCancel();
+              } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                if (editing.draft.trim() && !editing.busy) editing.onConfirm();
+              }
+            }}
+            rows={3}
+            autoFocus
+            aria-label="编辑消息内容"
+            disabled={editing.busy}
+            className="w-full resize-y rounded-xl bg-transparent p-1.5 text-[15px] leading-snug outline-none ring-1 ring-[var(--c-border)] focus:ring-2 focus:ring-[var(--c-primary)]"
+          />
+          {editing.error && (
+            <p className="c-danger text-[12px]" role="alert">
+              {editing.error}
+            </p>
+          )}
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              disabled={editing.busy}
+              onClick={editing.onCancel}
+              className="c-pressable rounded-full px-3 py-1 text-[13px]"
+              style={{ background: "var(--c-fill)" }}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              disabled={editing.busy || !editing.draft.trim()}
+              onClick={editing.onConfirm}
+              className="c-primary rounded-full px-3.5 py-1 text-[13px] font-semibold disabled:opacity-45"
+            >
+              {editing.busy ? "重发中…" : "确认并重发"}
+            </button>
+          </div>
         </div>
+      ) : (
+        text.trim() && (
+          <div
+            className={`c-bubble-user c-bubble-text max-w-[80%] whitespace-pre-wrap rounded-[20px] px-4 py-2.5 ${me ? "rounded-tr-[6px]" : "rounded-br-[6px]"}`}
+          >
+            {text}
+          </div>
+        )
       )}
       {failed && <span className="c-danger px-1 text-xs">未发送</span>}
     </div>
@@ -303,6 +370,7 @@ function ReplyTurn({
         return (
           <div
             key={key}
+            data-reply-body="true"
             className={`c-bubble-agent c-bubble-text max-w-[85%] rounded-[20px] px-4 py-2.5 ${corners} ${
               streaming
                 ? "[&>div:first-child:not(:has(*))]:inline [&>div:first-child:has(>p:last-child)]:contents [&>div:first-child>p:has(+p:last-child)]:mb-[0.5em] [&>div:first-child>p:last-child]:inline"
@@ -322,6 +390,7 @@ function ReplyTurn({
         );
       })}
       {media.length > 0 && <MediaCards media={media} align="start" />}
+      {!message.isStreaming && message.sources && message.sources.length > 0 && <SourcesBar sources={message.sources} />}
       {task && !message.isStreaming && <TaskChip task={task} />}
       {route && !message.isStreaming && <AnsweredBy route={route} />}
     </div>
@@ -374,6 +443,11 @@ export const ChatThread = memo(function ChatThread({
   onSend,
   messenger,
   onMessageAction,
+  onEditMessage,
+  onForkMessage,
+  onQuoteSelection,
+  speakingMessageId,
+  speechStatus,
   companionName,
   draft,
   highlightedTurnId,
@@ -399,12 +473,106 @@ export const ChatThread = memo(function ChatThread({
   messenger?: { speaker: (message: UIMessage) => Speaker; me: ReactNode; relay?: Speaker };
   /** Long-press a message: 引用 / 复制 / 删除 (``reply`` is the companion's whole reply). */
   onMessageAction?: (action: MessageAction, message: UIMessage, role: "user" | "reply") => void;
+  /** Inline edit and resubmit a committed user message. */
+  onEditMessage?: (message: UIMessage, content: string) => Promise<void> | void;
+  /** Fork a side chat branching up to the target message's turn. */
+  onForkMessage?: (message: UIMessage) => Promise<void> | void;
+  /** Quote a user-selected snippet from inside an assistant reply into the composer. */
+  onQuoteSelection?: (text: string) => void;
+  /** Message ID currently targeted by neural or fallback TTS playback. */
+  speakingMessageId?: string | null;
+  /** Playback status for the active TTS message. */
+  speechStatus?: SpeechPlayerStatus;
   /** Temporary turn highlight pulse when jumping from a search result. */
   highlightedTurnId?: string | null;
   /** Opens StatusSheet's 身份与记忆 pane when a memory pill is tapped. */
   onOpenMemory?: () => void;
 }) {
   const indent = messenger ? "pl-11" : "";
+  const threadRef = useRef<HTMLDivElement>(null);
+  const [editing, setEditing] = useState<{
+    messageId: string;
+    message: UIMessage;
+    quotedPrefix: string | null;
+    draft: string;
+    busy: boolean;
+    error: string | null;
+  } | null>(null);
+  const [selectionQuote, setSelectionQuote] = useState<{
+    text: string;
+    top: number;
+    left: number;
+    positioned: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!onQuoteSelection) {
+      setSelectionQuote(null);
+      return;
+    }
+    const updateSelection = () => {
+      const sel = window.getSelection?.();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+        setSelectionQuote(null);
+        return;
+      }
+      const selectedText = sel.toString().trim();
+      if (!selectedText) {
+        setSelectionQuote(null);
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      const node = range.commonAncestorContainer;
+      const el = node.nodeType === 1 ? (node as Element) : node.parentElement;
+      if (!el || !threadRef.current?.contains(el) || !el.closest('[data-reply-body="true"]')) {
+        setSelectionQuote(null);
+        return;
+      }
+      const rect = range.getBoundingClientRect?.();
+      const hasCoords = Boolean(rect && (rect.width > 0 || rect.height > 0));
+      const vw = typeof window !== "undefined" ? window.innerWidth : 390;
+      const top = hasCoords ? Math.max(48, rect.top - 10) : 0;
+      const left = hasCoords ? Math.max(72, Math.min(vw - 72, rect.left + rect.width / 2)) : 0;
+      setSelectionQuote({ text: selectedText.slice(0, 300), top, left, positioned: hasCoords });
+    };
+    document.addEventListener("selectionchange", updateSelection);
+    document.addEventListener("mouseup", updateSelection);
+    document.addEventListener("keyup", updateSelection);
+    return () => {
+      document.removeEventListener("selectionchange", updateSelection);
+      document.removeEventListener("mouseup", updateSelection);
+      document.removeEventListener("keyup", updateSelection);
+    };
+  }, [onQuoteSelection]);
+
+  const startEdit = (message: UIMessage) => {
+    const goal = isGoalMessage(message.content);
+    const parsed = parseQuotedUserMessage(goal ? goalText(message.content) : message.content);
+    setEditing({
+      messageId: message.id,
+      message,
+      quotedPrefix: parsed.quotedContext,
+      draft: parsed.content,
+      busy: false,
+      error: null,
+    });
+  };
+
+  const confirmEdit = async () => {
+    if (!editing || editing.busy) return;
+    const rawDraft = editing.draft.trim();
+    if (!rawDraft) return;
+    const nextContent = editing.quotedPrefix ? formatQuotedUserMessage(rawDraft, editing.quotedPrefix) : rawDraft;
+    setEditing((prev) => (prev ? { ...prev, busy: true, error: null } : null));
+    try {
+      await onEditMessage?.(editing.message, nextContent);
+      setEditing(null);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "编辑重发失败";
+      setEditing((prev) => (prev ? { ...prev, busy: false, error: msg } : null));
+    }
+  };
+
   // Screen-reader completion announcement: announce once when streaming finishes rather than on every delta.
   let latestReplyItem: Extract<ChatItem, { type: "reply" }> | undefined;
   for (let i = items.length - 1; i >= 0; i -= 1) {
@@ -458,7 +626,7 @@ export const ChatThread = memo(function ChatThread({
     }
   }
   return (
-    <div className="flex flex-col gap-3 px-4">
+    <div ref={threadRef} className="relative flex flex-col gap-3 px-4">
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {srAnnouncement}
       </div>
@@ -505,6 +673,12 @@ export const ChatThread = memo(function ChatThread({
         }
         if (item.type === "user") {
           const isHighlighted = Boolean(highlightedTurnId && item.message.turnId === highlightedTurnId);
+          const isEditing = editing?.messageId === item.message.id;
+          const userExtra: MessageAction[] = [
+            ...(onEditMessage && !item.message.sessionMessage && !isGoalMessage(item.message.content) ? ["edit" as const] : []),
+            ...(onForkMessage ? ["fork" as const] : []),
+          ];
+          const userHasActions = Boolean(onMessageAction || userExtra.length > 0);
           return (
             <div
               key={item.id}
@@ -519,9 +693,34 @@ export const ChatThread = memo(function ChatThread({
               <Pressable
                 align="end"
                 timestamp={item.message.createdAt}
-                onAction={onMessageAction && ((action) => onMessageAction(action, item.message, "user"))}
+                extra={userExtra}
+                onAction={
+                  isEditing || !userHasActions
+                    ? undefined
+                    : (action) => {
+                        if (action === "edit") startEdit(item.message);
+                        else if (action === "fork") void onForkMessage?.(item.message);
+                        else onMessageAction?.(action, item.message, "user");
+                      }
+                }
               >
-                <UserTurn message={item.message} me={messenger?.me} relay={messenger?.relay} />
+                <UserTurn
+                  message={item.message}
+                  me={messenger?.me}
+                  relay={messenger?.relay}
+                  editing={
+                    isEditing && editing
+                      ? {
+                          draft: editing.draft,
+                          busy: editing.busy,
+                          error: editing.error,
+                          onDraftChange: (value) => setEditing((prev) => (prev ? { ...prev, draft: value } : null)),
+                          onConfirm: () => void confirmEdit(),
+                          onCancel: () => setEditing(null),
+                        }
+                      : undefined
+                  }
+                />
               </Pressable>
             </div>
           );
@@ -533,6 +732,12 @@ export const ChatThread = memo(function ChatThread({
             </div>
           );
         const isHighlighted = Boolean(highlightedTurnId && item.message.turnId === highlightedTurnId);
+        const replyExtra: MessageAction[] = [
+          "speak",
+          ...(itemIndex === regenerable ? ["regenerate" as const] : []),
+          ...(onForkMessage ? ["fork" as const] : []),
+        ];
+        const isSpeakingTarget = speakingMessageId === item.message.id;
         return (
           <div
             key={item.id}
@@ -547,8 +752,17 @@ export const ChatThread = memo(function ChatThread({
             <Pressable
               align="start"
               timestamp={item.message.createdAt}
-              extra={itemIndex === regenerable ? ["speak", "regenerate"] : ["speak"]}
-              onAction={onMessageAction && ((action) => onMessageAction(action, item.message, "reply"))}
+              extra={replyExtra}
+              speaking={isSpeakingTarget && speechStatus === "playing"}
+              speechLoading={isSpeakingTarget && speechStatus === "loading"}
+              onAction={
+                !onMessageAction && !onForkMessage
+                  ? undefined
+                  : (action) => {
+                      if (action === "fork") void onForkMessage?.(item.message);
+                      else onMessageAction?.(action, item.message, "reply");
+                    }
+              }
             >
               <ReplyTurn
                 message={item.message}
@@ -573,6 +787,37 @@ export const ChatThread = memo(function ChatThread({
       })}
       {typing && draft && <DraftCard key={draft.id} draft={draft} />}
       {typing && (working ? <WorkingRow {...working} /> : <TypingBubble />)}
+      {selectionQuote && onQuoteSelection && (
+        <div
+          className="pointer-events-none sticky bottom-3 z-20 flex justify-center"
+          style={
+            selectionQuote.positioned
+              ? {
+                  position: "fixed",
+                  top: `${selectionQuote.top}px`,
+                  left: `${selectionQuote.left}px`,
+                  bottom: "auto",
+                  transform: "translate(-50%, -100%)",
+                }
+              : undefined
+          }
+        >
+          <button
+            type="button"
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={() => {
+              onQuoteSelection(selectionQuote.text);
+              setSelectionQuote(null);
+              window.getSelection?.()?.removeAllRanges?.();
+              androidShell()?.haptic?.("light");
+            }}
+            className="c-float c-primary pointer-events-auto flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium shadow-lg"
+          >
+            <Quote className="h-3.5 w-3.5" aria-hidden="true" />
+            引用追问
+          </button>
+        </div>
+      )}
     </div>
   );
 });
