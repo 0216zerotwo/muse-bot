@@ -39,23 +39,15 @@ import { ArtifactPane } from "@/companion/muse/ArtifactPane";
 import { Viewer } from "@/companion/Viewer";
 import { CodeBlock } from "@/components/CodeBlock";
 import MermaidDiagram from "@/components/MermaidDiagram";
+import { renderMermaidToSvg } from "@/lib/mermaid-svg";
 import type { NanobotClient } from "@/lib/nanobot-client";
 
-const { requestMutation, mermaidInit, mermaidRender } = vi.hoisted(() => ({
+const { requestMutation } = vi.hoisted(() => ({
   requestMutation: vi.fn(),
-  mermaidInit: vi.fn(),
-  mermaidRender: vi.fn(),
 }));
 
 vi.mock("@/providers/ClientProvider", () => ({
   useClient: () => ({ client: { requestMutation }, token: "test-token" }),
-}));
-
-vi.mock("mermaid", () => ({
-  default: {
-    initialize: (...args: unknown[]) => mermaidInit(...args),
-    render: (...args: unknown[]) => mermaidRender(...args),
-  },
 }));
 
 const sampleDoc1: KnowledgeDocument = {
@@ -147,9 +139,6 @@ function stubDownloadMocks() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mermaidRender.mockResolvedValue({
-    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 40"><rect width="100" height="40"/><text x="10" y="25">Flow</text></svg>',
-  });
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
     value: { writeText: vi.fn(async () => undefined) },
@@ -461,12 +450,13 @@ describe("ArtifactContext, ArtifactPane, and MermaidDiagram", () => {
     }
   });
 
-  it("renders MermaidDiagram with strict security, zoom/fit controls, empty output handling, and error fallback", async () => {
-    const { rerender } = render(<MermaidDiagram code="flowchart TD\nA-->B" interactive />);
+  it("renders MermaidDiagram offline for flowchart/sequence/state/pie/mindmap/class/er/gantt with zoom, XSS escaping, and error fallback", async () => {
+    const { rerender } = render(<MermaidDiagram code={"flowchart TD\nA[开始] -->|确认| B{通过?}\nB -.-> C((结束))\nB ==> D[(数据库)]\nD --> D"} interactive />);
 
     const stage = await screen.findByTestId("mermaid-svg-stage");
-    expect(mermaidInit).toHaveBeenCalledWith(expect.objectContaining({ securityLevel: "strict", startOnLoad: false }));
     expect(stage.querySelector("svg")).not.toBeNull();
+    expect(stage.textContent).toContain("开始");
+    expect(stage.textContent).toContain("通过?");
     expect(stage).toHaveAttribute("data-fit", "true");
 
     fireEvent.click(screen.getByRole("button", { name: "放大图表" }));
@@ -479,24 +469,56 @@ describe("ArtifactContext, ArtifactPane, and MermaidDiagram", () => {
     fireEvent.click(screen.getByRole("button", { name: "适应窗口" }));
     expect(stage).toHaveAttribute("data-fit", "true");
 
-    // Non-interactive mode hides toolbar
-    rerender(<MermaidDiagram code="flowchart LR\nX-->Y" interactive={false} />);
+    // Non-interactive mode hides toolbar & supports horizontal LR chained edges
+    rerender(<MermaidDiagram code={"graph LR\nX([输入]) --> Y[处理] --> Z[输出]"} interactive={false} />);
     expect(screen.queryByRole("toolbar", { name: "图表缩放" })).toBeNull();
-    expect(await screen.findByTestId("mermaid-svg-stage")).toBeInTheDocument();
+    expect(await screen.findByTestId("mermaid-svg-stage")).toHaveTextContent("处理");
 
-    // Empty SVG output from mermaid.render
-    mermaidRender.mockResolvedValueOnce({ svg: "   " });
-    rerender(<MermaidDiagram code="flowchart LR\nEmpty-->Out" interactive />);
-    expect(await screen.findByRole("alert")).toHaveTextContent("未能生成有效的图表矢量输出");
-
-    // Syntax error fallback
-    mermaidRender.mockRejectedValueOnce(new Error("Syntax error in text"));
-    rerender(<MermaidDiagram code="flowchart BROKEN" interactive />);
-    expect(await screen.findByRole("alert")).toHaveTextContent("Syntax error in text");
+    // Unsupported diagram header error fallback
+    rerender(<MermaidDiagram code="unknownDiagram\nA-->B" interactive />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("暂不支持该 Mermaid 图表类型");
 
     // Blank source
     rerender(<MermaidDiagram code="   " interactive />);
     expect(await screen.findByRole("alert")).toHaveTextContent("图表源码为空");
+
+    // Direct engine checks across all diagram families + XSS escaping + dark theme
+    const seq = renderMermaidToSvg(
+      "sequenceDiagram\nparticipant U as 用户\nparticipant S as 服务\nU->>S: 请求\nS-->>U: 响应\nS->>S: 自检\nNote over U,S: 完成",
+      { dark: true, id: "seq1" },
+    );
+    expect(seq.diagramType).toBe("sequence");
+    expect(seq.svg).toContain("用户");
+    expect(seq.svg).toContain("完成");
+
+    const state = renderMermaidToSvg('stateDiagram-v2\nstate "运行中" as Run\n[*] --> Idle\nIdle --> Run : 启动\nRun --> [*]');
+    expect(state.diagramType).toBe("state");
+    expect(state.svg).toContain("运行中");
+
+    const pie = renderMermaidToSvg('pie title 占比\n"代码" : 60\n"文档" : 40');
+    expect(pie.diagramType).toBe("pie");
+    expect(pie.svg).toContain("代码 (60%)");
+    expect(renderMermaidToSvg('pie\n"唯一" : 100').svg).toContain("<circle");
+
+    const mm = renderMermaidToSvg("mindmap\n  root((核心))\n    分支A\n      叶子1\n    分支B");
+    expect(mm.diagramType).toBe("mindmap");
+    expect(mm.svg).toContain("核心");
+
+    const cls = renderMermaidToSvg("classDiagram\nclass User {\n  +id: int\n  +name: str\n}\nUser --> Order : places");
+    expect(cls.diagramType).toBe("classDiagram");
+    expect(cls.svg).toContain("User");
+
+    const er = renderMermaidToSvg("erDiagram\nCUSTOMER ||--o{ ORDER : places");
+    expect(er.diagramType).toBe("erDiagram");
+    expect(er.svg).toContain("CUSTOMER");
+
+    const gantt = renderMermaidToSvg("gantt\ntitle 排期\nsection 第一阶段\n设计 :a1, 2026-01-01, 5d\n开发 :a2, after a1, 10d");
+    expect(gantt.diagramType).toBe("gantt");
+    expect(gantt.svg).toContain("排期");
+
+    const xss = renderMermaidToSvg('flowchart TD\nA["<script>alert(1)</script>"] --> B[Safe]');
+    expect(xss.svg).not.toContain("<script>");
+    expect(xss.svg).toContain("&lt;script&gt;");
   });
 });
 
