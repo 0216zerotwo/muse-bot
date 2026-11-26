@@ -21,12 +21,14 @@ import {
   fileWords,
   isTextKind,
   markdownPreview,
+  svgPageDocument,
   type FileDraft,
   type FileKind,
 } from "./fileKinds";
 
 const COLORS: Record<FileKind, string> = {
   pdf: "#e03d38", word: "#2b6bd6", sheet: "#21904f", table: "#21904f", slides: "#eb7329", web: "#8557d6",
+  svg: "#d96b27", mermaid: "#7c5cbf",
   markdown: "#5c6e87", text: "#5c6e87", code: "#3b475e", audio: "#db4a85", archive: "#8c6b4d", other: "#8a8a8a",
 };
 
@@ -156,6 +158,18 @@ function TextPage({ name, title, text }: { name: string; title: string; text: st
       />
     );
   }
+  if (kind === "svg") {
+    return (
+      <iframe
+        title={`预览：${title}`}
+        sandbox=""
+        referrerPolicy="no-referrer"
+        srcDoc={svgPageDocument(text)}
+        loading="lazy"
+        className="pointer-events-none h-full w-full border-0 bg-white"
+      />
+    );
+  }
   if (kind === "table") {
     const rows = csvRows(text, fileEnding(name) === "tsv" ? "\t" : ",");
     return (
@@ -244,7 +258,7 @@ export function FileCard({ item, onOpen }: { item: UIMediaAttachment; onOpen: (e
   const name = item.name ?? "文件";
   const kind = fileKind(name);
   const title = fileTitle(name);
-  const read = !!item.url && (isTextKind(kind) || kind === "web");
+  const read = !!item.url && (isTextKind(kind) || kind === "web" || kind === "svg");
   // Only where the browser draws a PDF itself (Android's shows a download button in a frame instead).
   const pdfPage = kind === "pdf" && !!item.url && navigator.pdfViewerEnabled === true;
   const [text, setText] = useState<string | null>(null);

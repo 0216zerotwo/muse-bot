@@ -687,8 +687,8 @@ export interface Creation {
   kind: CreationKind;
   name: string;
   title: string;
-  /** generated (its own image tool), chat (sent in the chat), link (downloaded), workspace (written there). */
-  origin: "generated" | "chat" | "link" | "workspace";
+  /** generated (its own image tool), chat (sent in the chat), link (downloaded), workspace (written there), canvas (saved from Artifact canvas). */
+  origin: "generated" | "chat" | "link" | "workspace" | "canvas";
   prompt: string | null;
   size: number;
   created_at: string;
@@ -713,6 +713,55 @@ export async function fetchCreations(token: string): Promise<CreationsPayload> {
 /** Take a file off the 创意 list; it stays on the bot's disk. */
 export function hideCreation(client: NanobotClient, id: string): Promise<CreationsPayload> {
   return client.requestMutation<CreationsPayload>("companion.creations.hide", { id });
+}
+
+export type ArtifactSaveFormat =
+  | "html"
+  | "htm"
+  | "svg"
+  | "md"
+  | "markdown"
+  | "mermaid"
+  | "mmd"
+  | "txt"
+  | "text"
+  | "json"
+  | "csv"
+  | "py"
+  | "python"
+  | "js"
+  | "javascript"
+  | "ts"
+  | "typescript"
+  | "tsx"
+  | "css"
+  | "sh"
+  | "bash"
+  | "yaml"
+  | "yml";
+
+export interface SaveCreationArtifactInput {
+  title: string;
+  content: string;
+  format?: ArtifactSaveFormat;
+  prompt?: string;
+}
+
+export interface SaveCreationArtifactPayload extends CreationsPayload {
+  saved_id: string;
+}
+
+/** Save a canvas/code artifact directly into 创意 and return the updated list + saved_id. */
+export function saveCreationArtifact(
+  client: NanobotClient,
+  input: SaveCreationArtifactInput,
+): Promise<SaveCreationArtifactPayload> {
+  return client.requestMutation<SaveCreationArtifactPayload>("companion.creations.save", {
+    title: input.title,
+    content: input.content,
+    format: input.format ?? "md",
+    ...(input.prompt ? { prompt: input.prompt } : {}),
+  });
 }
 
 /** A picture or an imported Codex pet the user added as the companion's look. */
@@ -1179,4 +1228,169 @@ export interface TaughtStep {
 /** Turn recorded steps into a skill draft (name + SKILL.md) to review; can take a minute. */
 export function draftSkill(client: NanobotClient, goal: string, steps: TaughtStep[]): Promise<{ name: string; content: string }> {
   return client.requestMutation("companion.skills.change", { action: "draft", goal, steps }, 180_000);
+}
+
+/* ---------- 个人知识库: local SQLite FTS5 document vault ---------- */
+
+export interface KnowledgeDocument {
+  id: string;
+  title: string;
+  filename: string;
+  collection: string;
+  mime: string;
+  size_bytes: number;
+  char_count: number;
+  chunk_count: number;
+  content_sha256: string;
+  origin: string;
+  /** Unix epoch seconds (float). */
+  created_at: number;
+  /** Unix epoch seconds (float). */
+  updated_at: number;
+  deduplicated?: boolean;
+}
+
+export interface KnowledgeSearchHit {
+  doc_id: string;
+  title: string;
+  filename: string;
+  collection: string;
+  chunk_index: number;
+  heading: string;
+  snippet: string;
+  content: string;
+  score: number;
+  /** Character index ranges `[start, end]` inside `snippet` for highlighting. */
+  matches: [number, number][];
+}
+
+export interface KnowledgeStats {
+  doc_count: number;
+  chunk_count: number;
+  total_bytes: number;
+}
+
+export interface KnowledgePayload {
+  documents: KnowledgeDocument[];
+  collections: string[];
+  collection_counts?: Record<string, number>;
+  stats: KnowledgeStats;
+  hits?: KnowledgeSearchHit[];
+}
+
+async function readApiError(res: Response, fallback: string): Promise<string> {
+  const detail = (await res.text()).trim();
+  if (detail.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(detail) as { error?: unknown; detail?: unknown };
+      if (typeof parsed.error === "string" && parsed.error.trim()) return parsed.error.trim();
+      if (typeof parsed.detail === "string" && parsed.detail.trim()) return parsed.detail.trim();
+    } catch {
+      // Fall through to raw text / fallback.
+    }
+  }
+  return detail || `${fallback}: HTTP ${res.status}`;
+}
+
+export async function fetchKnowledge(
+  token: string,
+  options: { query?: string; collection?: string; signal?: AbortSignal } = {},
+): Promise<KnowledgePayload> {
+  const params = new URLSearchParams();
+  if (options.query?.trim()) params.set("q", options.query.trim());
+  if (options.collection?.trim()) params.set("collection", options.collection.trim());
+  const qs = params.toString();
+  const res = await fetchWithTimeout(
+    qs ? `/api/webui/companion/knowledge?${qs}` : "/api/webui/companion/knowledge",
+    {
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: "same-origin",
+      signal: options.signal,
+    },
+    20_000,
+  );
+  if (!res.ok) throw new Error(await readApiError(res, "knowledge failed"));
+  return (await res.json()) as KnowledgePayload;
+}
+
+export async function uploadKnowledgeFile(
+  token: string,
+  file: File,
+  options: { collection?: string; title?: string; signal?: AbortSignal } = {},
+): Promise<KnowledgePayload & { added: KnowledgeDocument }> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  form.append("filename", file.name);
+  if (options.collection?.trim()) form.append("collection", options.collection.trim());
+  if (options.title?.trim()) form.append("title", options.title.trim());
+
+  const res = await fetchWithTimeout(
+    "/api/webui/companion/knowledge/upload",
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: "same-origin",
+      body: form,
+      signal: options.signal,
+    },
+    60_000,
+  );
+  if (!res.ok) throw new Error(await readApiError(res, "knowledge upload failed"));
+  return (await res.json()) as KnowledgePayload & { added: KnowledgeDocument };
+}
+
+export function updateKnowledgeDocument(
+  client: NanobotClient,
+  id: string,
+  changes: { title?: string; collection?: string },
+  listCollection?: string,
+): Promise<KnowledgePayload & { document: KnowledgeDocument }> {
+  return client.requestMutation<KnowledgePayload & { document: KnowledgeDocument }>("companion.knowledge.change", {
+    action: "update",
+    id,
+    ...(changes.title !== undefined ? { title: changes.title } : {}),
+    ...(changes.collection !== undefined ? { collection: changes.collection } : {}),
+    ...(listCollection ? { list_collection: listCollection } : {}),
+  });
+}
+
+export function deleteKnowledgeDocument(
+  client: NanobotClient,
+  id: string,
+  listCollection?: string,
+): Promise<KnowledgePayload> {
+  return client.requestMutation<KnowledgePayload>("companion.knowledge.change", {
+    action: "delete",
+    id,
+    ...(listCollection ? { list_collection: listCollection } : {}),
+  });
+}
+
+export function importCreationToKnowledge(
+  client: NanobotClient,
+  creationId: string,
+  options: { collection?: string; listCollection?: string } = {},
+): Promise<KnowledgePayload & { added: KnowledgeDocument }> {
+  return client.requestMutation<KnowledgePayload & { added: KnowledgeDocument }>("companion.knowledge.change", {
+    action: "import_creation",
+    creation_id: creationId,
+    ...(options.collection?.trim() ? { collection: options.collection.trim() } : {}),
+    ...(options.listCollection?.trim() ? { list_collection: options.listCollection.trim() } : {}),
+  });
+}
+
+export function searchKnowledge(
+  client: NanobotClient,
+  query: string,
+  options: { collection?: string; limit?: number } = {},
+): Promise<{ query: string; collection: string; hits: KnowledgeSearchHit[] }> {
+  return client.requestMutation<{ query: string; collection: string; hits: KnowledgeSearchHit[] }>(
+    "companion.knowledge.change",
+    {
+      action: "search",
+      query,
+      ...(options.collection?.trim() ? { collection: options.collection.trim() } : {}),
+      ...(options.limit !== undefined ? { limit: options.limit } : {}),
+    },
+  );
 }
