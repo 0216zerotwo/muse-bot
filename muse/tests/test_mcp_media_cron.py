@@ -766,9 +766,10 @@ class Phase2RewiringAndRegistryIntegrationTest(unittest.TestCase):
 
         reg = create_default_tool_registry()
         names = {e.name for e in reg.list_entries(check_availability=False)}
-        self.assertEqual(len(names), 20)
+        self.assertEqual(len(names), 21)
         self.assertIsNotNone(reg.get("tool_search"))
         for expected in (
+            "deep_research",
             "vision_analyze",
             "image_generate",
             "video_generate",

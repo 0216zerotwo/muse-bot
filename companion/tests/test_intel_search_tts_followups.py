@@ -370,5 +370,151 @@ class FollowupsTest(unittest.TestCase):
         self.assertIsNotNone(self.followups._cache_get((f"chat-{self.followups.CACHE_MAX_SIZE + 9}", "t")))
 
 
+class IntelHttpRoutesTest(unittest.TestCase):
+    def test_search_tts_followups_and_capabilities_http_contracts(self) -> None:
+        from starlette.testclient import TestClient
+
+        from test_auth_devices import _companion_pkg
+
+        pkg = _companion_pkg()
+        auth_mod = importlib.import_module(f"{pkg}.auth")
+        devices_mod = importlib.import_module(f"{pkg}.devices")
+        media_mod = importlib.import_module(f"{pkg}.media")
+        server_mod = importlib.import_module(f"{pkg}.server")
+        real_followups = importlib.import_module(f"{pkg}.modules.followups")
+
+        real_followups.clear_cache()
+        self.addCleanup(real_followups.clear_cache)
+
+        with tempfile.TemporaryDirectory() as tmp, muse_home_override(tmp):
+            folder = Path(tmp) / "companion-http"
+            folder.mkdir(parents=True, exist_ok=True)
+            web_dist = folder / "web-dist"
+            web_dist.mkdir(parents=True, exist_ok=True)
+            (web_dist / "companion.html").write_text("<!doctype html><title>Muse Bot</title>\n", encoding="utf-8")
+
+            class _StubAdapter:
+                def __init__(self) -> None:
+                    self.tokens = auth_mod.TokenIssuer(None)
+                    self.devices = devices_mod.Devices(folder)
+                    self.media = media_mod.MediaStore(folder)
+                    self.store = chat_store(folder)
+                    self.web_dist = web_dist
+                    self.socket_devices = {}
+                    self._turns = {}
+
+                def attach(self, chat_id, socket):
+                    pass
+
+                def detach_all(self, socket):
+                    pass
+
+            adapter = _StubAdapter()
+            chat_id = adapter.store.create()
+            adapter.store.set_title(chat_id, "研究讨论")
+            adapter.store.append(
+                chat_id,
+                {"event": "user_message", "chat_id": chat_id, "text": "对比 SQLite FTS5 和向量检索", "turn_id": "turn-1", "created_at_ms": 1000},
+            )
+            adapter.store.append(
+                chat_id,
+                {
+                    "event": "message",
+                    "chat_id": chat_id,
+                    "text": "SQLite FTS5 零依赖、延迟低，适合本地全文与中文 trigram 检索 [1]。",
+                    "turn_id": "turn-1",
+                    "created_at_ms": 2000,
+                    "sources": [{"id": 1, "title": "SQLite FTS5", "url": "https://sqlite.org/fts5.html"}],
+                },
+            )
+
+            app = server_mod.build_app(adapter)
+            with TestClient(app, client=("127.0.0.1", 51234), base_url="http://127.0.0.1:8766") as client:
+                boot = client.get("/webui/bootstrap")
+                self.assertEqual(boot.status_code, 200)
+                boot_body = boot.json()
+                self.assertIn("tts", boot_body["capabilities"])
+                self.assertIsInstance(boot_body["capabilities"]["tts"], bool)
+                headers = {"Authorization": f"Bearer {boot_body['api_token']}"}
+
+                # 1) Search v2 HTTP query params + auth
+                self.assertEqual(client.get("/api/webui/companion/search?q=FTS5").status_code, 401)
+                s_resp = client.get(
+                    f"/api/webui/companion/search?q=FTS5&chat_id={chat_id}&role=reply&scope=all&limit=5",
+                    headers=headers,
+                )
+                self.assertEqual(s_resp.status_code, 200)
+                s_body = s_resp.json()
+                self.assertEqual(len(s_body["hits"]), 1)
+                self.assertEqual(s_body["hits"][0]["turn_id"], "turn-1")
+                self.assertTrue(s_body["hits"][0]["matches"])
+
+                # 2) Follow-ups HTTP endpoint (auth, 404, 200)
+                self.assertEqual(client.get(f"/api/sessions/websocket:{chat_id}/followups").status_code, 401)
+                self.assertEqual(
+                    client.get("/api/sessions/websocket:missing-chat/followups", headers=headers).status_code,
+                    404,
+                )
+                with mock.patch.object(real_followups, "_resolve_quick_model_target", return_value=None):
+                    f_resp = client.get(
+                        f"/api/sessions/websocket:{chat_id}/followups?turn_id=turn-1",
+                        headers=headers,
+                    )
+                self.assertEqual(f_resp.status_code, 200)
+                f_body = f_resp.json()
+                self.assertEqual(f_body["chat_id"], chat_id)
+                self.assertEqual(f_body["turn_id"], "turn-1")
+                self.assertEqual(len(f_body["suggestions"]), 3)
+
+                # 3) TTS HTTP endpoint: origin check (403), auth (401), oversized (413), empty (400), 200 + signed media fetch
+                self.assertEqual(
+                    client.post(
+                        "/api/webui/companion/tts",
+                        json={"text": "hello"},
+                        headers={**headers, "Origin": "https://evil.example.com"},
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(client.post("/api/webui/companion/tts", json={"text": "hello"}).status_code, 401)
+                self.assertEqual(
+                    client.post(
+                        "/api/webui/companion/tts",
+                        content=b"x" * (65 * 1024),
+                        headers={**headers, "Content-Type": "application/json"},
+                    ).status_code,
+                    413,
+                )
+                self.assertEqual(
+                    client.post("/api/webui/companion/tts", json={"text": "   "}, headers=headers).status_code,
+                    400,
+                )
+
+                def fake_tts(text: str, *, voice=None, model=None, speed=None, output_path=None, provider=None):
+                    Path(output_path).write_bytes(b"ID3-HTTP-TTS-MP3")
+                    return {"success": True, "file_path": output_path, "provider": provider or "edge"}
+
+                with mock.patch("muse.media.tts.text_to_speech", side_effect=fake_tts):
+                    t1 = client.post(
+                        "/api/webui/companion/tts",
+                        json={"text": "测试神经语音朗读。", "provider": "edge"},
+                        headers=headers,
+                    )
+                    self.assertEqual(t1.status_code, 200)
+                    t1_body = t1.json()
+                    self.assertTrue(t1_body["ok"])
+                    self.assertFalse(t1_body["cached"])
+                    media_resp = client.get(t1_body["url"])
+                    self.assertEqual(media_resp.status_code, 200)
+                    self.assertEqual(media_resp.content, b"ID3-HTTP-TTS-MP3")
+
+                    t2 = client.post(
+                        "/api/webui/companion/tts",
+                        json={"text": "测试神经语音朗读。", "provider": "edge"},
+                        headers=headers,
+                    )
+                    self.assertEqual(t2.status_code, 200)
+                    self.assertTrue(t2.json()["cached"])
+
+
 if __name__ == "__main__":
     unittest.main()

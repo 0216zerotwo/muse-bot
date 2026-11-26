@@ -26,7 +26,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from .modules import chat_branch
 from .modules import chat_export as chat_export_module
 from .modules import chat_search as chat_search_module
-from .modules import automations, avatars, companion_state, computer, connections, creations, feed, helpers, ideas, memory, memory_learn, model_catalog, models, oauth_login, permissions, plans, push, routines, skills_page, stt_sensevoice, triggers, vault, widgets
+from .modules import automations, avatars, companion_state, computer, connections, creations, feed, followups, helpers, ideas, memory, memory_learn, model_catalog, models, oauth_login, permissions, plans, push, routines, skills_page, stt_sensevoice, triggers, tts_api, vault, widgets
 from .approvals import SCOPES as APPROVAL_SCOPES
 from .media import child_file
 from .store import chat_id_of
@@ -257,6 +257,7 @@ class ApiError(Exception):
 def _runtime_capabilities() -> dict[str, bool]:
     return {
         "stt": stt_sensevoice.stt_available(),
+        "tts": tts_api.tts_available(),
         "push": bool(push.available()),
         "browser": bool(computer._executable()),
     }
@@ -1078,6 +1079,16 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
             headers={**NO_STORE, "Content-Disposition": disposition},
         )
 
+    async def session_followups(request: Request) -> Response:
+        if not authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401, headers=NO_STORE)
+        chat_id = chat_id_of(request.path_params["key"])
+        if not chat_id or not adapter.store.exists(chat_id):
+            return JSONResponse({"error": "not found"}, status_code=404, headers=NO_STORE)
+        turn_id = (request.query_params.get("turn_id") or "").strip() or None
+        payload = await followups.get_followups(adapter.store, chat_id, turn_id=turn_id)
+        return JSONResponse(payload, headers=NO_STORE)
+
     async def companion(request: Request) -> Response:
         if not authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -1097,9 +1108,54 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
         """查找聊天记录: messages in the user's chats that say the words (newest first)."""
         if not authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        query = request.query_params.get("q", "")[:100]
+        qp = request.query_params
+        query = qp.get("q", "")[:100]
         main = companion_state.read_companion_state().get("chat_id")
-        return JSONResponse(await asyncio.to_thread(chat_search_module.search, adapter.store, query, main), headers=NO_STORE)
+        target_chat = (qp.get("chat_id") or "").strip() or None
+        role_filter = (qp.get("role") or "").strip() or None
+        scope = (qp.get("scope") or "all").strip() or "all"
+        raw_limit = (qp.get("limit") or "").strip()
+        try:
+            limit = int(raw_limit) if raw_limit else 30
+        except ValueError:
+            limit = 30
+        payload = await asyncio.to_thread(
+            chat_search_module.search,
+            adapter.store,
+            query,
+            main,
+            chat_id=target_chat,
+            role=role_filter,
+            scope=scope,
+            limit=limit,
+        )
+        return JSONResponse(payload, headers=NO_STORE)
+
+    async def tts_synthesize(request: Request) -> Response:
+        """按需神经语音朗读：清洗文本、本地 SHA-256 缓存并通过安全签名媒体 URL 返回。"""
+        if not _origin_allowed(request):
+            return JSONResponse({"ok": False, "error": "forbidden_origin"}, status_code=403, headers=NO_STORE)
+        if not authorized(request):
+            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401, headers=NO_STORE)
+        raw = await _read_body_bounded(request, 64 * 1024)
+        if raw is None:
+            return JSONResponse({"ok": False, "error": "朗读文本过大"}, status_code=413, headers=NO_STORE)
+        try:
+            import json as _json
+
+            body = _json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, ValueError):
+            return JSONResponse({"ok": False, "error": "请求格式不正确"}, status_code=400, headers=NO_STORE)
+        if not isinstance(body, dict):
+            return JSONResponse({"ok": False, "error": "请求格式不正确"}, status_code=400, headers=NO_STORE)
+        try:
+            result = await asyncio.to_thread(tts_api.synthesize, adapter, body)
+        except tts_api.TtsError as exc:
+            return JSONResponse({"ok": False, "error": exc.message}, status_code=exc.status, headers=NO_STORE)
+        except Exception:
+            logger.exception("companion: tts synthesize failed")
+            return JSONResponse({"ok": False, "error": "语音生成失败，请稍后再试"}, status_code=500, headers=NO_STORE)
+        return JSONResponse(result, headers=NO_STORE)
 
     async def automation_run(request: Request) -> Response:
         """One scheduled run's report (运行记录 → a run)."""
@@ -1275,9 +1331,11 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
         Route("/api/sessions", sessions),
         Route("/api/sessions/{key}/webui-thread", thread),
         Route("/api/sessions/{key}/export", session_export),
+        Route("/api/sessions/{key}/followups", session_followups),
         Route("/api/webui/companion", companion),
         Route("/api/webui/approvals", approvals),
         Route("/api/webui/companion/search", chat_search),
+        Route("/api/webui/companion/tts", tts_synthesize, methods=["POST"]),
         Route("/api/webui/approvals/grants", guarded(lambda: _grants(adapter))),
         Route("/api/webui/companion/models", guarded(models.models_payload)),
         Route("/api/webui/companion/model-catalog", guarded(lambda: model_catalog.catalog_payload(models.saved_key_urls()))),
