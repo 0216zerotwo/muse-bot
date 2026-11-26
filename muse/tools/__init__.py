@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from muse.tools.clarify_tool import register_clarify_tools
 from muse.tools.files import register_file_tools
+from muse.tools.knowledge import register_knowledge_tools
 from muse.tools.memory_store import (
     ENTRY_DELIMITER,
     MemoryStore,
@@ -59,6 +60,7 @@ def register_builtin_tools(registry: ToolRegistry) -> ToolRegistry:
     register_file_tools(registry)
     register_web_tools(registry)
     register_memory_tools(registry)
+    register_knowledge_tools(registry)
     register_skill_tools(registry)
     register_vault_tools(registry)
     register_session_search_tools(registry)
@@ -98,6 +100,7 @@ __all__ = [
     "register_clarify_tools",
     "register_cron_tools",
     "register_file_tools",
+    "register_knowledge_tools",
     "register_media_tools",
     "register_memory_tools",
     "register_session_search_tools",
