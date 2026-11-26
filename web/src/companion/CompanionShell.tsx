@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useSessions } from "@/hooks/useSessions";
-import type { ChatSummary } from "@/lib/types";
+import type { ChatSummary, UIMessage } from "@/lib/types";
 import { useClient } from "@/providers/ClientProvider";
 
 import {
   changeChat,
   fetchCompanionState,
   fetchHelpers,
+  forkSideChat,
   searchChats,
   type HelpersPayload,
   updateCompanionState,
@@ -16,11 +17,12 @@ import {
 } from "./companion-api";
 import { CompanionScreen } from "./CompanionScreen";
 import { CompanionTheme } from "./CompanionTheme";
+import { exportThread } from "./exportThread";
 import { MuseDrawer } from "./muse/Drawer";
 import { Avatar, GroupFace, markSeen } from "./muse/helperPrimitives";
 import { MeFace, type ChatApp } from "./muse/Messenger";
 import { androidShell } from "./android-shell";
-import { adoptAppearance, followSystemTheme, setAppearanceSaver } from "./appearance";
+import { adoptAppearance, followSystemTheme, setAppearanceSaver, setThemeMode, themeMode } from "./appearance";
 import { useTabOrder, type MuseTab } from "./muse/Shell";
 import { CompanionAvatarContext, lastLook, NO_LOOK, PetLibraryProvider, PetView } from "./Pet";
 import { LazyBoundary, lazyScreen, useEdgeSwipe } from "./Screen";
@@ -32,6 +34,7 @@ const AppearanceDock = lazyScreen(() => import("./AppearanceDock").then((m) => (
 const SideChatSheet = lazyScreen(() => import("./muse/SideChatSheet").then((m) => ({ default: m.SideChatSheet })));
 const HelperProfileSheet = lazyScreen(() => import("./muse/Helpers").then((m) => ({ default: m.HelperProfileSheet })));
 const GroupSheet = lazyScreen(() => import("./muse/Helpers").then((m) => ({ default: m.GroupSheet })));
+const CommandPalette = lazyScreen(() => import("./CommandPalette").then((m) => ({ default: m.CommandPalette })));
 
 /** Session summary for the companion chat, even before its first message is persisted. */
 function companionSession(chatId: string, sessions: ChatSummary[]): ChatSummary {
@@ -71,6 +74,9 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
   const [teachRequest, setTeachRequest] = useState(0);
   const [order, setOrder] = useTabOrder();
   const [appearance, setAppearance] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [composerFocusRequest, setComposerFocusRequest] = useState(0);
+  const [memoryOpenRequest, setMemoryOpenRequest] = useState(0);
   // 外观 → 跟随系统: switch along with the phone while the app is open.
   useEffect(followSystemTheme, []);
   // A swipe in from the left edge opens the side menu (swiped back, it closes); inside a page over
@@ -210,6 +216,90 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
     }
   }, [createChat]);
 
+  const handleForkChat = useCallback(
+    async (message: UIMessage) => {
+      if (!shownId) return;
+      const forked = await forkSideChat(client, shownId, message.turnId || undefined);
+      await refresh();
+      if (forked?.chat_id) {
+        setSideChatId(forked.chat_id);
+        setTab("chat");
+      }
+      androidShell()?.haptic?.("light");
+    },
+    [client, refresh, shownId],
+  );
+
+  const handleExportChat = useCallback(
+    async (targetId?: string, title?: string) => {
+      const exportId = targetId || shownId;
+      if (!exportId) return;
+      await exportThread(token, exportId, { title: title ?? session?.title ?? companion?.name });
+    },
+    [companion?.name, session?.title, shownId, token],
+  );
+
+  // Global desktop shortcuts: Cmd/Ctrl+K (command palette), Cmd/Ctrl+Shift+O (new side chat), "/" (focus input).
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!companion?.onboarded || !chatId) return;
+      const key = event.key.toLowerCase();
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && key === "k") {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && key === "o") {
+        event.preventDefault();
+        setPaletteOpen(false);
+        void newSideChat();
+        return;
+      }
+      if (
+        event.key === "/" &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !paletteOpen &&
+        !drawerOpen &&
+        !settings &&
+        !appearance &&
+        !editingChat &&
+        !editingHelper &&
+        !editingGroup
+      ) {
+        const target = event.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === "INPUT" ||
+            target.tagName === "TEXTAREA" ||
+            target.tagName === "SELECT" ||
+            target.isContentEditable)
+        ) {
+          return;
+        }
+        if (document.querySelector('[role="dialog"], [aria-modal="true"]')) return;
+        event.preventDefault();
+        openTab("chat");
+        setComposerFocusRequest((n) => n + 1);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    appearance,
+    chatId,
+    companion?.onboarded,
+    drawerOpen,
+    editingChat,
+    editingGroup,
+    editingHelper,
+    newSideChat,
+    openTab,
+    paletteOpen,
+    settings,
+  ]);
+
   // A turn can change its look (it drew a new one): pick that up (the library loads the drawing).
   const reloadLook = useCallback(() => {
     fetchCompanionState(token).then(setCompanion).catch(() => undefined);
@@ -260,6 +350,10 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
             loadHelpers();
           }}
           draftRequest={sideChatId ? null : draftRequest}
+          composerFocusRequest={composerFocusRequest}
+          memoryOpenRequest={memoryOpenRequest}
+          onMemoryRequestHandled={() => setMemoryOpenRequest(0)}
+          onForkChat={handleForkChat}
           jumpRequest={jumpRequest && jumpRequest.chatId === session.chatId ? { turnId: jumpRequest.turnId, at: jumpRequest.at } : null}
           teachRequest={teachRequest}
           onOpenMenu={() => setDrawerOpen(true)}
@@ -314,6 +408,7 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
             if (id === sideChatId) setSideChatId(null);
             void changeChat(client, id, "delete").then(() => refresh());
           }}
+          onExportCurrentChat={shownId ? () => void handleExportChat(shownId, session?.title || companion.name) : undefined}
         />
       )}
 
@@ -358,6 +453,7 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
               if (id === sideChatId) setSideChatId(null);
               void changeChat(client, id, "delete").then(() => refresh());
             }}
+            onExport={(chat) => handleExportChat(chat.chatId, chat.title)}
           />
         </LazyBoundary>
       )}
@@ -389,6 +485,54 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
       {appearance && (
         <LazyBoundary onClose={() => setAppearance(false)}>
           <AppearanceDock onDone={() => setAppearance(false)} />
+        </LazyBoundary>
+      )}
+      {paletteOpen && companion && chatId && companion.onboarded && (
+        <LazyBoundary onClose={() => setPaletteOpen(false)}>
+          <CommandPalette
+            token={token}
+            activeChatId={shownId ?? chatId}
+            activeChatTitle={session?.title || companion.name}
+            sideChats={sideChats}
+            helpers={helpersData?.helpers ?? []}
+            canExport={Boolean(shownId)}
+            onClose={() => setPaletteOpen(false)}
+            onSelectTab={openTab}
+            onSelectSideChat={(id) => {
+              setSideChatId(id);
+              setTab("chat");
+            }}
+            onNewSideChat={() => void newSideChat()}
+            onSelectHelper={(helperId) => {
+              const helper = helpersData?.helpers.find((h) => h.id === helperId);
+              if (helper) {
+                markSeen(helper.chat_id);
+                setSideChatId(helper.chat_id);
+                loadHelpers();
+              }
+            }}
+            onOpenSettings={(page) => setSettings(page ?? "root")}
+            onOpenMemory={() => {
+              openTab("chat");
+              setMemoryOpenRequest((n) => n + 1);
+            }}
+            onExportChat={() => void handleExportChat(shownId ?? chatId, session?.title || companion.name)}
+            onToggleTheme={() => {
+              const mode = themeMode();
+              const currentlyDark =
+                mode === "dark" ||
+                (mode === "system" &&
+                  (document.documentElement.classList.contains("dark") ||
+                    Boolean(window.matchMedia?.("(prefers-color-scheme: dark)").matches)));
+              setThemeMode(currentlyDark ? "light" : "dark");
+            }}
+            onJumpToHit={(hit) => {
+              if (hit.chat_id === chatId) openTab("chat");
+              else setSideChatId(hit.chat_id);
+              if (hit.turn_id) setJumpRequest({ chatId: hit.chat_id, turnId: hit.turn_id, at: Date.now() });
+              else setJumpRequest(null);
+            }}
+          />
         </LazyBoundary>
       )}
     </div>

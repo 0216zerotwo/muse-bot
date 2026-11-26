@@ -3,14 +3,14 @@
  * box), 复制, 删除. As in a chat app: a small bar floats by the message until a choice or a tap
  * elsewhere.
  */
-import { Copy, Quote, RotateCcw, Trash2, Volume2 } from "lucide-react";
+import { Copy, GitBranch, Loader2, Pencil, Quote, RotateCcw, Square, Trash2, Volume2 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { androidShell } from "./android-shell";
 import { spokenText } from "./fileKinds";
 import { dayLabel } from "./presentation";
 
-export type MessageAction = "quote" | "copy" | "delete" | "speak" | "regenerate";
+export type MessageAction = "quote" | "copy" | "delete" | "speak" | "regenerate" | "edit" | "fork";
 
 const HOLD_MS = 450;
 
@@ -20,14 +20,20 @@ export function Pressable({
   onAction,
   extra = [],
   timestamp,
+  speaking = false,
+  speechLoading = false,
 }: {
   children: ReactNode;
   /** Which side the message sits on (the bar lines up with it). */
   align: "start" | "end";
-  /** A reply's own: 朗读, and 重新生成 on the newest one. */
+  /** Optional contextual actions: edit, fork, speak, regenerate. */
   extra?: MessageAction[];
   /** Epoch ms when the message was sent, shown softly in the floating bar. */
   timestamp?: number;
+  /** True while neural or fallback TTS is actively speaking this message. */
+  speaking?: boolean;
+  /** True while neural TTS audio for this message is loading. */
+  speechLoading?: boolean;
   onAction?: (action: MessageAction) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -60,14 +66,26 @@ export function Pressable({
   };
   const choose = (action: MessageAction) => {
     setOpen(false);
+    if (action === "copy" || action === "fork" || action === "edit") {
+      androidShell()?.haptic?.("light");
+    }
     onAction(action);
   };
+
+  const speakLabel = speechLoading ? "合成中…" : speaking ? "停止朗读" : "朗读";
+  const speakIcon = speechLoading ? (
+    <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+  ) : speaking ? (
+    <Square className="h-3.5 w-3.5 fill-current" />
+  ) : (
+    <Volume2 className="h-4 w-4" />
+  );
 
   return (
     <div
       ref={box}
       tabIndex={0}
-      className="flex flex-col gap-1.5 rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-[var(--c-primary)]"
+      className="group/msg flex flex-col gap-1.5 rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-[var(--c-primary)]"
       onKeyDown={(event) => {
         if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
           event.preventDefault();
@@ -99,6 +117,31 @@ export function Pressable({
       style={{ WebkitTouchCallout: "none", WebkitUserSelect: open ? "none" : undefined }}
     >
       {children}
+      {!open && (
+        <div
+          role="toolbar"
+          aria-label="快捷操作"
+          className={`c-float pointer-events-none hidden items-center gap-0.5 rounded-full px-1 py-0.5 opacity-0 transition-opacity duration-150 motion-reduce:transition-none [@media(hover:hover)]:flex [@media(hover:hover)]:group-hover/msg:pointer-events-auto [@media(hover:hover)]:group-hover/msg:opacity-100 [@media(hover:hover)]:group-focus-within/msg:pointer-events-auto [@media(hover:hover)]:group-focus-within/msg:opacity-100 ${
+            align === "end" ? "self-end" : "self-start"
+          }`}
+        >
+          <ToolbarButton icon={<Quote className="h-3.5 w-3.5" />} label="引用" onClick={() => choose("quote")} />
+          {extra.includes("edit") && (
+            <ToolbarButton icon={<Pencil className="h-3.5 w-3.5" />} label="编辑并重发" onClick={() => choose("edit")} />
+          )}
+          {extra.includes("fork") && (
+            <ToolbarButton icon={<GitBranch className="h-3.5 w-3.5" />} label="从这里分叉旁聊" onClick={() => choose("fork")} />
+          )}
+          <ToolbarButton icon={<Copy className="h-3.5 w-3.5" />} label="复制" onClick={() => choose("copy")} />
+          {extra.includes("speak") && (
+            <ToolbarButton icon={speakIcon} label={speakLabel} onClick={() => choose("speak")} />
+          )}
+          {extra.includes("regenerate") && (
+            <ToolbarButton icon={<RotateCcw className="h-3.5 w-3.5" />} label="重新生成" onClick={() => choose("regenerate")} />
+          )}
+          <ToolbarButton icon={<Trash2 className="h-3.5 w-3.5" />} label="删除" danger onClick={() => choose("delete")} />
+        </div>
+      )}
       {open && (
         <div
           className={`c-float c-rise flex flex-wrap items-center gap-0.5 rounded-full p-1 ${align === "end" ? "self-end" : "self-start"}`}
@@ -116,8 +159,14 @@ export function Pressable({
             </time>
           )}
           <ActionButton icon={<Quote className="h-4 w-4" />} label="引用" onClick={() => choose("quote")} />
+          {extra.includes("edit") && (
+            <ActionButton icon={<Pencil className="h-4 w-4" />} label="编辑并重发" onClick={() => choose("edit")} />
+          )}
+          {extra.includes("fork") && (
+            <ActionButton icon={<GitBranch className="h-4 w-4" />} label="从这里分叉旁聊" onClick={() => choose("fork")} />
+          )}
           <ActionButton icon={<Copy className="h-4 w-4" />} label="复制" onClick={() => choose("copy")} />
-          {extra.includes("speak") && <ActionButton icon={<Volume2 className="h-4 w-4" />} label="朗读" onClick={() => choose("speak")} />}
+          {extra.includes("speak") && <ActionButton icon={speakIcon} label={speakLabel} onClick={() => choose("speak")} />}
           {extra.includes("regenerate") && (
             <ActionButton icon={<RotateCcw className="h-4 w-4" />} label="重新生成" onClick={() => choose("regenerate")} />
           )}
@@ -177,6 +226,20 @@ function ActionButton({ icon, label, danger, onClick }: { icon: ReactNode; label
     >
       {icon}
       {label}
+    </button>
+  );
+}
+
+function ToolbarButton({ icon, label, danger, onClick }: { icon: ReactNode; label: string; danger?: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className={`c-pressable grid h-7 w-7 place-items-center rounded-full transition-transform active:scale-90 motion-reduce:transition-none ${danger ? "c-danger" : ""}`}
+    >
+      {icon}
     </button>
   );
 }

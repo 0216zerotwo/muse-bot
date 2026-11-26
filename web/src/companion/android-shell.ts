@@ -28,6 +28,10 @@ interface AndroidShell {
   openFile?(url: string, name: string): void;
   /** A PDF's first page, answered as a companion:pdf-preview event ({ id, image }). */
   pdfPreview?(url: string, id: string): void;
+  /** Share plain text or exported Markdown via the Android system share sheet. */
+  shareText?(text: string, title?: string): void;
+  /** Trigger lightweight native haptic feedback ("light" | "medium" | "heavy"). */
+  haptic?(kind?: "light" | "medium" | "heavy"): void;
 }
 
 /** What the app's ＋ sheet picked: the page fetches each from the app (never the server). */

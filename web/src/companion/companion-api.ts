@@ -30,6 +30,7 @@ export interface CompanionState {
   /** Optional server runtime capabilities (backward-compatible when omitted). */
   capabilities?: {
     stt?: boolean;
+    tts?: boolean;
     push?: boolean;
     browser?: boolean;
   };
@@ -299,6 +300,8 @@ export interface MemoryItem {
   /** The exact source line; forgetting removes precisely this line. */
   line: string;
   text: string;
+  /** Whether the user pinned this memory to protect it from automatic tidy/fade. */
+  pinned?: boolean;
 }
 
 /** One change to memory: learned from the chats (added, corrected, dropped), or a tidy-up
@@ -342,6 +345,18 @@ export function forgetMemory(client: NanobotClient, item: MemoryItem): Promise<M
 
 export function rememberMemory(client: NanobotClient, text: string): Promise<MemoryView> {
   return client.requestMutation<MemoryView>("companion.memory.remember", { text });
+}
+
+export function pinMemory(
+  client: NanobotClient,
+  item: Pick<MemoryItem, "file" | "line">,
+  pinned?: boolean,
+): Promise<MemoryView & { pinned?: boolean }> {
+  return client.requestMutation<MemoryView & { pinned?: boolean }>("companion.memory.pin", {
+    file: item.file,
+    line: item.line,
+    ...(pinned !== undefined ? { pinned } : {}),
+  });
 }
 
 /** Tidy now (the model proposes, the server enforces the rules); can take a minute. */
@@ -936,24 +951,168 @@ export function regenerateReply(client: NanobotClient, chatId: string, turnId: s
   return client.requestMutation("companion.chats.change", { id: chatId, action: "regenerate", turn_id: turnId });
 }
 
+/** Edit a user message in place, drop later turns, and resubmit for a fresh streaming reply. */
+export function editAndResubmitMessage(
+  client: NanobotClient,
+  chatId: string,
+  turnId: string,
+  content: string,
+): Promise<{ chat_id?: string; turn_id?: string }> {
+  return client.requestMutation<{ chat_id?: string; turn_id?: string }>("companion.chats.change", {
+    id: chatId,
+    action: "edit_message",
+    turn_id: turnId,
+    content,
+  });
+}
+
+/** Fork a new side chat from the main chat or any side chat up to ``turnId``. */
+export function forkSideChat(
+  client: NanobotClient,
+  chatId: string,
+  turnId?: string | null,
+  title?: string,
+): Promise<{ chat_id: string; key?: string }> {
+  const payload: Record<string, unknown> = { id: chatId, action: "fork" };
+  if (turnId) payload.turn_id = turnId;
+  if (title) payload.title = title;
+  return client.requestMutation<{ chat_id: string; key?: string }>("companion.chats.change", payload);
+}
+
+export type SearchScope = "all" | "main" | "sides" | "helpers";
+
 export interface ChatSearchHit {
   chat_id: string;
+  key?: string;
   chat_title: string;
+  title?: string;
+  main?: boolean;
+  helper?: boolean;
   role: "user" | "assistant";
   text: string;
+  snippet?: string;
   turn_id: string | null;
   at_ms: number;
+  created_at_ms?: number;
+  matches?: Array<[number, number]>;
+}
+
+export interface ChatSearchOptions {
+  scope?: SearchScope;
+  chatId?: string;
+  role?: "user" | "assistant";
+  limit?: number;
+  signal?: AbortSignal;
 }
 
 /** 查找聊天记录: messages in any chat that say the words, newest first. */
-export async function searchChats(token: string, query: string): Promise<ChatSearchHit[]> {
+export async function searchChats(
+  token: string,
+  query: string,
+  options: ChatSearchOptions = {},
+): Promise<ChatSearchHit[]> {
+  const extra: string[] = [];
+  if (options.scope) extra.push(`scope=${encodeURIComponent(options.scope)}`);
+  if (options.chatId) extra.push(`chat_id=${encodeURIComponent(options.chatId)}`);
+  if (options.role) extra.push(`role=${encodeURIComponent(options.role)}`);
+  if (typeof options.limit === "number") extra.push(`limit=${encodeURIComponent(String(options.limit))}`);
+  const qs = `q=${encodeURIComponent(query)}${extra.length ? `&${extra.join("&")}` : ""}`;
   const res = await fetchWithTimeout(
-    `/api/webui/companion/search?q=${encodeURIComponent(query)}`,
-    { headers: { Authorization: `Bearer ${token}` }, credentials: "same-origin" },
+    `/api/webui/companion/search?${qs}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: "same-origin",
+      signal: options.signal,
+    },
     20_000,
   );
   if (!res.ok) throw new Error(`search failed: HTTP ${res.status}`);
   return ((await res.json()) as { hits?: ChatSearchHit[] }).hits ?? [];
+}
+
+export interface FollowupsResponse {
+  chat_id: string;
+  turn_id: string;
+  suggestions: string[];
+}
+
+/** Fetch suggested contextual follow-up prompts for a completed reply turn. */
+export async function fetchFollowups(
+  token: string,
+  chatId: string,
+  turnId?: string | null,
+  signal?: AbortSignal,
+): Promise<FollowupsResponse> {
+  const key = chatId.startsWith("websocket:") ? chatId : `websocket:${chatId}`;
+  const query = turnId ? `?turn_id=${encodeURIComponent(turnId)}` : "";
+  const res = await fetchWithTimeout(
+    `/api/sessions/${encodeURIComponent(key)}/followups${query}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: "same-origin",
+      signal,
+    },
+    15_000,
+  );
+  if (!res.ok) throw new Error(`followups failed: HTTP ${res.status}`);
+  const data = (await res.json()) as Partial<FollowupsResponse>;
+  return {
+    chat_id: data.chat_id ?? chatId,
+    turn_id: data.turn_id ?? turnId ?? "",
+    suggestions: Array.isArray(data.suggestions) ? data.suggestions : [],
+  };
+}
+
+export interface TtsSynthesisResult {
+  ok: boolean;
+  url?: string;
+  cached?: boolean;
+  provider?: string;
+  voice?: string;
+  error?: string;
+}
+
+/** Request cached neural speech synthesis audio from the companion server. */
+export async function synthesizeTts(
+  token: string,
+  text: string,
+  options: { voice?: string; speed?: number; provider?: string; signal?: AbortSignal } = {},
+): Promise<TtsSynthesisResult> {
+  const body: Record<string, unknown> = { text };
+  if (options.voice) body.voice = options.voice;
+  if (typeof options.speed === "number") body.speed = options.speed;
+  if (options.provider) body.provider = options.provider;
+  const res = await fetchWithTimeout(
+    "/api/webui/companion/tts",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+      signal: options.signal,
+    },
+    30_000,
+  );
+  let data: Partial<TtsSynthesisResult>;
+  try {
+    data = (await res.json()) as Partial<TtsSynthesisResult>;
+  } catch {
+    data = {};
+  }
+  if (!res.ok) {
+    return { ok: false, error: data.error ?? `TTS failed: HTTP ${res.status}` };
+  }
+  return {
+    ok: Boolean(data.ok && data.url),
+    url: data.url,
+    cached: data.cached,
+    provider: data.provider,
+    voice: data.voice,
+    error: data.error,
+  };
 }
 
 /* ---------- 帮手: helpers the companion calls on ---------- */

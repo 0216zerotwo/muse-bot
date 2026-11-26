@@ -6,6 +6,7 @@ import {
   toolTraceLinesFromEvents,
 } from "@/lib/tool-traces";
 import type {
+  CitationSource,
   ThreadProjectionEvent,
   ToolProgressEvent,
   UIFileEdit,
@@ -420,6 +421,49 @@ export function closeThreadProjectionAnswer(
   };
 }
 
+function normalizeCitationSources(raw: unknown): CitationSource[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: CitationSource[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const candidate = item as Partial<CitationSource>;
+    const url = typeof candidate.url === "string" ? candidate.url.trim() : "";
+    const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
+    const domain = typeof candidate.domain === "string" ? candidate.domain.trim() : undefined;
+    const snippet = typeof candidate.snippet === "string" ? candidate.snippet.trim() : undefined;
+    if (!url && !title) continue;
+    const dedupKey = url || title;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    out.push({
+      ...(typeof candidate.id === "number" && Number.isFinite(candidate.id) ? { id: candidate.id } : {}),
+      title: title || domain || url,
+      url,
+      ...(domain ? { domain } : {}),
+      ...(snippet ? { snippet } : {}),
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function mergeCitationSources(
+  existing: CitationSource[] | undefined,
+  incoming: CitationSource[] | undefined,
+): CitationSource[] | undefined {
+  if (!incoming?.length) return existing;
+  if (!existing?.length) return incoming;
+  const seen = new Set(existing.map((item) => item.url || item.title));
+  const merged = [...existing];
+  for (const item of incoming) {
+    const key = item.url || item.title;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+  return merged;
+}
+
 function projectionCreatedAt(event: ThreadProjectionEvent, options: ThreadProjectionOptions): number {
   return typeof event.created_at_ms === "number" && Number.isFinite(event.created_at_ms)
     ? event.created_at_ms
@@ -821,6 +865,7 @@ export function projectThreadEvent(
     if (state.suppressUntilTurnEnd) return state;
     const turn = turnFieldsForProjection(state, event, "answer");
     const mergeNext = event.resuming === true && event.merge_next === true;
+    const incomingSources = normalizeCitationSources(event.sources);
     let targetIndex = activeAssistantIndex(state, turn);
     if (targetIndex === null) {
       targetIndex = findStreamingAssistantIndex(state.messages, state.closedAssistantIds, turn);
@@ -838,12 +883,14 @@ export function projectThreadEvent(
             ...turn,
             ...(event.source ? { source: event.source } : {}),
             ...(event.response_sources !== undefined ? { responseSources: event.response_sources } : {}),
+            ...(incomingSources !== undefined ? { sources: incomingSources } : {}),
             createdAt: projectionCreatedAt(event, options),
           },
         ];
         targetIndex = state.messages.length - 1;
       } else {
         const target = state.messages[targetIndex];
+        const mergedSources = mergeCitationSources(target.sources, incomingSources);
         state.messages = replaceMessageAt(state.messages, targetIndex, {
           ...target,
           content: event.text,
@@ -851,14 +898,18 @@ export function projectThreadEvent(
           ...turn,
           ...(event.source ? { source: event.source } : {}),
           ...(event.response_sources !== undefined ? { responseSources: event.response_sources } : {}),
+          ...(mergedSources !== undefined ? { sources: mergedSources } : {}),
         });
       }
-    } else if ((event.source || event.response_sources !== undefined) && targetIndex !== null) {
+    } else if ((event.source || event.response_sources !== undefined || incomingSources !== undefined) && targetIndex !== null) {
+      const target = state.messages[targetIndex];
+      const mergedSources = mergeCitationSources(target.sources, incomingSources);
       state.messages = replaceMessageAt(state.messages, targetIndex, {
-        ...state.messages[targetIndex],
+        ...target,
         ...turn,
         ...(event.source ? { source: event.source } : {}),
         ...(event.response_sources !== undefined ? { responseSources: event.response_sources } : {}),
+        ...(mergedSources !== undefined ? { sources: mergedSources } : {}),
       });
     }
     if (targetIndex !== null) state.activeAssistantId = state.messages[targetIndex].id;
@@ -939,12 +990,14 @@ export function projectThreadEvent(
     const latencyMs = typeof event.latency_ms === "number" && event.latency_ms >= 0
       ? Math.round(event.latency_ms)
       : undefined;
+    const incomingSources = normalizeCitationSources(event.sources);
     const projected = {
       content: event.text,
       ...(media?.length ? { media } : {}),
       ...(latencyMs !== undefined ? { latencyMs } : {}),
       ...(event.source ? { source: event.source } : {}),
       ...(event.response_sources !== undefined ? { responseSources: event.response_sources } : {}),
+      ...(incomingSources !== undefined ? { sources: incomingSources } : {}),
       ...turnFieldsForProjection(state, event, "answer"),
     };
     if (options.sideChannel) {

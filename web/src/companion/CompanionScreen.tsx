@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, Menu, Settings2, SlidersHorizontal, X } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { ArrowDown, Loader2, Menu, Settings2, SlidersHorizontal, Square, Volume2, X } from "lucide-react";
 
 import { useNanobotStream, type SendAttachment } from "@/hooks/useNanobotStream";
 import { useSessionHistory } from "@/hooks/useSessions";
@@ -13,6 +13,7 @@ import { ChatThread, EmptyThread } from "./ChatThread";
 import {
   decideApproval,
   deleteMessage,
+  editAndResubmitMessage,
   fetchAllApprovals,
   fetchApprovals,
   changeFeed,
@@ -33,7 +34,9 @@ import {
 import { ApprovalCard } from "./ApprovalCard";
 import { Composer } from "./Composer";
 import { androidShell } from "./android-shell";
-import { readsAfterVoice, speakAloud, type MessageAction } from "./MessageActions";
+import { FollowUpChips } from "./FollowUpChips";
+import { readsAfterVoice, type MessageAction } from "./MessageActions";
+import { useSpeechPlayer } from "./useSpeechPlayer";
 import { fileDraft } from "./fileKinds";
 import { textWithoutCards } from "./replyCards";
 import { GOAL_COMMAND, GoalBanner } from "./GoalBanner";
@@ -121,6 +124,10 @@ export function CompanionScreen({
   chatApp,
   onOpenChat,
   draftRequest,
+  composerFocusRequest,
+  memoryOpenRequest,
+  onMemoryRequestHandled,
+  onForkChat,
   jumpRequest,
   teachRequest,
   onOpenMenu,
@@ -145,6 +152,14 @@ export function CompanionScreen({
   onOpenChat: (chatId: string) => void;
   /** A message to start in the box (a skill's 用一次 / 定时做 from settings). */
   draftRequest: { text: string; at: number } | null;
+  /** Monotonic trigger from global "/" shortcut to focus composer without overwriting draft. */
+  composerFocusRequest?: number;
+  /** Monotonic trigger from CommandPalette to open StatusSheet on 身份与记忆. */
+  memoryOpenRequest?: number;
+  /** Callback to clear memoryOpenRequest once StatusSheet has been opened. */
+  onMemoryRequestHandled?: () => void;
+  /** Fork a new side chat branching from the selected turn. */
+  onForkChat?: (message: UIMessage) => Promise<void> | void;
   /** Jump to and briefly highlight a turn in this chat (from 查找聊天记录). */
   jumpRequest?: { turnId: string; at: number } | null;
   /** Changes when 教它做 was asked for: open the browser, recording. */
@@ -182,6 +197,7 @@ export function CompanionScreen({
   }, [refresh]);
 
   const ready = !history.loading || history.messages.length > 0;
+  const combinedFocus = (draftRequest?.at ?? 0) + (localFocusAt ?? 0) + (composerFocusRequest ?? 0);
   return (
     <LiveScreen
       // Keep LiveScreen mounted across history refreshes so sheets, 2FA handoffs, composer
@@ -207,7 +223,10 @@ export function CompanionScreen({
       teachRequest={teachRequest}
       jumpRequest={jumpRequest}
       draft={draft}
-      focusRequest={Math.max(draftRequest?.at ?? 0, localFocusAt ?? 0) || undefined}
+      focusRequest={combinedFocus > 0 ? combinedFocus : undefined}
+      memoryOpenRequest={memoryOpenRequest}
+      onMemoryRequestHandled={onMemoryRequestHandled}
+      onForkChat={onForkChat}
       onDraft={setDraft}
       onRefineDraft={handleRefineDraft}
       onOpenMenu={onOpenMenu}
@@ -239,6 +258,9 @@ export function LiveScreen({
   jumpRequest,
   draft,
   focusRequest,
+  memoryOpenRequest,
+  onMemoryRequestHandled,
+  onForkChat,
   onDraft,
   onRefineDraft,
   onOpenMenu,
@@ -268,6 +290,9 @@ export function LiveScreen({
   jumpRequest?: { turnId: string; at: number } | null;
   draft: string;
   focusRequest?: number;
+  memoryOpenRequest?: number;
+  onMemoryRequestHandled?: () => void;
+  onForkChat?: (message: UIMessage) => Promise<void> | void;
   onDraft: (draft: string) => void;
   onRefineDraft?: (draft: string) => void;
   onOpenMenu: () => void;
@@ -281,6 +306,14 @@ export function LiveScreen({
   const { client, token } = useClient();
   const { messages, isStreaming, goalState, send, stop, transcribeAudio, streamError, dismissStreamError } =
     useNanobotStream(ready ? chatId : null, initial, pending, onTurnEnd, undefined, historyVersion);
+  const speech = useSpeechPlayer({
+    token,
+    ttsEnabled: Boolean(companion.capabilities?.tts),
+  });
+  const [localFocusRequest, setLocalFocusRequest] = useState(0);
+  const [droppedFiles, setDroppedFiles] = useState<{ files: File[]; seq: number } | null>(null);
+  const [screenDragging, setScreenDragging] = useState(false);
+  const screenDragDepthRef = useRef(0);
 
   /* Stopping a goal: halt the current run, then ask the companion to cancel the goal. */
   const cancelGoalAfterStop = useRef(false);
@@ -374,15 +407,16 @@ export function LiveScreen({
   const typing = awaitingReply(messages, isStreaming);
   const readNext = useRef(false);
   const wasTyping = useRef(false);
+  const { play: playSpeech } = speech;
   useEffect(() => {
     if (wasTyping.current && !typing && readNext.current) {
       readNext.current = false;
       const asked = messages.map((m) => m.role).lastIndexOf("user");
       const reply = messages.slice(asked + 1).reverse().find((m) => m.role === "assistant" && m.kind !== "trace" && m.content.trim());
-      if (reply) speakAloud(reply.content);
+      if (reply) void playSpeech(reply.content, reply.id);
     }
     wasTyping.current = typing;
-  }, [typing, messages]);
+  }, [typing, messages, playSpeech]);
   const writing = useMemo(() => (typing ? fileDraft(messages) : null), [typing, messages]);
   const [composerFocused, setComposerFocused] = useState(false);
   const [statusOpen, setStatusOpen] = useState(false);
@@ -391,6 +425,12 @@ export function LiveScreen({
     setStatusInitialPane(3);
     setStatusOpen(true);
   }, []);
+  useEffect(() => {
+    if (!memoryOpenRequest) return;
+    setStatusInitialPane(3);
+    setStatusOpen(true);
+    onMemoryRequestHandled?.();
+  }, [memoryOpenRequest, onMemoryRequestHandled]);
   const [visitedTabs, setVisitedTabs] = useState<ReadonlySet<MuseTab>>(() => new Set([tab]));
   useEffect(() => {
     setVisitedTabs((prev) => (prev.has(tab) ? prev : new Set(prev).add(tab)));
@@ -569,30 +609,51 @@ export function LiveScreen({
       setPinned(true);
       if (send(text, images.length ? images : undefined, quote ? { quotedContext: quote } : undefined)) {
         // Asked by voice in the Android app: the answer is read out when it is done (as on iPhone).
-        readNext.current = spoken && !!androidShell()?.speak && readsAfterVoice();
+        readNext.current = spoken && (Boolean(companion.capabilities?.tts) || !!androidShell()?.speak) && readsAfterVoice();
         onDraft("");
         setQuote(null);
       }
     },
-    [onDraft, send, quote, setPinned],
+    [companion.capabilities?.tts, onDraft, send, quote, setPinned],
   );
   const onMessageAction = useCallback(
     (action: MessageAction, message: UIMessage, role: "user" | "reply") => {
       const words = (role === "user" ? parseQuotedUserMessage(message.content).content : textWithoutCards(message.content)).trim();
       if (action === "quote") {
         setQuote(words.slice(0, 300) || (role === "user" ? "（我发的）" : "（它的回复）"));
+        setLocalFocusRequest((n) => n + 1);
       } else if (action === "copy") {
         void copyTextToClipboard(words);
       } else if (action === "speak") {
-        speakAloud(message.content);
+        void speech.toggle(message.content, message.id);
       } else if (action === "regenerate") {
         if (message.turnId) void regenerateReply(client, chatId, message.turnId).then(onReload).catch(() => undefined);
-      } else if (message.turnId) {
+      } else if (action === "delete" && message.turnId) {
         void deleteMessage(client, chatId, message.turnId, role).then(onReload).catch(() => undefined);
       }
     },
-    [client, chatId, onReload],
+    [chatId, client, onReload, speech],
   );
+  const handleEditMessage = useCallback(
+    async (message: UIMessage, nextContent: string) => {
+      if (!message.turnId) throw new Error("该消息暂不支持编辑重发");
+      await editAndResubmitMessage(client, chatId, message.turnId, nextContent);
+      onReload();
+    },
+    [chatId, client, onReload],
+  );
+  const lastCompletedReplyTurnId = useMemo(() => {
+    if (typing || isStreaming || items.length === 0) return null;
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      const entry = items[i];
+      if (entry.type === "user") return null;
+      if (entry.type === "reply" && !entry.message.isStreaming && entry.message.turnId) {
+        if (entry.message.source?.kind === "cron" || entry.message.source?.kind === "checkin") return null;
+        return entry.message.turnId;
+      }
+    }
+    return null;
+  }, [isStreaming, items, typing]);
 
   /* 教它做: the browser opened to record a task (from 设置 → 技能), then the steps to review. */
   const [teaching, setTeaching] = useState(false);
@@ -698,6 +759,38 @@ export function LiveScreen({
     onTab("chat");
     submit(text);
   };
+  const hasDraggedFiles = (event: DragEvent) =>
+    Boolean(event.dataTransfer?.types?.includes("Files") || (event.dataTransfer?.files?.length ?? 0) > 0);
+  const onScreenDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    if (tab !== "chat" || !connected || !ready || !hasDraggedFiles(event)) return;
+    event.preventDefault();
+    screenDragDepthRef.current += 1;
+    setScreenDragging(true);
+  };
+  const onScreenDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (tab !== "chat" || !connected || !ready || !hasDraggedFiles(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    if (!screenDragging) setScreenDragging(true);
+  };
+  const onScreenDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (!screenDragging) return;
+    event.preventDefault();
+    screenDragDepthRef.current = Math.max(0, screenDragDepthRef.current - 1);
+    if (screenDragDepthRef.current === 0) setScreenDragging(false);
+  };
+  const onScreenDrop = (event: DragEvent<HTMLDivElement>) => {
+    screenDragDepthRef.current = 0;
+    setScreenDragging(false);
+    if (event.defaultPrevented || tab !== "chat" || !connected || !ready) return;
+    const files = event.dataTransfer?.files;
+    if (files && files.length > 0) {
+      event.preventDefault();
+      const dropped = Array.from(files);
+      setDroppedFiles((prev) => ({ files: dropped, seq: (prev?.seq ?? 0) + 1 }));
+    }
+  };
+  const effectiveFocusRequest = (focusRequest ?? 0) + localFocusRequest || undefined;
 
   const refineDraft = useCallback(
     (text: string) => {
@@ -714,7 +807,13 @@ export function LiveScreen({
     <ViewerProvider>
     <ArtifactProvider onRefine={refineDraft}>
     <div className="flex h-full overflow-hidden">
-    <div className="relative min-w-0 flex-1 overflow-hidden">
+    <div
+      className="relative min-w-0 flex-1 overflow-hidden"
+      onDragEnter={onScreenDragEnter}
+      onDragOver={onScreenDragOver}
+      onDragLeave={onScreenDragLeave}
+      onDrop={onScreenDrop}
+    >
       <div
         ref={chatScrollRef}
         onScroll={onChatScroll}
@@ -734,30 +833,51 @@ export function LiveScreen({
               onSend={!side ? (text) => submit(text) : undefined}
             />
           ) : (
-            <ChatThread
-              items={items}
-              typing={typing}
-              routes={routes}
-              onDecide={decide}
-              onSend={(text) => submit(text)}
-              onMessageAction={onMessageAction}
-              highlightedTurnId={highlightedTurnId}
-              onOpenMemory={openMemoryPane}
-              draft={writing}
-              companionName={chatApp ? undefined : companion.name}
-              working={{
-                avatar: companion.avatar,
-                animation: pet.animation,
-                loop: pet.loop,
-                onDone: pet.onDone,
-                label: activity ? `${activity.label}…` : null,
-                face: chatApp?.workingFace ?? sideFace,
-              }}
-              messenger={chatApp ? { speaker: chatApp.speaker, me: chatApp.me, relay: chatApp.relay } : undefined}
-            />
+            <>
+              <ChatThread
+                items={items}
+                typing={typing}
+                routes={routes}
+                onDecide={decide}
+                onSend={(text) => submit(text)}
+                onMessageAction={onMessageAction}
+                onEditMessage={!chatApp ? handleEditMessage : undefined}
+                onForkMessage={onForkChat}
+                onQuoteSelection={(selected) => {
+                  setQuote(selected);
+                  setLocalFocusRequest((n) => n + 1);
+                }}
+                speakingMessageId={speech.activeMessageId}
+                speechStatus={speech.status}
+                highlightedTurnId={highlightedTurnId}
+                onOpenMemory={openMemoryPane}
+                draft={writing}
+                companionName={chatApp ? undefined : companion.name}
+                working={{
+                  avatar: companion.avatar,
+                  animation: pet.animation,
+                  loop: pet.loop,
+                  onDone: pet.onDone,
+                  label: activity ? `${activity.label}…` : null,
+                  face: chatApp?.workingFace ?? sideFace,
+                }}
+                messenger={chatApp ? { speaker: chatApp.speaker, me: chatApp.me, relay: chatApp.relay } : undefined}
+              />
+              <FollowUpChips
+                chatId={chatId}
+                turnId={lastCompletedReplyTurnId}
+                enabled={ready && tab === "chat" && !typing && !isStreaming && !chatApp && Boolean(lastCompletedReplyTurnId)}
+                onSelect={(prompt) => submit(prompt)}
+              />
+            </>
           )}
         </div>
       </div>
+      {screenDragging && tab === "chat" && (
+        <div className="pointer-events-none fixed inset-4 z-40 flex items-center justify-center rounded-[28px] border-2 border-dashed bg-black/10 backdrop-blur-[2px]" style={{ borderColor: "var(--c-primary)" }}>
+          <div className="c-float rounded-full px-5 py-2.5 text-[14px] font-medium">拖放到这里以上传文件或图片</div>
+        </div>
+      )}
       {(["feed", "ideas", "goals", "helpers", "creations"] as const).map((key) =>
         visitedTabs.has(key) || tab === key ? (
           <div
@@ -891,6 +1011,32 @@ export function LiveScreen({
               </button>
             </div>
           )}
+          {tab === "chat" && speech.status !== "idle" && (
+            <div
+              role="status"
+              aria-label="语音朗读状态"
+              className="c-float c-rise mx-auto flex max-w-full items-center gap-2 rounded-full py-1 pl-3 pr-1.5 text-[12.5px]"
+            >
+              {speech.status === "loading" ? (
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none" style={{ color: "var(--c-primary)" }} aria-hidden="true" />
+              ) : (
+                <Volume2 className="h-3.5 w-3.5 shrink-0 animate-pulse motion-reduce:animate-none" style={{ color: "var(--c-primary)" }} aria-hidden="true" />
+              )}
+              <span className="max-w-[200px] truncate">
+                {speech.status === "loading" ? "正在合成语音…" : `正在朗读${speech.previewText ? ` · ${speech.previewText}` : ""}`}
+              </span>
+              <button
+                type="button"
+                onClick={speech.stop}
+                aria-label="停止朗读"
+                className="c-pressable flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-medium"
+                style={{ background: "var(--c-fill)" }}
+              >
+                <Square className="h-2.5 w-2.5 fill-current" aria-hidden="true" />
+                停止
+              </button>
+            </div>
+          )}
           {tab === "chat" && (
             <Composer
               value={draft}
@@ -904,7 +1050,8 @@ export function LiveScreen({
               onFocusChange={setComposerFocused}
               quote={quote}
               onClearQuote={() => setQuote(null)}
-              focusRequest={focusRequest}
+              focusRequest={effectiveFocusRequest}
+              droppedFiles={droppedFiles}
             />
           )}
           {/* Inside a conversation with a helper there is no tab bar, as in a chat app (‹ goes back). */}

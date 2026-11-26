@@ -22,6 +22,7 @@ import android.provider.MediaStore;
 import android.provider.Settings;
 import android.speech.tts.TextToSpeech;
 import android.util.Log;
+import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -1234,6 +1235,41 @@ public class MainActivity extends Activity {
             String text = shared;
             shared = "";
             return text;
+        }
+
+        @JavascriptInterface
+        public void shareText(String text, String title) {
+            if (!isCompanionOrigin() || text == null || text.trim().isEmpty()) return;
+            final String label = title != null && !title.trim().isEmpty() ? title.trim() : "分享对话";
+            runOnUiThread(() -> {
+                if (!isAlive()) return;
+                Intent sendIntent = new Intent(Intent.ACTION_SEND);
+                sendIntent.setType("text/plain");
+                sendIntent.putExtra(Intent.EXTRA_TEXT, text);
+                sendIntent.putExtra(Intent.EXTRA_SUBJECT, label);
+                try {
+                    startActivity(Intent.createChooser(sendIntent, label));
+                } catch (ActivityNotFoundException e) {
+                    Toast.makeText(MainActivity.this, "没有可分享的应用", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void haptic(String kind) {
+            if (!isCompanionOrigin()) return;
+            final int constant;
+            if ("heavy".equals(kind)) {
+                constant = HapticFeedbackConstants.LONG_PRESS;
+            } else if ("medium".equals(kind)) {
+                constant = HapticFeedbackConstants.VIRTUAL_KEY;
+            } else {
+                constant = HapticFeedbackConstants.KEYBOARD_TAP;
+            }
+            runOnUiThread(() -> {
+                if (!isAlive() || web == null) return;
+                web.performHapticFeedback(constant);
+            });
         }
     }
 

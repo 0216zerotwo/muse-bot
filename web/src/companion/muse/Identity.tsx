@@ -3,15 +3,17 @@
  * and the 身份与记忆 pane of the status sheet — SOUL.md and MEMORY.md, edited in place. The pen and
  * the two file cards follow nanoMuse's MuseSheet (vendor/nanomuse-web, GPL-3.0-or-later).
  */
-import { Check, Loader2, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
+import { Check, Loader2, Pin, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 import { useClient } from "@/providers/ClientProvider";
 
+import { androidShell } from "../android-shell";
 import {
   fetchMemory,
   learnMemory,
+  pinMemory,
   tidyMemory,
   fetchMemoryDoc,
   fetchSoul,
@@ -146,8 +148,8 @@ function plainEntry(entry: string): string {
 
 export type MemoryProvenance = "user_written" | "learned" | "faded";
 
-function normalizeMemoryLine(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
+function normalizeMemoryLine(value: string | number | undefined | null): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
 /** Classifies whether a memory entry was written by the user, learned from chat, or faded. */
@@ -207,6 +209,7 @@ export function SoulMemoryPane({ identity }: { identity?: ReactNode } = {}) {
   const [learnedAt, setLearnedAt] = useState<number | null>(null);
   const [learning, setLearning] = useState(false);
   const [tidying, setTidying] = useState(false);
+  const [pinningId, setPinningId] = useState<string | null>(null);
   const [showAllItems, setShowAllItems] = useState(false);
   const [pendingSwitch, setPendingSwitch] = useState<Doc | "close" | null>(null);
   const openSeq = useRef(0);
@@ -223,6 +226,23 @@ export function SoulMemoryPane({ identity }: { identity?: ReactNode } = {}) {
         setChanges([]);
       });
   }, [token]);
+
+  const togglePin = async (item: MemoryItem) => {
+    if (pinningId) return;
+    setPinningId(item.id);
+    setNote(null);
+    androidShell()?.haptic?.("light");
+    try {
+      const view = await pinMemory(client, { file: item.file, line: item.line }, !item.pinned);
+      setSections(view.sections ?? []);
+      setChanges(view.changes ?? []);
+      if (view.learned_at !== undefined) setLearnedAt(view.learned_at ?? null);
+    } catch (e) {
+      setNote({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setPinningId(null);
+    }
+  };
 
   /* 现在更新: read the new chats now instead of waiting for the hour. */
   const learnNow = async () => {
@@ -272,6 +292,7 @@ export function SoulMemoryPane({ identity }: { identity?: ReactNode } = {}) {
         list.push({ item, provenance: classifyMemoryItem(item, changes) });
       }
     }
+    list.sort((a, b) => Number(Boolean(b.item.pinned)) - Number(Boolean(a.item.pinned)));
     return list;
   }, [sections, changes]);
 
@@ -476,10 +497,29 @@ export function SoulMemoryPane({ identity }: { identity?: ReactNode } = {}) {
                   const badge = PROVENANCE_META[provenance];
                   return (
                     <li key={item.id} className="flex items-start gap-2 px-3.5 py-2 text-[13px]">
+                      {item.pinned && (
+                        <span aria-label="已置顶" title="已置顶" className="mt-0.5 shrink-0 text-[12px]">
+                          📌
+                        </span>
+                      )}
                       <span className={cn("mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold", badge.className)}>
                         {badge.label}
                       </span>
                       <span className="min-w-0 flex-1 leading-snug">{plainEntry(item.text)}</span>
+                      <button
+                        type="button"
+                        disabled={pinningId === item.id}
+                        onClick={() => void togglePin(item)}
+                        aria-label={item.pinned ? "取消置顶" : "置顶"}
+                        title={item.pinned ? "取消置顶" : "置顶"}
+                        className={cn(
+                          "mt-0.5 flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11.5px] font-medium transition-colors disabled:opacity-40",
+                          item.pinned ? "bg-om-accent/15 text-om-accent" : "text-om-muted hover:bg-om-surface",
+                        )}
+                      >
+                        <Pin className="h-3 w-3" aria-hidden="true" />
+                        {item.pinned ? "取消置顶" : "置顶"}
+                      </button>
                     </li>
                   );
                 })}

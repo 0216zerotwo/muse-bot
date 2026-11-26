@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import { ArrowUp, FileText, Loader2, Mic, Plus, Quote, Square, X } from "lucide-react";
 
 import type { SendAttachment } from "@/hooks/useNanobotStream";
@@ -72,6 +72,7 @@ export function Composer({
   quote,
   onClearQuote,
   voiceEnabled = true,
+  droppedFiles = null,
 }: {
   value: string;
   onChange: (next: string) => void;
@@ -89,6 +90,8 @@ export function Composer({
   onClearQuote?: () => void;
   /** False when backend reports STT capability is unavailable; hides the guaranteed-to-fail mic button. */
   voiceEnabled?: boolean;
+  /** External files dropped on the surrounding chat area to attach to the next message. */
+  droppedFiles?: { files: File[]; seq: number } | null;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -101,6 +104,13 @@ export function Composer({
   const blurTimerRef = useRef<number | null>(null);
   const [images, setImages] = useState<SendAttachment[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const dragDepthRef = useRef(0);
+  const lastDropSeqRef = useRef(0);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [dismissedValue, setDismissedValue] = useState<string | null>(null);
+  const activeValueDismissed = dismissedValue === value;
 
   /* @名字: name a helper to hand this to. Typing "@" lists them; picking one fills its name in. */
   const { token } = useClient();
@@ -121,8 +131,10 @@ export function Composer({
       cancelled = true;
     };
   }, [mentionOpen, token]);
-  const mentionable = mention === undefined ? [] : (helpers ?? []).filter((h) => h.name.includes(mention)).slice(0, 5);
+  const mentionable = activeValueDismissed || mention === undefined ? [] : (helpers ?? []).filter((h) => h.name.includes(mention)).slice(0, 5);
   const pickHelper = (helper: Helper) => {
+    setMentionIndex(0);
+    setDismissedValue(null);
     onChange(value.replace(/@[^\s@]{0,12}$/, `@${helper.name} `));
     textareaRef.current?.focus();
   };
@@ -157,15 +169,31 @@ export function Composer({
       })),
   ];
   const pickable =
-    slash === undefined
+    activeValueDismissed || slash === undefined
       ? []
       : slashItems.filter(
           (p) => !slash || p.key.toLowerCase().includes(slash.toLowerCase()) || p.label.toLowerCase().includes(slash.toLowerCase()),
         );
   const pickPreset = (preset: (typeof SLASH_PRESETS)[number]) => {
+    setSlashIndex(0);
+    setDismissedValue(null);
     onChange(preset.text);
     textareaRef.current?.focus();
   };
+
+  useEffect(() => {
+    if (dismissedValue !== null && dismissedValue !== value) {
+      setDismissedValue(null);
+    }
+  }, [dismissedValue, value]);
+
+  useEffect(() => {
+    setSlashIndex(0);
+  }, [slash, pickable.length]);
+
+  useEffect(() => {
+    setMentionIndex(0);
+  }, [mention, mentionable.length]);
 
   useEffect(() => () => {
     if (blurTimerRef.current !== null) window.clearTimeout(blurTimerRef.current);
@@ -201,12 +229,60 @@ export function Composer({
   const submit = useCallback(() => {
     if (!canSend) return;
     tapHaptic(8);
+    androidShell()?.haptic?.("light");
     onSend(value.trim(), images, dictated.current);
     setImages([]);
     setNotice(null);
   }, [canSend, images, onSend, value]);
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!event.nativeEvent.isComposing) {
+      if (pickable.length > 0) {
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          setSlashIndex((idx) => (idx + 1) % pickable.length);
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          setSlashIndex((idx) => (idx - 1 + pickable.length) % pickable.length);
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setDismissedValue(value);
+          return;
+        }
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          const chosen = pickable[slashIndex] ?? pickable[0];
+          if (chosen) pickPreset(chosen);
+          return;
+        }
+      } else if (mentionable.length > 0) {
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          setMentionIndex((idx) => (idx + 1) % mentionable.length);
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          setMentionIndex((idx) => (idx - 1 + mentionable.length) % mentionable.length);
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setDismissedValue(value);
+          return;
+        }
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          const chosen = mentionable[mentionIndex] ?? mentionable[0];
+          if (chosen) pickHelper(chosen);
+          return;
+        }
+      }
+    }
     // Touch keyboards insert newlines; hardware keyboards send on Enter.
     const coarse = window.matchMedia?.("(any-pointer: coarse)").matches;
     if (event.key === "Enter" && !event.shiftKey && !coarse && !event.nativeEvent.isComposing) {
@@ -254,6 +330,12 @@ export function Composer({
   const addFilesRef = useRef(addFiles);
   addFilesRef.current = addFiles;
   useEffect(() => {
+    if (!droppedFiles || droppedFiles.seq === lastDropSeqRef.current) return;
+    lastDropSeqRef.current = droppedFiles.seq;
+    void addFilesRef.current(droppedFiles.files);
+  }, [droppedFiles]);
+
+  useEffect(() => {
     const take = (event: Event) => {
       const picked = (event as CustomEvent<PickedFile[]>).detail ?? [];
       void Promise.all(
@@ -274,11 +356,80 @@ export function Composer({
     else fileRef.current?.click();
   };
 
+  const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const pastedFiles: File[] = [];
+    const directFiles = event.clipboardData?.files;
+    if (directFiles && directFiles.length > 0) {
+      pastedFiles.push(...Array.from(directFiles));
+    } else if (event.clipboardData?.items) {
+      for (const item of Array.from(event.clipboardData.items)) {
+        if (item.kind === "file") {
+          const file = item.getAsFile();
+          if (file) pastedFiles.push(file);
+        }
+      }
+    }
+    if (pastedFiles.length > 0) {
+      event.preventDefault();
+      void addFiles(pastedFiles);
+    }
+  };
+
+  const hasDraggedFiles = (event: DragEvent) =>
+    Boolean(event.dataTransfer?.types?.includes("Files") || (event.dataTransfer?.files?.length ?? 0) > 0);
+  const onDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    if (!connected || !hasDraggedFiles(event)) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setDragging(true);
+  };
+  const onDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!connected || !hasDraggedFiles(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    if (!dragging) setDragging(true);
+  };
+  const onDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (!dragging) return;
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDragging(false);
+  };
+  const onDrop = (event: DragEvent<HTMLDivElement>) => {
+    dragDepthRef.current = 0;
+    setDragging(false);
+    if (!connected) return;
+    const files = event.dataTransfer?.files;
+    if (files && files.length > 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      void addFiles(files);
+    }
+  };
+
   const recording = voice.isRecording;
   const transcribing = voice.state === "transcribing";
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div
+      className="flex flex-col gap-1.5"
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {dragging && (
+        <div
+          data-testid="composer-drop-overlay"
+          className="c-card pointer-events-none flex items-center justify-center rounded-2xl border-2 border-dashed px-4 py-2.5 text-[13px] font-medium"
+          style={{
+            borderColor: "var(--c-primary)",
+            background: "color-mix(in srgb, var(--c-surface) 88%, transparent)",
+          }}
+        >
+          松开即可上传图片或文件
+        </div>
+      )}
       {notice && (
         <p className="c-float mx-auto rounded-full px-3 py-1.5 text-[13px]" role="alert">
           {notice}
@@ -286,40 +437,54 @@ export function Composer({
       )}
       {pickable.length > 0 && (
         <ul className="c-float max-h-[40vh] overflow-y-auto rounded-[22px] py-1" aria-label="快捷指令">
-          {pickable.map((preset) => (
-            <li key={preset.key}>
-              <button
-                type="button"
-                onPointerDown={keepFocus}
-                onClick={() => pickPreset(preset)}
-                className="c-pressable flex w-full items-baseline gap-2 px-4 py-2 text-left"
-              >
-                <span className="text-[15px] font-medium">{preset.label}</span>
-                <span className="c-muted min-w-0 flex-1 truncate text-[12.5px]">{preset.detail}</span>
-                <span className="c-muted shrink-0 font-mono text-[12px]">/{preset.key}</span>
-              </button>
-            </li>
-          ))}
+          {pickable.map((preset, index) => {
+            const active = index === slashIndex;
+            return (
+              <li key={preset.key}>
+                <button
+                  type="button"
+                  data-active={active ? "true" : undefined}
+                  aria-current={active ? "true" : undefined}
+                  onPointerDown={keepFocus}
+                  onMouseEnter={() => setSlashIndex(index)}
+                  onClick={() => pickPreset(preset)}
+                  className="c-pressable flex w-full items-baseline gap-2 px-4 py-2 text-left"
+                  style={active ? { background: "color-mix(in srgb, var(--c-primary) 13%, transparent)" } : undefined}
+                >
+                  <span className="text-[15px] font-medium">{preset.label}</span>
+                  <span className="c-muted min-w-0 flex-1 truncate text-[12.5px]">{preset.detail}</span>
+                  <span className="c-muted shrink-0 font-mono text-[12px]">/{preset.key}</span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
       {mentionable.length > 0 && (
         <ul className="c-float overflow-hidden rounded-[22px] py-1" aria-label="叫哪个帮手">
-          {mentionable.map((helper) => (
-            <li key={helper.id}>
-              <button
-                type="button"
-                onPointerDown={keepFocus}
-                onClick={() => pickHelper(helper)}
-                className="c-pressable flex w-full items-center gap-3 px-4 py-2 text-left"
-              >
-                <span className="text-[20px]" aria-hidden="true">{helper.emoji}</span>
-                <span className="min-w-0 flex-1">
-                  <span className="block text-[15px] font-medium">{helper.name}</span>
-                  {helper.title && <span className="c-muted block truncate text-[12.5px]">{helper.title}</span>}
-                </span>
-              </button>
-            </li>
-          ))}
+          {mentionable.map((helper, index) => {
+            const active = index === mentionIndex;
+            return (
+              <li key={helper.id}>
+                <button
+                  type="button"
+                  data-active={active ? "true" : undefined}
+                  aria-current={active ? "true" : undefined}
+                  onPointerDown={keepFocus}
+                  onMouseEnter={() => setMentionIndex(index)}
+                  onClick={() => pickHelper(helper)}
+                  className="c-pressable flex w-full items-center gap-3 px-4 py-2 text-left"
+                  style={active ? { background: "color-mix(in srgb, var(--c-primary) 13%, transparent)" } : undefined}
+                >
+                  <span className="text-[20px]" aria-hidden="true">{helper.emoji}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[15px] font-medium">{helper.name}</span>
+                    {helper.title && <span className="c-muted block truncate text-[12.5px]">{helper.title}</span>}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
       <div className="c-float flex flex-col rounded-[26px]">
@@ -395,6 +560,7 @@ export function Composer({
               value={value}
               onChange={(event) => onChange(event.target.value)}
               onKeyDown={onKeyDown}
+              onPaste={onPaste}
               onFocus={() => {
                 if (blurTimerRef.current !== null) window.clearTimeout(blurTimerRef.current);
                 onFocusChange?.(true);
