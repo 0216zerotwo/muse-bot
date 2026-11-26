@@ -96,12 +96,11 @@ struct SandboxedArtifactWebView: UIViewRepresentable {
             webView?.loadHTMLString(wrapped, baseURL: nil)
         }
 
-        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
             let address = navigationAction.request.url?.absoluteString ?? ""
             let allowed = navigationAction.navigationType == .other
                 && (address == "about:blank" || address == "about:srcdoc")
-            decisionHandler(allowed ? .allow : .cancel)
+            return allowed ? .allow : .cancel
         }
     }
 }

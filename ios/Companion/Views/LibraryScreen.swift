@@ -48,6 +48,10 @@ struct LibraryScreen: View {
     private var trimmedKBQuery: String { kbQuery.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
+        applyPresentations(libraryScrollBody)
+    }
+
+    private var libraryScrollBody: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
                 ScreenHeading(
@@ -64,20 +68,7 @@ struct LibraryScreen: View {
                 .padding(.horizontal, 16)
 
                 if let kbToast {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(CompanionPalette.primary)
-                        Text(kbToast)
-                            .font(.subheadline)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Button { self.kbToast = nil } label: {
-                            Image(systemName: "xmark").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                        }.buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 14))
-                    .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(CompanionPalette.border))
-                    .padding(.horizontal, 16)
+                    toastBanner(kbToast)
                 }
 
                 if segment == .creations {
@@ -106,34 +97,55 @@ struct LibraryScreen: View {
             }
             await loadKnowledge()
         }
-        .fullScreenCover(item: $viewing) { MediaViewer(destination: $0) }
-        .sheet(item: $selectedHit) { hit in
-            KnowledgeHitDetailSheet(hit: hit, query: trimmedKBQuery) { prompt in
-                store.composeDraft(prompt)
-                selectedHit = nil
-            }
+    }
+
+    private func toastBanner(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(CompanionPalette.primary)
+            Text(text)
+                .font(.subheadline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button { self.kbToast = nil } label: {
+                Image(systemName: "xmark").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            }.buttonStyle(.plain)
         }
-        .fileImporter(
-            isPresented: $kbImporting,
-            allowedContentTypes: [.pdf, .plainText, .html, .json, .sourceCode, .spreadsheet, .presentation, .data, .item],
-            allowsMultipleSelection: true
-        ) { result in
-            Task { await importKnowledgeFiles(result) }
-        }
-        .confirmationDialog(
-            "从知识库删除「\(deletingDoc?.title ?? "")」？",
-            isPresented: Binding(get: { deletingDoc != nil }, set: { if !$0 { deletingDoc = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("删除", role: .destructive) {
-                if let doc = deletingDoc {
-                    deletingDoc = nil
-                    Task { await deleteKnowledge(doc) }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(CompanionPalette.border))
+        .padding(.horizontal, 16)
+    }
+
+    private func applyPresentations<Content: View>(_ content: Content) -> some View {
+        content
+            .fullScreenCover(item: $viewing) { MediaViewer(destination: $0) }
+            .sheet(item: $selectedHit) { hit in
+                KnowledgeHitDetailSheet(hit: hit, query: trimmedKBQuery) { prompt in
+                    store.composeDraft(prompt)
+                    selectedHit = nil
                 }
             }
-        } message: {
-            Text("删除后该文档的所有索引片段将被移除，无法撤销。")
-        }
+            .fileImporter(
+                isPresented: $kbImporting,
+                allowedContentTypes: [.pdf, .plainText, .html, .json, .sourceCode, .spreadsheet, .presentation, .data, .item],
+                allowsMultipleSelection: true
+            ) { result in
+                Task { await importKnowledgeFiles(result) }
+            }
+            .confirmationDialog(
+                "从知识库删除「\(deletingDoc?.title ?? "")」？",
+                isPresented: Binding(get: { deletingDoc != nil }, set: { if !$0 { deletingDoc = nil } }),
+                titleVisibility: .visible
+            ) {
+                Button("删除", role: .destructive) {
+                    if let doc = deletingDoc {
+                        deletingDoc = nil
+                        Task { await deleteKnowledge(doc) }
+                    }
+                }
+            } message: {
+                Text("删除后该文档的所有索引片段将被移除，无法撤销。")
+            }
     }
 
     // MARK: - 作品归档

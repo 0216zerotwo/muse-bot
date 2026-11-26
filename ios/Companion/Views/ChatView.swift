@@ -155,128 +155,165 @@ struct ChatView: View {
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    let answerable = answerableID
-                    let items = entries  // built once per redraw (each use of `entries` rebuilds it)
-                    let currentMessages = chatMessages
-                    // The newest reply: copy, read out and 重新生成 under it, as ChatGPT and Claude show them.
-                    let lastReplyID = items.last(where: { entry in
-                        entry.message.map { $0.role != "user" && $0.source?["kind"].stringValue != "notice" } ?? false
-                    })?.id
-                    if chatHasOlder {
-                        Button { loadOlder(proxy) } label: {
-                            HStack { Spacer(); if chatLoadingHistory || paging { ProgressView() }; Text("载入更早的消息"); Spacer() }.frame(minHeight: 44)
-                        }.font(.footnote).disabled(chatLoadingHistory || paging)
-                            .onAppear { if positioned && !followingBottom { loadOlder(proxy) } }
-                    }
-                    if items.isEmpty && !chatLoadingHistory { emptyState }
-                    ForEach(Array(items.enumerated()), id: \.element.id) { index, entry in
-                        if showDate(index, in: items) {
-                            Text(dateLabel(entry.at)).font(.caption).foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity).padding(.vertical, 8)
-                        }
-                        if let message = entry.message {
-                            let targetChat = activeChatID
-                            MessageRow(store: store, message: message,
-                                       answerable: answerable == message.id,
-                                       isRunning: chatRunning,
-                                       highlighted: highlightedMessageID == message.id,
-                                       speaker: message.role == "user" ? nil : messenger?.speaker(message),
-                                       messenger: messenger != nil,
-                                       chatID: targetChat,
-                                       chatKey: "\(store.serverAddress).\(targetChat)",
-                                       onQuote: { quote = quoteText(message); focused = true; Haptics.selection() },
-                                       onMedia: { media = MediaDestination(item: $0, baseURL: store.baseURL) },
-                                       onSelect: { selecting = SelectableText(text: $0) },
-                                       onEdit: { editingMessage = message; Haptics.selection() },
-                                       onFork: {
-                                           Haptics.selection()
-                                           Task { await store.forkChat(chatId: targetChat, turnId: message.turnId) }
-                                       },
-                                       onOpenCitations: { sources, focusID in
-                                           citationSheet = CitationSheetContext(sources: sources, focusedID: focusID)
-                                       })
-                                .equatable()
-                            if !entry.remembered.isEmpty {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    ForEach(entry.remembered, id: \.self) { note in
-                                        Label("已记住：" + note, systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                    }
-                                }.padding(.horizontal, 6).accessibilityElement(children: .combine)
-                            }
-                            let latest = entry.id == lastReplyID && !chatRunning
-                            if entry.task != nil || latest {
-                                HStack(spacing: 6) {
-                                    if let task = entry.task {
-                                        TaskChip(task: task) {
-                                            // The full task (what was asked, the answer) only when it is opened.
-                                            openTask = ActivityLog.tasks(messages: currentMessages, running: chatRunning, jobs: []).first { $0.id == task.id } ?? task
-                                        }
-                                    }
-                                    if latest {
-                                        let again: (() -> Void)? = canRegenerate(message) ? { Task { await store.regenerate(message, chatID: targetChat) } } : nil
-                                        ReplyActions(store: store, message: message, regenerate: again)
-                                    }
-                                }.padding(.top, -6)
-                            }
-                            if latest && !followupSuggestions.isEmpty {
-                                FollowupChipsRow(suggestions: followupSuggestions) { prompt in
-                                    followupSuggestions = []
-                                    _ = store.send(text: prompt, chatID: targetChat)
-                                    Haptics.send()
-                                }
-                            }
-                        } else if let approval = entry.approval {
-                            let targetChat = activeChatID
-                            NativeApprovalView(approval: approval) { decision, scope in
-                                await store.approve(id: approval["id"].stringValue, decision: decision, scope: scope, chatID: targetChat)
-                            }.frame(maxWidth: 520, alignment: .leading).id(entry.id)
-                        }
-                    }
-                    if Presentation.awaitingReply(messages: currentMessages, streaming: chatRunning) {
-                        let current = ActivityLog.current(currentMessages)
-                        // A document it is writing shows as it will look, before it is sent.
-                        if let draft = FileKinds.draft(currentMessages) { DraftCard(draft: draft).equatable() }
-                        WorkingCard(label: chatActivityLabel, steps: current.steps, since: current.since, open: $stepsOpen)
-                    }
-                    Color.clear.frame(height: 1).id("bottom")
-                        .onAppear { followingBottom = true }
-                        .onDisappear { if positioned && !settlingBottom { followingBottom = false } }
+        applySheetsAndLifecycle(
+            applyMediaPickers(
+                ScrollViewReader { proxy in
+                    applyScrollObservers(threadScrollView(proxy: proxy), proxy: proxy)
                 }
-                .frame(maxWidth: 700, alignment: .leading).padding(.horizontal, 16).padding(.bottom, 24).padding(.top, topInset)
-                .opacity(revealed || chatMessages.isEmpty ? 1 : 0)
-                .frame(maxWidth: .infinity)
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .overlay { if chatLoadingHistory && chatMessages.isEmpty { ProgressView("正在载入聊天…") } }
-            .overlay(alignment: .bottomTrailing) {
-                if !followingBottom && !chatMessages.isEmpty {
-                    Button { followingBottom = true; scrollBottom(proxy) } label: {
-                        Image(systemName: "arrow.down").frame(width: 44, height: 44).background(.regularMaterial, in: Circle())
-                    }.accessibilityLabel("滚动到最新消息").padding(16)
+            )
+        )
+    }
+
+    @ViewBuilder
+    private func threadScrollView(proxy: ScrollViewProxy) -> some View {
+        let answerable = answerableID
+        let items = entries  // built once per redraw (each use of `entries` rebuilds it)
+        let currentMessages = chatMessages
+        // The newest reply: copy, read out and 重新生成 under it, as ChatGPT and Claude show them.
+        let lastReplyID = items.last(where: { entry in
+            entry.message.map { $0.role != "user" && $0.source?["kind"].stringValue != "notice" } ?? false
+        })?.id
+
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                if chatHasOlder {
+                    Button { loadOlder(proxy) } label: {
+                        HStack { Spacer(); if chatLoadingHistory || paging { ProgressView() }; Text("载入更早的消息"); Spacer() }.frame(minHeight: 44)
+                    }.font(.footnote).disabled(chatLoadingHistory || paging)
+                        .onAppear { if positioned && !followingBottom { loadOlder(proxy) } }
                 }
+                if items.isEmpty && !chatLoadingHistory { emptyState }
+                ForEach(Array(items.enumerated()), id: \.element.id) { index, entry in
+                    threadRow(
+                        entry: entry,
+                        index: index,
+                        items: items,
+                        answerable: answerable,
+                        lastReplyID: lastReplyID,
+                        currentMessages: currentMessages
+                    )
+                }
+                if Presentation.awaitingReply(messages: currentMessages, streaming: chatRunning) {
+                    let current = ActivityLog.current(currentMessages)
+                    // A document it is writing shows as it will look, before it is sent.
+                    if let draft = FileKinds.draft(currentMessages) { DraftCard(draft: draft).equatable() }
+                    WorkingCard(label: chatActivityLabel, steps: current.steps, since: current.since, open: $stepsOpen)
+                }
+                Color.clear.frame(height: 1).id("bottom")
+                    .onAppear { followingBottom = true }
+                    .onDisappear { if positioned && !settlingBottom { followingBottom = false } }
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                VStack(spacing: 6) {
-                    if messenger == nil, let goal = chatGoal, goal.active {
-                        let targetChat = activeChatID
-                        GoalBannerView(goal: goal) {
-                            Haptics.selection()
-                            Task { await store.stopGoal(chatID: targetChat) }
-                        }
-                        .padding(.horizontal, 12)
+            .frame(maxWidth: 700, alignment: .leading).padding(.horizontal, 16).padding(.bottom, 24).padding(.top, topInset)
+            .opacity(revealed || chatMessages.isEmpty ? 1 : 0)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .overlay { if chatLoadingHistory && chatMessages.isEmpty { ProgressView("正在载入聊天…") } }
+        .overlay(alignment: .bottomTrailing) {
+            if !followingBottom && !chatMessages.isEmpty {
+                Button { followingBottom = true; scrollBottom(proxy) } label: {
+                    Image(systemName: "arrow.down").frame(width: 44, height: 44).background(.regularMaterial, in: Circle())
+                }.accessibilityLabel("滚动到最新消息").padding(16)
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 6) {
+                if messenger == nil, let goal = chatGoal, goal.active {
+                    let targetChat = activeChatID
+                    GoalBannerView(goal: goal) {
+                        Haptics.selection()
+                        Task { await store.stopGoal(chatID: targetChat) }
                     }
-                    composer
+                    .padding(.horizontal, 12)
+                }
+                composer
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func threadRow(
+        entry: ThreadEntry,
+        index: Int,
+        items: [ThreadEntry],
+        answerable: String?,
+        lastReplyID: String?,
+        currentMessages: [ChatMessage]
+    ) -> some View {
+        if showDate(index, in: items) {
+            Text(dateLabel(entry.at)).font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity).padding(.vertical, 8)
+        }
+        if let message = entry.message {
+            let targetChat = activeChatID
+            MessageRow(store: store, message: message,
+                       answerable: answerable == message.id,
+                       isRunning: chatRunning,
+                       highlighted: highlightedMessageID == message.id,
+                       speaker: message.role == "user" ? nil : messenger?.speaker(message),
+                       messenger: messenger != nil,
+                       chatID: targetChat,
+                       chatKey: "\(store.serverAddress).\(targetChat)",
+                       onQuote: { quote = quoteText(message); focused = true; Haptics.selection() },
+                       onMedia: { media = MediaDestination(item: $0, baseURL: store.baseURL) },
+                       onSelect: { selecting = SelectableText(text: $0) },
+                       onEdit: { editingMessage = message; Haptics.selection() },
+                       onFork: {
+                           Haptics.selection()
+                           Task { await store.forkChat(chatId: targetChat, turnId: message.turnId) }
+                       },
+                       onOpenCitations: { sources, focusID in
+                           citationSheet = CitationSheetContext(sources: sources, focusedID: focusID)
+                       })
+                .equatable()
+            if !entry.remembered.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(entry.remembered, id: \.self) { note in
+                        Label("已记住：" + note, systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                }.padding(.horizontal, 6).accessibilityElement(children: .combine)
+            }
+            let latest = entry.id == lastReplyID && !chatRunning
+            if entry.task != nil || latest {
+                HStack(spacing: 6) {
+                    if let task = entry.task {
+                        TaskChip(task: task) {
+                            // The full task (what was asked, the answer) only when it is opened.
+                            openTask = ActivityLog.tasks(messages: currentMessages, running: chatRunning, jobs: []).first { $0.id == task.id } ?? task
+                        }
+                    }
+                    if latest {
+                        let again: (() -> Void)? = canRegenerate(message) ? { Task { await store.regenerate(message, chatID: targetChat) } } : nil
+                        ReplyActions(store: store, message: message, regenerate: again)
+                    }
+                }.padding(.top, -6)
+            }
+            if latest && !followupSuggestions.isEmpty {
+                FollowupChipsRow(suggestions: followupSuggestions) { prompt in
+                    followupSuggestions = []
+                    _ = store.send(text: prompt, chatID: targetChat)
+                    Haptics.send()
                 }
             }
+        } else if let approval = entry.approval {
+            let targetChat = activeChatID
+            NativeApprovalView(approval: approval) { decision, scope in
+                await store.approve(id: approval["id"].stringValue, decision: decision, scope: scope, chatID: targetChat)
+            }.frame(maxWidth: 520, alignment: .leading).id(entry.id)
+        }
+    }
+
+    private func applyScrollObservers<Content: View>(_ content: Content, proxy: ScrollViewProxy) -> some View {
+        content
             .onChange(of: chatMessages.last?.id) { _, _ in followIfNeeded(proxy) }
             // A reply growing stays pinned to the bottom, without an animation for every chunk.
             .onChange(of: chatMessages.last?.content) { _, _ in followIfNeeded(proxy, animated: false) }
             .onChange(of: chatApprovals) { _, _ in followIfNeeded(proxy) }
             .onChange(of: chatGoal) { _, _ in followIfNeeded(proxy) }
-            .onChange(of: chatLoadingHistory) { _, loading in if !loading && !positioned { followIfNeeded(proxy) } }
+            .onChange(of: chatLoadingHistory) { _, loading in
+                if !loading && !positioned { followIfNeeded(proxy) }
+                if !loading { revealSearchHit(proxy) }
+            }
             .onChange(of: activeChatID) { _, _ in
                 voice.cancel()
                 highlightTask?.cancel()
@@ -291,6 +328,7 @@ struct ChatView: View {
             .onChange(of: text) { oldValue, newValue in
                 if !draftKey.isEmpty { UserDefaults.standard.set(newValue, forKey: draftKey) }
                 if composerError != nil && !newValue.isEmpty { composerError = nil }
+                if newValue.isEmpty { dictated = false }
                 loadAutocompleteContextIfNeeded(from: oldValue, to: newValue)
             }
             .onAppear {
@@ -303,71 +341,76 @@ struct ChatView: View {
             .onChange(of: store.suggestedDraft) { _, _ in acceptDraft() }
             .onChange(of: revealed) { _, _ in revealSearchHit(proxy) }
             .onChange(of: store.revealTurn) { _, _ in revealSearchHit(proxy) }
-            .onChange(of: chatLoadingHistory) { _, loading in if !loading { revealSearchHit(proxy) } }
             .task(id: followupTriggerKey) { await loadFollowups() }
-        }
-        .onDisappear {
-            voice.cancel()
-            highlightTask?.cancel()
-        }
-        .onChange(of: scenePhase) { _, phase in if phase == .background { voice.cancel() } }
-        .sheet(isPresented: $attach, onDismiss: openChosenPicker) {
-            AttachSheet(onChoice: { attachChoice = $0; attach = false },
-                        onAsset: { asset in attach = false; Task { await importAsset(asset) } })
-                .presentationDetents([.height(330)]).presentationCornerRadius(36)
-                .presentationBackground(.regularMaterial).presentationDragIndicator(.visible)
-                .tint(CompanionPalette.primary)
-        }
-        .sheet(isPresented: $modelSetup, onDismiss: { Task { await store.refreshModelStatus() } }) {
-            NavigationStack { ModelsSettingsPage() }
-                .environment(\.settingsClose, { modelSetup = false })
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-                .tint(CompanionPalette.primary)
-        }
-        .fullScreenCover(isPresented: $camera) {
-            CameraPicker { shot in Task { await importShot(shot) } }.ignoresSafeArea()
-        }
-        .photosPicker(isPresented: $photoPicker, selection: $photos, maxSelectionCount: max(1, Self.maxAttachments - drafts.count), matching: .any(of: [.images, .videos]))
-        .photosPicker(isPresented: $videoPicker, selection: $photos, maxSelectionCount: max(1, Self.maxAttachments - drafts.count), matching: .videos)
-        .onChange(of: photos) { _, selection in Task { await importPhotos(selection) } }
-        .fileImporter(isPresented: $filePicker, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-            Task { await importFiles(result) }
-        }
-        .inAppLinks()
-        .fullScreenCover(item: $media) { MediaViewer(destination: $0) }
-        .sheet(item: $openTask) { TaskSheet(task: $0) }
-        .sheet(item: $selecting) { item in
-            SelectTextSheet(text: item.text) { quoted in
-                quote = quoted
-                focused = true
-                Haptics.selection()
+    }
+
+    private func applyMediaPickers<Content: View>(_ content: Content) -> some View {
+        content
+            .sheet(isPresented: $attach, onDismiss: openChosenPicker) {
+                AttachSheet(onChoice: { attachChoice = $0; attach = false },
+                            onAsset: { asset in attach = false; Task { await importAsset(asset) } })
+                    .presentationDetents([.height(330)]).presentationCornerRadius(36)
+                    .presentationBackground(.regularMaterial).presentationDragIndicator(.visible)
+                    .tint(CompanionPalette.primary)
             }
-        }
-        .sheet(item: $editingMessage) { target in
-            let targetChat = activeChatID
-            EditMessageSheet(message: target) { updatedText in
-                guard let turnID = target.turnId else { return false }
-                followupSuggestions = []
-                let ok = await store.editAndResend(chatId: targetChat, turnId: turnID, content: updatedText)
-                if ok { Haptics.send() }
-                return ok
+            .sheet(isPresented: $modelSetup, onDismiss: { Task { await store.refreshModelStatus() } }) {
+                NavigationStack { ModelsSettingsPage() }
+                    .environment(\.settingsClose, { modelSetup = false })
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+                    .tint(CompanionPalette.primary)
             }
-        }
-        .sheet(item: $citationSheet) { context in
-            CitationSourcesSheet(context: context)
-        }
-        .onChange(of: text) { _, value in if value.isEmpty { dictated = false } }
-        .onChange(of: chatRunning) { was, now in
-            // The answer to a question asked by voice, read out when it is done.
-            guard was, !now, readReply else { return }
-            readReply = false
-            let currentMessages = chatMessages
-            let lastAsked = currentMessages.lastIndex { $0.role == "user" } ?? -1
-            if let reply = currentMessages.indices.last(where: { $0 > lastAsked && currentMessages[$0].role != "user" && Presentation.isVisibleReply(currentMessages[$0]) }) {
-                ReadAloud.shared.speak(currentMessages[reply].id, text: currentMessages[reply].content, store: store)
+            .fullScreenCover(isPresented: $camera) {
+                CameraPicker { shot in Task { await importShot(shot) } }.ignoresSafeArea()
             }
-        }
+            .photosPicker(isPresented: $photoPicker, selection: $photos, maxSelectionCount: max(1, Self.maxAttachments - drafts.count), matching: .any(of: [.images, .videos]))
+            .photosPicker(isPresented: $videoPicker, selection: $photos, maxSelectionCount: max(1, Self.maxAttachments - drafts.count), matching: .videos)
+            .onChange(of: photos) { _, selection in Task { await importPhotos(selection) } }
+            .fileImporter(isPresented: $filePicker, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+                Task { await importFiles(result) }
+            }
+    }
+
+    private func applySheetsAndLifecycle<Content: View>(_ content: Content) -> some View {
+        content
+            .onDisappear {
+                voice.cancel()
+                highlightTask?.cancel()
+            }
+            .onChange(of: scenePhase) { _, phase in if phase == .background { voice.cancel() } }
+            .inAppLinks()
+            .fullScreenCover(item: $media) { MediaViewer(destination: $0) }
+            .sheet(item: $openTask) { TaskSheet(task: $0) }
+            .sheet(item: $selecting) { item in
+                SelectTextSheet(text: item.text) { quoted in
+                    quote = quoted
+                    focused = true
+                    Haptics.selection()
+                }
+            }
+            .sheet(item: $editingMessage) { target in
+                let targetChat = activeChatID
+                EditMessageSheet(message: target) { updatedText in
+                    guard let turnID = target.turnId else { return false }
+                    followupSuggestions = []
+                    let ok = await store.editAndResend(chatId: targetChat, turnId: turnID, content: updatedText)
+                    if ok { Haptics.send() }
+                    return ok
+                }
+            }
+            .sheet(item: $citationSheet) { context in
+                CitationSourcesSheet(context: context)
+            }
+            .onChange(of: chatRunning) { was, now in
+                // The answer to a question asked by voice, read out when it is done.
+                guard was, !now, readReply else { return }
+                readReply = false
+                let currentMessages = chatMessages
+                let lastAsked = currentMessages.lastIndex { $0.role == "user" } ?? -1
+                if let reply = currentMessages.indices.last(where: { $0 > lastAsked && currentMessages[$0].role != "user" && Presentation.isVisibleReply(currentMessages[$0]) }) {
+                    ReadAloud.shared.speak(currentMessages[reply].id, text: currentMessages[reply].content, store: store)
+                }
+            }
     }
 
     /// 重新生成 is for the newest answer to a plain question (Hermes asks it again; it can't send
