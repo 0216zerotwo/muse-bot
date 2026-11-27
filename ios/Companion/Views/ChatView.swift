@@ -132,8 +132,8 @@ struct ChatView: View {
     /// The one reply whose cards still answer (worked out once per update, not once per row).
     private var answerableID: String? { chatRunning ? nil : Presentation.answerableReplyID(messages: chatMessages) }
 
-    /// Latest completed assistant reply turn eligible for contextual follow-up chips.
-    private var latestFollowupTurnID: String? {
+    /// Latest completed assistant reply turn and reply digest eligible for contextual follow-up chips.
+    private var latestFollowupTarget: (turnId: String, fingerprint: String)? {
         guard !chatRunning, store.connected, !activeChatID.isEmpty else { return nil }
         let current = chatMessages
         let lastUserIndex = current.lastIndex { $0.role == "user" } ?? -1
@@ -145,14 +145,17 @@ struct ChatView: View {
                msg.source?["kind"].stringValue != "notice",
                let tid = msg.turnId, !tid.isEmpty,
                !msg.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return tid
+                return (tid, CompanionStore.followupFingerprint(for: msg.content))
             }
         }
         return nil
     }
 
+    private var latestFollowupTurnID: String? { latestFollowupTarget?.turnId }
+
     private var followupTriggerKey: String {
-        "\(activeChatID)|\(latestFollowupTurnID ?? "")|\(chatRunning)|\(store.connected)"
+        let target = latestFollowupTarget
+        return "\(activeChatID)|\(target?.turnId ?? "")|\(target?.fingerprint ?? "")|\(chatRunning)|\(store.connected)"
     }
 
     private var completedReplyIDs: [String] {
@@ -919,18 +922,18 @@ struct ChatView: View {
     }
 
     private func loadFollowups() async {
-        guard let turnID = latestFollowupTurnID else {
+        guard let target = latestFollowupTarget else {
             followupSuggestions = []
             return
         }
         let targetChat = activeChatID
-        if let cached = store.cachedFollowups(chatId: targetChat, turnId: turnID) {
+        if let cached = store.cachedFollowups(chatId: targetChat, turnId: target.turnId, fingerprint: target.fingerprint) {
             followupSuggestions = cached
             return
         }
         followupSuggestions = []
-        let items = await store.fetchFollowups(chatId: targetChat, turnId: turnID)
-        guard !Task.isCancelled, targetChat == activeChatID, latestFollowupTurnID == turnID else { return }
+        let items = await store.fetchFollowups(chatId: targetChat, turnId: target.turnId, fingerprint: target.fingerprint)
+        guard !Task.isCancelled, targetChat == activeChatID, latestFollowupTarget?.turnId == target.turnId, latestFollowupTarget?.fingerprint == target.fingerprint else { return }
         followupSuggestions = items
     }
     /// Whatever happens, the chat shows within a moment (a chat with nothing to settle on included).

@@ -821,8 +821,20 @@ final class CompanionStore: ObservableObject {
         }
     }
 
-    func cachedFollowups(chatId: String, turnId: String) -> [String]? {
-        followupsCache["\(chatId)|\(turnId)"]
+    /// Compact deterministic digest so same-turn regenerations miss stale client cache entries.
+    nonisolated static func followupFingerprint(for text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var hash: UInt32 = 2_166_136_261
+        for byte in trimmed.utf8 {
+            hash ^= UInt32(byte)
+            hash = hash &* 16_777_619
+        }
+        return "\(trimmed.count):\(String(hash, radix: 16))"
+    }
+
+    func cachedFollowups(chatId: String, turnId: String, fingerprint: String? = nil) -> [String]? {
+        let key = fingerprint.map { "\(chatId)|\(turnId)|\($0)" } ?? "\(chatId)|\(turnId)"
+        return followupsCache[key]
     }
 
     func clearFollowupsCache(for chatID: String) {
@@ -830,9 +842,9 @@ final class CompanionStore: ObservableObject {
         followupsCache = followupsCache.filter { !$0.key.hasPrefix(prefix) }
     }
 
-    func fetchFollowups(chatId: String, turnId: String) async -> [String] {
+    func fetchFollowups(chatId: String, turnId: String, fingerprint: String? = nil) async -> [String] {
         guard !chatId.isEmpty, !turnId.isEmpty else { return [] }
-        let cacheKey = "\(chatId)|\(turnId)"
+        let cacheKey = fingerprint.map { "\(chatId)|\(turnId)|\($0)" } ?? "\(chatId)|\(turnId)"
         if let cached = followupsCache[cacheKey] { return cached }
         guard let api, !api.apiToken.isEmpty else { return [] }
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
@@ -946,12 +958,26 @@ final class CompanionStore: ObservableObject {
         return false
     }
 
+    /// Matches `companion/modules/models.py` (`chat_preset`) default/fixed resolution rules.
+    nonisolated static func resolveDefaultModelPreset(from value: JSONValue, presetNames: [String]) -> String {
+        let routerEnabled = value["settings"]["enabled"].boolValue
+        let fixedName = value["settings"]["fixed"].nonemptyString
+        let defaultCandidate = value["default"].nonemptyString ?? ""
+        if !routerEnabled, let fixedName, presetNames.contains(fixedName) {
+            return fixedName
+        }
+        if presetNames.contains(defaultCandidate) {
+            return defaultCandidate
+        }
+        return presetNames.first ?? defaultCandidate
+    }
+
     func refreshModelStatus() async {
         guard let api else { return }
         let attempt = generation
         guard let value = try? await api.get("/api/webui/companion/models"), attempt == generation else { return }
         let presetNames = value["presets"].array.compactMap { $0["name"].nonemptyString }
-        let defaultName = value["default"].nonemptyString ?? value["settings"]["fixed"].nonemptyString ?? ""
+        let defaultName = Self.resolveDefaultModelPreset(from: value, presetNames: presetNames)
         let configured = !presetNames.isEmpty || !defaultName.isEmpty
         if !modelsChecked { modelsChecked = true }
         if hasConfiguredChatModel != configured { hasConfiguredChatModel = configured }

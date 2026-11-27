@@ -39,7 +39,7 @@ import { ChatModelBar } from "./ChatModelBar";
 import { Composer } from "./Composer";
 import { clearDraft, loadDraft, saveDraft } from "./draftStore";
 import { androidShell } from "./android-shell";
-import { FollowUpChips } from "./FollowUpChips";
+import { FollowUpChips, followupReplyFingerprint, invalidateFollowupsCacheFor } from "./FollowUpChips";
 import { readsAfterVoice, type MessageAction } from "./MessageActions";
 import { useSpeechPlayer } from "./useSpeechPlayer";
 import { fileDraft } from "./fileKinds";
@@ -728,8 +728,12 @@ export function LiveScreen({
       } else if (action === "speak") {
         void speech.toggle(message.content, message.id);
       } else if (action === "regenerate") {
-        if (message.turnId) void regenerateReply(client, chatId, message.turnId).then(onReload).catch(() => undefined);
+        if (message.turnId) {
+          invalidateFollowupsCacheFor(chatId, message.turnId);
+          void regenerateReply(client, chatId, message.turnId).then(onReload).catch(() => undefined);
+        }
       } else if (action === "delete" && message.turnId) {
+        invalidateFollowupsCacheFor(chatId, message.turnId);
         void deleteMessage(client, chatId, message.turnId, role).then(onReload).catch(() => undefined);
       }
     },
@@ -738,19 +742,23 @@ export function LiveScreen({
   const handleEditMessage = useCallback(
     async (message: UIMessage, nextContent: string) => {
       if (!message.turnId) throw new Error("该消息暂不支持编辑重发");
+      invalidateFollowupsCacheFor(chatId);
       await editAndResubmitMessage(client, chatId, message.turnId, nextContent);
       onReload();
     },
     [chatId, client, onReload],
   );
-  const lastCompletedReplyTurnId = useMemo(() => {
+  const lastCompletedReply = useMemo(() => {
     if (typing || isStreaming || items.length === 0) return null;
     for (let i = items.length - 1; i >= 0; i -= 1) {
       const entry = items[i];
       if (entry.type === "user") return null;
       if (entry.type === "reply" && !entry.message.isStreaming && entry.message.turnId) {
         if (entry.message.source?.kind === "cron" || entry.message.source?.kind === "checkin") return null;
-        return entry.message.turnId;
+        return {
+          turnId: entry.message.turnId,
+          fingerprint: followupReplyFingerprint(entry.message.content),
+        };
       }
     }
     return null;
@@ -988,8 +996,9 @@ export function LiveScreen({
               />
               <FollowUpChips
                 chatId={chatId}
-                turnId={lastCompletedReplyTurnId}
-                enabled={ready && tab === "chat" && !typing && !isStreaming && !chatApp && Boolean(lastCompletedReplyTurnId)}
+                turnId={lastCompletedReply?.turnId ?? null}
+                fingerprint={lastCompletedReply?.fingerprint ?? null}
+                enabled={ready && tab === "chat" && !typing && !isStreaming && !chatApp && Boolean(lastCompletedReply?.turnId)}
                 onSelect={(prompt) => submit(prompt)}
               />
             </>

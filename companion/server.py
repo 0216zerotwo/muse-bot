@@ -509,7 +509,7 @@ async def _creations_save(adapter: "CompanionAdapter", payload: dict[str, Any]) 
     try:
         rel = await asyncio.to_thread(
             creations.save_artifact,
-            title=title or "画布作品",
+            title=title or ("" if creation_id else "画布作品"),
             content=content,
             fmt=fmt,
             prompt=prompt,

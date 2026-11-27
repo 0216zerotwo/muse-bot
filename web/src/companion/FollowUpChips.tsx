@@ -12,6 +12,29 @@ export function clearFollowupsCache(): void {
   FOLLOWUPS_CACHE.clear();
 }
 
+/** Drop cached follow-ups for a chat (or one regenerated turn) whose underlying reply changed. */
+export function invalidateFollowupsCacheFor(chatId: string, turnId?: string | null): void {
+  if (!chatId) return;
+  const prefix = turnId ? `${chatId}:${turnId}:` : `${chatId}:`;
+  const exact = turnId ? `${chatId}:${turnId}` : "";
+  for (const key of Array.from(FOLLOWUPS_CACHE.keys())) {
+    if (key.startsWith(prefix) || (exact && key === exact)) {
+      FOLLOWUPS_CACHE.delete(key);
+    }
+  }
+}
+
+/** Compact deterministic digest so same-turn regenerations miss stale client cache entries. */
+export function followupReplyFingerprint(text: string): string {
+  const trimmed = text.trim();
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < trimmed.length; i += 1) {
+    hash ^= trimmed.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${trimmed.length}:${hash.toString(16)}`;
+}
+
 function writeFollowupsCache(key: string, suggestions: string[]): void {
   if (FOLLOWUPS_CACHE.has(key)) FOLLOWUPS_CACHE.delete(key);
   FOLLOWUPS_CACHE.set(key, suggestions);
@@ -23,21 +46,24 @@ function writeFollowupsCache(key: string, suggestions: string[]): void {
 
 /**
  * Lazy-loaded contextual follow-up prompt chips displayed at the bottom of an idle thread.
- * Results are cached per ``(chatId, turnId)`` to avoid repeat network requests on re-renders.
+ * Results are cached per ``(chatId, turnId, fingerprint)`` to avoid repeat fetches on re-renders
+ * while still refreshing immediately if the reply for the same ``turnId`` is regenerated.
  */
 export function FollowUpChips({
   chatId,
   turnId,
+  fingerprint,
   enabled,
   onSelect,
 }: {
   chatId: string;
   turnId: string | null;
+  fingerprint?: string | null;
   enabled: boolean;
   onSelect: (prompt: string) => void;
 }) {
   const { token } = useClient();
-  const cacheKey = chatId && turnId ? `${chatId}:${turnId}` : "";
+  const cacheKey = chatId && turnId ? (fingerprint ? `${chatId}:${turnId}:${fingerprint}` : `${chatId}:${turnId}`) : "";
   const [suggestions, setSuggestions] = useState<string[]>(() =>
     cacheKey ? (FOLLOWUPS_CACHE.get(cacheKey) ?? []) : [],
   );

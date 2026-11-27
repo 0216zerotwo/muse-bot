@@ -709,6 +709,7 @@ extension CompanionStore {
             ])
             outbox.removeAll { $0.chatID == id && $0.id == turnID && message.role == "user" }
             persistOutbox()
+            clearFollowupsCache(for: id)
             await hydrate(id)
         } catch { show(error) }
     }
@@ -728,6 +729,7 @@ extension CompanionStore {
             _ = try await requestMutation("companion.chats.change", payload: [
                 "id": .string(id), "action": .string("regenerate"), "turn_id": .string(turnID),
             ])
+            clearFollowupsCache(for: id)
             await hydrate(id)
         } catch { show(error) }
     }

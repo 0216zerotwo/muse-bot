@@ -306,4 +306,69 @@ final class Wave3FeatureTests: XCTestCase {
         tracker.ingest(messages: [older] + base + [streaming, nextReply], followingBottom: true, positioned: true, paging: false)
         XCTAssertEqual(tracker.unreadCount, 0)
     }
+
+    func testCrossSeamFixesMermaidKnowledgeImportModelDefaultsAndFollowupFingerprints() throws {
+        // 1) Mermaid diagrams can be imported into Knowledge Vault matching backend .mmd/.mermaid support.
+        XCTAssertTrue(FileKinds.canImportToKnowledge(name: "diagram.mmd"))
+        XCTAssertTrue(FileKinds.canImportToKnowledge(name: "architecture.mermaid"))
+
+        // 2) resolveDefaultModelPreset matches backend models.chat_preset (respecting router.enabled + fixed).
+        let routerOnJSON = try JSONValue.parse(Data("""
+        {
+          "default": "Deep200K",
+          "settings": { "enabled": true, "fixed": "Fast32K" }
+        }
+        """.utf8))
+        XCTAssertEqual(
+            CompanionStore.resolveDefaultModelPreset(from: routerOnJSON, presetNames: ["Fast32K", "Deep200K"]),
+            "Deep200K"
+        )
+        let routerOffJSON = try JSONValue.parse(Data("""
+        {
+          "default": "Deep200K",
+          "settings": { "enabled": false, "fixed": "Fast32K" }
+        }
+        """.utf8))
+        XCTAssertEqual(
+            CompanionStore.resolveDefaultModelPreset(from: routerOffJSON, presetNames: ["Fast32K", "Deep200K"]),
+            "Fast32K"
+        )
+
+        // 3) ChatSessionControlsSheet.resolvedControlsSelection avoids leaking preset default effort on reset.
+        let summaryPresetOnly = ChatSummary(
+            key: "websocket:c1",
+            title: "测试",
+            modelPreset: "Deep200K",
+            reasoningEffort: nil
+        )
+        let contextWithPresetDefault = ChatContextStatus(
+            chatId: "c1",
+            estimatedTokens: 1_000,
+            contextWindow: 200_000,
+            usageRatio: 0.005,
+            tier1Threshold: 120_000,
+            tier2Threshold: 160_000,
+            hasSummaryCheckpoint: false,
+            model: "deep-200k",
+            modelPreset: "Deep200K",
+            reasoningEffort: "high"
+        )
+        let resolvedNoLeak = ChatSessionControlsSheet.resolvedControlsSelection(
+            summary: summaryPresetOnly,
+            status: contextWithPresetDefault
+        )
+        XCTAssertEqual(resolvedNoLeak.preset, "Deep200K")
+        XCTAssertEqual(resolvedNoLeak.effort, "default")
+
+        let clearedSummary = ChatSummary(key: "websocket:c1", title: "测试", modelPreset: nil, reasoningEffort: nil)
+        let resolvedCleared = ChatSessionControlsSheet.resolvedControlsSelection(summary: clearedSummary, status: nil)
+        XCTAssertEqual(resolvedCleared.preset, "")
+        XCTAssertEqual(resolvedCleared.effort, "default")
+
+        // 4) Follow-up reply fingerprints change when same turn_id content regenerates.
+        let fp1 = CompanionStore.followupFingerprint(for: "第一版答案")
+        let fp2 = CompanionStore.followupFingerprint(for: "第二版重新生成的答案")
+        XCTAssertNotEqual(fp1, fp2)
+        XCTAssertEqual(fp1, CompanionStore.followupFingerprint(for: "  第一版答案  "))
+    }
 }

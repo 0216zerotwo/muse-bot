@@ -42,7 +42,7 @@ _HTML_EXTS = frozenset({".html", ".htm", ".xhtml"})
 _MD_EXTS = frozenset({".md", ".markdown", ".mdx"})
 _TEXT_EXTS = frozenset({
     ".txt", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml",
-    ".xml", ".svg", ".rst", ".log", ".ini", ".toml", ".conf", ".cfg",
+    ".xml", ".svg", ".mmd", ".mermaid", ".rst", ".log", ".ini", ".toml", ".conf", ".cfg",
     ".example", ".sample", ".template",
 })
 _CODE_EXTS = frozenset({
@@ -76,6 +76,8 @@ _MIME_BY_EXT: dict[str, str] = {
     ".xhtml": "application/xhtml+xml",
     ".xml": "application/xml",
     ".svg": "image/svg+xml",
+    ".mmd": "text/plain",
+    ".mermaid": "text/plain",
     ".py": "text/x-python",
     ".ts": "text/typescript",
     ".tsx": "text/tsx",
@@ -391,7 +393,7 @@ def _extract_text(filename: str, data: bytes) -> tuple[str, str, str]:
 
     if ext in _MD_EXTS:
         return decoded.strip(), "markdown", ""
-    if ext in _CODE_EXTS or ext in {".json", ".jsonl", ".yaml", ".yml", ".xml", ".svg", ".ini", ".toml", ".conf", ".cfg"}:
+    if ext in _CODE_EXTS or ext in {".json", ".jsonl", ".yaml", ".yml", ".xml", ".svg", ".mmd", ".mermaid", ".ini", ".toml", ".conf", ".cfg"}:
         return decoded.strip(), "code", ""
     return decoded.strip(), "text", ""
 

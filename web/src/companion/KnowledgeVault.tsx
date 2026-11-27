@@ -36,7 +36,7 @@ import { CompanionPet } from "./Pet";
 import { dayLabel } from "./presentation";
 
 const ACCEPTED_FILE_TYPES =
-  ".pdf,.docx,.xlsx,.pptx,.odt,.md,.markdown,.mdx,.txt,.csv,.tsv,.json,.jsonl,.yaml,.yml,.html,.htm,.xhtml,.xml,.svg,.rst,.log,.ini,.toml,.conf,.cfg,.py,.ts,.tsx,.js,.jsx,.mjs,.cjs,.swift,.java,.kt,.go,.rs,.sh,.bash,.zsh,.css,.scss,.sql,.c,.h,.cpp,.hpp,.rb,.php";
+  ".pdf,.docx,.xlsx,.pptx,.odt,.md,.markdown,.mdx,.txt,.csv,.tsv,.json,.jsonl,.yaml,.yml,.html,.htm,.xhtml,.xml,.svg,.mmd,.mermaid,.rst,.log,.ini,.toml,.conf,.cfg,.py,.ts,.tsx,.js,.jsx,.mjs,.cjs,.swift,.java,.kt,.go,.rs,.sh,.bash,.zsh,.css,.scss,.sql,.c,.h,.cpp,.hpp,.rb,.php";
 
 const SEARCH_DEBOUNCE_MS = 220;
 
