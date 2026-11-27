@@ -54,85 +54,105 @@ struct CompanionRootView: View {
         return feedPosts.filter { ($0["ts"].doubleValue ?? 0) > seen }.count
     }
     var body: some View {
-        Group {
+        let base = Group {
             if store.needsServer || store.needsPairing { ConnectionView() }
             else { appShell.inAppLinks() }  // links in 动态, replies and cards open inside the app
         }
         .tint(CompanionPalette.primary)
         .preferredColorScheme(colorScheme)
-        .sheet(isPresented: $settings) {
-            SettingsView().presentationDetents([.large]).presentationDragIndicator(.visible).tint(CompanionPalette.primary)
-                .environment(\.openAppearance, {
-                    settings = false
-                    Task { try? await Task.sleep(for: .milliseconds(450)); appearance = true }
-                })
-        }
-        // 外观 sits low over the main screen, so the chat above it previews each choice.
-        .sheet(isPresented: $appearance) {
-            AppearanceSettingsPage()
-                .presentationDetents([.height(300)]).presentationDragIndicator(.visible)
-                .presentationBackgroundInteraction(.enabled).presentationBackground(.regularMaterial)
-                .tint(CompanionPalette.primary)
-        }
-        .sheet(isPresented: $identity) {
-            IdentityView().presentationDetents([.large]).presentationDragIndicator(.hidden).tint(CompanionPalette.primary)
-        }
-        .sheet(isPresented: $sessionControls) {
-            ChatSessionControlsSheet(chatID: store.currentChatID)
-                .environmentObject(store)
-        }
-        .sheet(item: $exportedChatFile, onDismiss: { exportedChatFile = nil; cleanupExportedChat() }) { file in
-            ShareSheet(items: [file.url])
-        }
-        .alert("旁聊设置", isPresented: $editSide) {
-            TextField("旁聊名称", text: $sideName)
-            Button("保存") { Task { await store.renameChat(id: store.currentChatID, title: sideName) } }
-            Button("删除旁聊", role: .destructive) { Task { await store.deleteChat(id: store.currentChatID) } }
-            Button("取消", role: .cancel) { }
-        }
-        .alert("要切换到新的服务器吗？", isPresented: Binding(
-            get: { store.pendingDeepLink != nil },
-            set: { if !$0 { store.cancelPendingDeepLink() } }
-        )) {
-            Button("取消", role: .cancel) { store.cancelPendingDeepLink() }
-            Button("切换并连接", role: .destructive) {
-                settings = false; identity = false; appearance = false; menu = false; sessionControls = false
-                Task { await store.confirmPendingDeepLink() }
+        let withSheets = applyRootSheets(base)
+        let withAlerts = applyRootAlerts(withSheets)
+        let withNavObservers = applyRootNavigationObservers(withAlerts)
+        return applyRootDeviceObservers(withNavObservers)
+    }
+
+    private func applyRootSheets<Content: View>(_ content: Content) -> some View {
+        content
+            .sheet(isPresented: $settings) {
+                SettingsView().presentationDetents([.large]).presentationDragIndicator(.visible).tint(CompanionPalette.primary)
+                    .environment(\.openAppearance, {
+                        settings = false
+                        Task { try? await Task.sleep(for: .milliseconds(450)); appearance = true }
+                    })
             }
-        } message: {
-            Text("当前已配置服务器 \(store.serverAddress)。切换后将连接到 \(store.pendingDeepLink?.server ?? "")。")
-        }
-        .task(id: store.connected) {
-            guard store.connected else { return }
-            while !Task.isCancelled {
-                await loadBadge()
-                do { try await Task.sleep(for: .seconds(60)) } catch { break }
+            // 外观 sits low over the main screen, so the chat above it previews each choice.
+            .sheet(isPresented: $appearance) {
+                AppearanceSettingsPage()
+                    .presentationDetents([.height(300)]).presentationDragIndicator(.visible)
+                    .presentationBackgroundInteraction(.enabled).presentationBackground(.regularMaterial)
+                    .tint(CompanionPalette.primary)
             }
-        }
-        .onChange(of: selectedTab) { old, new in if old == .feed || new == .feed { Task { await loadBadge() } } }
-        .onChange(of: store.feedRevision) { _, _ in Task { await loadBadge() } }
-        // 问伙伴 from Siri or Shortcuts: sent in the chat once there is one to send it in.
-        .onChange(of: inbox.pending) { _, _ in deliverAsked() }
-        .onChange(of: store.currentChatID) { _, _ in deliverAsked() }
-        // A reply may have set a reminder (or changed one): the phone's notifications follow.
-        .onChange(of: store.running) { was, now in if was && !now { Task { await store.planReminders() } } }
-        .onChange(of: store.needsPairing) { _, needed in
-            if needed { settings = false; identity = false; appearance = false; menu = false; sessionControls = false }
-        }
-        .onChange(of: store.needsServer) { _, needed in
-            if needed { settings = false; identity = false; appearance = false; menu = false; sessionControls = false }
-        }
-        .onAppear { deliverAsked() }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            if !menu { keyboardUp = true }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardUp = false }
-        .onChange(of: store.suggestedDraft) { _, value in
-            if value != nil { selectedTab = .chat; settings = false; identity = false }
-        }
-        .onChange(of: store.suggestedQuote) { _, value in
-            if value != nil { selectedTab = .chat; settings = false; identity = false }
-        }
+            .sheet(isPresented: $identity) {
+                IdentityView().presentationDetents([.large]).presentationDragIndicator(.hidden).tint(CompanionPalette.primary)
+            }
+            .sheet(isPresented: $sessionControls) {
+                ChatSessionControlsSheet(chatID: store.currentChatID)
+                    .environmentObject(store)
+            }
+            .sheet(item: $exportedChatFile, onDismiss: { exportedChatFile = nil; cleanupExportedChat() }) { file in
+                ShareSheet(items: [file.url])
+            }
+    }
+
+    private func applyRootAlerts<Content: View>(_ content: Content) -> some View {
+        content
+            .alert("旁聊设置", isPresented: $editSide) {
+                TextField("旁聊名称", text: $sideName)
+                Button("保存") { Task { await store.renameChat(id: store.currentChatID, title: sideName) } }
+                Button("删除旁聊", role: .destructive) { Task { await store.deleteChat(id: store.currentChatID) } }
+                Button("取消", role: .cancel) { }
+            }
+            .alert("要切换到新的服务器吗？", isPresented: Binding(
+                get: { store.pendingDeepLink != nil },
+                set: { if !$0 { store.cancelPendingDeepLink() } }
+            )) {
+                Button("取消", role: .cancel) { store.cancelPendingDeepLink() }
+                Button("切换并连接", role: .destructive) {
+                    settings = false; identity = false; appearance = false; menu = false; sessionControls = false
+                    Task { await store.confirmPendingDeepLink() }
+                }
+            } message: {
+                Text("当前已配置服务器 \(store.serverAddress)。切换后将连接到 \(store.pendingDeepLink?.server ?? "")。")
+            }
+            .task(id: store.connected) {
+                guard store.connected else { return }
+                while !Task.isCancelled {
+                    await loadBadge()
+                    do { try await Task.sleep(for: .seconds(60)) } catch { break }
+                }
+            }
+    }
+
+    private func applyRootNavigationObservers<Content: View>(_ content: Content) -> some View {
+        content
+            .onChange(of: selectedTab) { old, new in if old == .feed || new == .feed { Task { await loadBadge() } } }
+            .onChange(of: store.feedRevision) { _, _ in Task { await loadBadge() } }
+            // 问伙伴 from Siri or Shortcuts: sent in the chat once there is one to send it in.
+            .onChange(of: inbox.pending) { _, _ in deliverAsked() }
+            .onChange(of: store.currentChatID) { _, _ in deliverAsked() }
+            // A reply may have set a reminder (or changed one): the phone's notifications follow.
+            .onChange(of: store.running) { was, now in if was && !now { Task { await store.planReminders() } } }
+            .onAppear { deliverAsked() }
+    }
+
+    private func applyRootDeviceObservers<Content: View>(_ content: Content) -> some View {
+        content
+            .onChange(of: store.needsPairing) { _, needed in
+                if needed { settings = false; identity = false; appearance = false; menu = false; sessionControls = false }
+            }
+            .onChange(of: store.needsServer) { _, needed in
+                if needed { settings = false; identity = false; appearance = false; menu = false; sessionControls = false }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                if !menu { keyboardUp = true }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardUp = false }
+            .onChange(of: store.suggestedDraft) { _, value in
+                if value != nil { selectedTab = .chat; settings = false; identity = false }
+            }
+            .onChange(of: store.suggestedQuote) { _, value in
+                if value != nil { selectedTab = .chat; settings = false; identity = false }
+            }
     }
 
     private func deliverAsked() {

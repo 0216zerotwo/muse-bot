@@ -341,6 +341,13 @@ struct ChatView: View {
     }
 
     private func applyScrollObservers<Content: View>(_ content: Content, proxy: ScrollViewProxy) -> some View {
+        let step1 = applyScrollFollowObservers(content, proxy: proxy)
+        let step2 = applyChatSwitchAndFocusObservers(step1, proxy: proxy)
+        let step3 = applyDraftAndQuoteObservers(step2)
+        return applyUnreadAndRevealObservers(step3, proxy: proxy)
+    }
+
+    private func applyScrollFollowObservers<Content: View>(_ content: Content, proxy: ScrollViewProxy) -> some View {
         content
             .onChange(of: chatMessages.last?.id) { _, _ in followIfNeeded(proxy) }
             // A reply growing stays pinned to the bottom, without an animation for every chunk.
@@ -351,6 +358,10 @@ struct ChatView: View {
                 if !loading && !positioned { followIfNeeded(proxy) }
                 if !loading { revealSearchHit(proxy) }
             }
+    }
+
+    private func applyChatSwitchAndFocusObservers<Content: View>(_ content: Content, proxy: ScrollViewProxy) -> some View {
+        content
             .onChange(of: activeChatID) { _, _ in
                 voice.cancel()
                 highlightTask?.cancel()
@@ -364,6 +375,18 @@ struct ChatView: View {
                 followIfNeeded(proxy); revealSoon()
             }
             .onChange(of: focused) { _, value in if value && followingBottom { scrollBottom(proxy) } }
+            .onAppear {
+                restoreDraft()
+                acceptDraft()
+                unreadTracker.reset(for: chatMessages)
+                loadAutocompleteContextIfNeeded(from: "", to: text)
+                followIfNeeded(proxy)
+                revealSoon()
+            }
+    }
+
+    private func applyDraftAndQuoteObservers<Content: View>(_ content: Content) -> some View {
+        content
             .onChange(of: text) { oldValue, newValue in
                 if !draftKey.isEmpty { ChatDraftPersistence.saveText(newValue, server: store.serverAddress, chatID: activeChatID) }
                 if composerError != nil && !newValue.isEmpty { composerError = nil }
@@ -373,6 +396,12 @@ struct ChatView: View {
             .onChange(of: quote) { _, newQuote in
                 if !draftKey.isEmpty { ChatDraftPersistence.saveQuote(newQuote, server: store.serverAddress, chatID: activeChatID) }
             }
+            .onChange(of: store.suggestedDraft) { _, _ in acceptDraft() }
+            .onChange(of: store.suggestedQuote) { _, _ in acceptDraft() }
+    }
+
+    private func applyUnreadAndRevealObservers<Content: View>(_ content: Content, proxy: ScrollViewProxy) -> some View {
+        content
             .onChange(of: completedReplyIDs) { _, _ in
                 unreadTracker.ingest(
                     messages: chatMessages,
@@ -387,16 +416,6 @@ struct ChatView: View {
             .onChange(of: positioned) { _, isPositioned in
                 if isPositioned { unreadTracker.reset(for: chatMessages) }
             }
-            .onAppear {
-                restoreDraft()
-                acceptDraft()
-                unreadTracker.reset(for: chatMessages)
-                loadAutocompleteContextIfNeeded(from: "", to: text)
-                followIfNeeded(proxy)
-                revealSoon()
-            }
-            .onChange(of: store.suggestedDraft) { _, _ in acceptDraft() }
-            .onChange(of: store.suggestedQuote) { _, _ in acceptDraft() }
             .onChange(of: revealed) { _, _ in revealSearchHit(proxy) }
             .onChange(of: store.revealTurn) { _, _ in revealSearchHit(proxy) }
             .task(id: followupTriggerKey) { await loadFollowups() }
