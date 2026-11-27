@@ -337,3 +337,317 @@ struct GoalState: Codable, Equatable, Sendable {
         )
     }
 }
+
+/// Session summary decoded from `GET /api/sessions` (all Wave 3 metadata fields are Optional for fixture compatibility).
+struct ChatSummary: Identifiable, Codable, Equatable, Sendable {
+    var key: String
+    var title: String?
+    var preview: String?
+    var createdAt: String?
+    var updatedAt: String?
+    var helper: String?
+    var group: Bool?
+    var pinned: Bool?
+    var archived: Bool?
+    var empty: Bool?
+    var modelPreset: String?
+    var reasoningEffort: String?
+
+    enum CodingKeys: String, CodingKey {
+        case key, title, preview, helper, group, pinned, archived, empty
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case modelPreset = "model_preset"
+        case reasoningEffort = "reasoning_effort"
+    }
+
+    var id: String {
+        key.hasPrefix("websocket:") ? String(key.dropFirst("websocket:".count)) : key
+    }
+
+    var isPinned: Bool { pinned ?? false }
+    var isArchived: Bool { archived ?? false }
+    var isEmptyChat: Bool {
+        if let empty { return empty }
+        return (preview ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var displayTitle: String {
+        let trimmed = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "新的旁聊" : trimmed
+    }
+
+    init(
+        key: String,
+        title: String? = nil,
+        preview: String? = nil,
+        createdAt: String? = nil,
+        updatedAt: String? = nil,
+        helper: String? = nil,
+        group: Bool? = nil,
+        pinned: Bool? = nil,
+        archived: Bool? = nil,
+        empty: Bool? = nil,
+        modelPreset: String? = nil,
+        reasoningEffort: String? = nil
+    ) {
+        self.key = key
+        self.title = title
+        self.preview = preview
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.helper = helper
+        self.group = group
+        self.pinned = pinned
+        self.archived = archived
+        self.empty = empty
+        self.modelPreset = modelPreset
+        self.reasoningEffort = reasoningEffort
+    }
+
+    init(json: JSONValue) {
+        let pinnedFlag: Bool? = json["pinned"] == .null ? nil : json["pinned"].boolValue
+        let archivedFlag: Bool? = json["archived"] == .null ? nil : json["archived"].boolValue
+        let emptyFlag: Bool? = json["empty"] == .null ? nil : json["empty"].boolValue
+        let groupFlag: Bool? = json["group"] == .null ? nil : json["group"].boolValue
+        self.init(
+            key: json["key"].stringValue,
+            title: json["title"].string,
+            preview: json["preview"].string,
+            createdAt: json["created_at"].nonemptyString,
+            updatedAt: json["updated_at"].nonemptyString,
+            helper: json["helper"].nonemptyString,
+            group: groupFlag,
+            pinned: pinnedFlag,
+            archived: archivedFlag,
+            empty: emptyFlag,
+            modelPreset: json["model_preset"].nonemptyString,
+            reasoningEffort: json["reasoning_effort"].nonemptyString
+        )
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        key = try container.decodeIfPresent(String.self, forKey: .key) ?? ""
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        preview = try container.decodeIfPresent(String.self, forKey: .preview)
+        createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
+        updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt)
+        helper = try container.decodeIfPresent(String.self, forKey: .helper)
+        group = try container.decodeIfPresent(Bool.self, forKey: .group)
+        pinned = try container.decodeIfPresent(Bool.self, forKey: .pinned)
+        archived = try container.decodeIfPresent(Bool.self, forKey: .archived)
+        empty = try container.decodeIfPresent(Bool.self, forKey: .empty)
+        modelPreset = try container.decodeIfPresent(String.self, forKey: .modelPreset)
+        reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
+    }
+}
+
+/// Active context window occupancy returned by `GET /api/sessions/{key}/context`.
+struct ChatContextStatus: Codable, Equatable, Sendable {
+    var chatId: String?
+    var estimatedTokens: Int
+    var contextWindow: Int
+    var usageRatio: Double
+    var tier1Threshold: Int?
+    var tier2Threshold: Int?
+    var hasSummaryCheckpoint: Bool?
+    var model: String?
+    var modelPreset: String?
+    var reasoningEffort: String?
+
+    enum CodingKeys: String, CodingKey {
+        case chatId = "chat_id"
+        case estimatedTokens = "estimated_tokens"
+        case contextWindow = "context_window"
+        case usageRatio = "usage_ratio"
+        case tier1Threshold = "tier1_threshold"
+        case tier2Threshold = "tier2_threshold"
+        case hasSummaryCheckpoint = "has_summary_checkpoint"
+        case model
+        case modelPreset = "model_preset"
+        case reasoningEffort = "reasoning_effort"
+    }
+
+    var clampedRatio: Double {
+        let raw: Double
+        if usageRatio.isFinite && usageRatio > 0 {
+            raw = usageRatio
+        } else if contextWindow > 0 && estimatedTokens > 0 {
+            raw = Double(estimatedTokens) / Double(contextWindow)
+        } else {
+            raw = 0
+        }
+        return min(1, max(0, raw))
+    }
+
+    var percent: Int {
+        Int((clampedRatio * 100).rounded())
+    }
+
+    var isHighWater: Bool {
+        if let tier2 = tier2Threshold, tier2 > 0, estimatedTokens >= tier2 { return true }
+        return clampedRatio >= 0.7
+    }
+
+    var isElevated: Bool {
+        if let tier1 = tier1Threshold, tier1 > 0, estimatedTokens >= tier1 { return true }
+        return clampedRatio >= 0.5
+    }
+
+    init(
+        chatId: String? = nil,
+        estimatedTokens: Int = 0,
+        contextWindow: Int = 0,
+        usageRatio: Double = 0,
+        tier1Threshold: Int? = nil,
+        tier2Threshold: Int? = nil,
+        hasSummaryCheckpoint: Bool? = nil,
+        model: String? = nil,
+        modelPreset: String? = nil,
+        reasoningEffort: String? = nil
+    ) {
+        self.chatId = chatId
+        self.estimatedTokens = estimatedTokens
+        self.contextWindow = contextWindow
+        self.usageRatio = usageRatio
+        self.tier1Threshold = tier1Threshold
+        self.tier2Threshold = tier2Threshold
+        self.hasSummaryCheckpoint = hasSummaryCheckpoint
+        self.model = model
+        self.modelPreset = modelPreset
+        self.reasoningEffort = reasoningEffort
+    }
+
+    init(json: JSONValue) {
+        let estimated = json["estimated_tokens"].intValue ?? 0
+        let window = json["context_window"].intValue ?? 0
+        let ratio = json["usage_ratio"].doubleValue ?? (window > 0 ? Double(estimated) / Double(window) : 0)
+        let checkpoint: Bool? = json["has_summary_checkpoint"] == .null ? nil : json["has_summary_checkpoint"].boolValue
+        self.init(
+            chatId: json["chat_id"].nonemptyString,
+            estimatedTokens: max(0, estimated),
+            contextWindow: max(0, window),
+            usageRatio: ratio.isFinite ? max(0, ratio) : 0,
+            tier1Threshold: json["tier1_threshold"].intValue,
+            tier2Threshold: json["tier2_threshold"].intValue,
+            hasSummaryCheckpoint: checkpoint,
+            model: json["model"].nonemptyString,
+            modelPreset: json["model_preset"].nonemptyString,
+            reasoningEffort: json["reasoning_effort"].nonemptyString
+        )
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        chatId = try container.decodeIfPresent(String.self, forKey: .chatId)
+        estimatedTokens = max(0, try container.decodeIfPresent(Int.self, forKey: .estimatedTokens) ?? 0)
+        contextWindow = max(0, try container.decodeIfPresent(Int.self, forKey: .contextWindow) ?? 0)
+        let decodedRatio = try container.decodeIfPresent(Double.self, forKey: .usageRatio)
+        if let decodedRatio, decodedRatio.isFinite {
+            usageRatio = max(0, decodedRatio)
+        } else if contextWindow > 0 {
+            usageRatio = Double(estimatedTokens) / Double(contextWindow)
+        } else {
+            usageRatio = 0
+        }
+        tier1Threshold = try container.decodeIfPresent(Int.self, forKey: .tier1Threshold)
+        tier2Threshold = try container.decodeIfPresent(Int.self, forKey: .tier2Threshold)
+        hasSummaryCheckpoint = try container.decodeIfPresent(Bool.self, forKey: .hasSummaryCheckpoint)
+        model = try container.decodeIfPresent(String.self, forKey: .model)
+        modelPreset = try container.decodeIfPresent(String.self, forKey: .modelPreset)
+        reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
+    }
+}
+
+/// Persists per-chat composer text and quoted snippet together so switching chats never loses drafts.
+enum ChatDraftPersistence {
+    struct Draft: Equatable, Sendable {
+        var text: String
+        var quote: String?
+    }
+
+    static func textKey(server: String, chatID: String) -> String {
+        "draft.\(server).\(chatID)"
+    }
+
+    static func quoteKey(server: String, chatID: String) -> String {
+        "draft.quote.\(server).\(chatID)"
+    }
+
+    static func load(server: String, chatID: String, defaults: UserDefaults = .standard) -> Draft {
+        guard !chatID.isEmpty else { return Draft(text: "", quote: nil) }
+        let text = defaults.string(forKey: textKey(server: server, chatID: chatID)) ?? ""
+        let rawQuote = defaults.string(forKey: quoteKey(server: server, chatID: chatID))
+        let quote = rawQuote?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? rawQuote : nil
+        return Draft(text: text, quote: quote)
+    }
+
+    static func saveText(_ text: String, server: String, chatID: String, defaults: UserDefaults = .standard) {
+        guard !chatID.isEmpty else { return }
+        let key = textKey(server: server, chatID: chatID)
+        if text.isEmpty {
+            defaults.removeObject(forKey: key)
+        } else {
+            defaults.set(text, forKey: key)
+        }
+    }
+
+    static func saveQuote(_ quote: String?, server: String, chatID: String, defaults: UserDefaults = .standard) {
+        guard !chatID.isEmpty else { return }
+        let key = quoteKey(server: server, chatID: chatID)
+        if let quote, !quote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            defaults.set(quote, forKey: key)
+        } else {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    static func clear(server: String, chatID: String, defaults: UserDefaults = .standard) {
+        guard !chatID.isEmpty else { return }
+        defaults.removeObject(forKey: textKey(server: server, chatID: chatID))
+        defaults.removeObject(forKey: quoteKey(server: server, chatID: chatID))
+    }
+}
+
+/// Tracks newly completed assistant replies arriving while the user is scrolled up reading history.
+struct ChatUnreadTracker: Equatable, Sendable {
+    private(set) var unreadCount = 0
+    private var seenCompletedIDs: Set<String> = []
+    private var highWaterTimestamp: Double = 0
+
+    mutating func reset(for messages: [ChatMessage]) {
+        unreadCount = 0
+        seenCompletedIDs = Set(completedReplies(in: messages).map(\.id))
+        highWaterTimestamp = messages.map(\.createdAt).max() ?? 0
+    }
+
+    mutating func ingest(messages: [ChatMessage], followingBottom: Bool, positioned: Bool, paging: Bool) {
+        let completed = completedReplies(in: messages)
+        if !positioned || followingBottom {
+            unreadCount = 0
+            seenCompletedIDs = Set(completed.map(\.id))
+            highWaterTimestamp = max(highWaterTimestamp, messages.map(\.createdAt).max() ?? 0)
+            return
+        }
+        guard !paging else {
+            seenCompletedIDs.formUnion(completed.map(\.id))
+            return
+        }
+        var added = 0
+        for msg in completed where !seenCompletedIDs.contains(msg.id) {
+            seenCompletedIDs.insert(msg.id)
+            if msg.createdAt >= highWaterTimestamp {
+                added += 1
+                highWaterTimestamp = max(highWaterTimestamp, msg.createdAt)
+            }
+        }
+        unreadCount += added
+    }
+
+    private func completedReplies(in messages: [ChatMessage]) -> [ChatMessage] {
+        messages.filter { msg in
+            msg.role != "user" && !msg.isStreaming && Presentation.isVisibleReply(msg)
+        }
+    }
+}

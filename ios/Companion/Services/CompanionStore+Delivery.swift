@@ -209,10 +209,28 @@ struct DraftUpload: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
-struct SideChat: Identifiable, Equatable, Sendable {
+struct SideChat: Identifiable, Codable, Equatable, Sendable {
     let id: String
     let title: String
     let preview: String
+    var pinned: Bool? = nil
+    var archived: Bool? = nil
+    var empty: Bool? = nil
+    var modelPreset: String? = nil
+    var reasoningEffort: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, preview, pinned, archived, empty
+        case modelPreset = "model_preset"
+        case reasoningEffort = "reasoning_effort"
+    }
+
+    var isPinned: Bool { pinned ?? false }
+    var isArchived: Bool { archived ?? false }
+    var isEmptyChat: Bool {
+        if let empty { return empty }
+        return preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 }
 
 struct QueuedTurn: Codable, Sendable {
@@ -472,6 +490,138 @@ extension CompanionStore {
             if currentChatID == id { await changeChat(mainChatID) }
             await refreshSessions()
         } catch { show(error) }
+    }
+
+    /// Sets or resets per-session model preset & reasoning effort (`action: "set_model"`).
+    @discardableResult
+    func setChatModel(chatId: String, preset: String?, effort: String?) async -> Bool {
+        guard !chatId.isEmpty, connected else { show(ServiceError.message("连接后再试一次")); return false }
+        let normalizedPreset = preset?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedEffort = effort?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let presetValue: JSONValue = (normalizedPreset?.isEmpty == false) ? .string(normalizedPreset!) : .null
+        let effortValue: JSONValue = (normalizedEffort?.isEmpty == false && normalizedEffort != "default") ? .string(normalizedEffort!) : .null
+        do {
+            let result = try await requestMutation("companion.chats.change", payload: [
+                "id": .string(chatId),
+                "action": .string("set_model"),
+                "model_preset": presetValue,
+                "reasoning_effort": effortValue,
+            ])
+            if case .array = result["sessions"] {
+                applySessionsPayload(result)
+            } else {
+                await refreshSessions()
+            }
+            return true
+        } catch {
+            show(error)
+            return false
+        }
+    }
+
+    /// Pins or unpins a side chat (`action: "pin"`).
+    @discardableResult
+    func togglePinChat(chatId: String, pinned: Bool) async -> Bool {
+        guard !chatId.isEmpty, connected else { show(ServiceError.message("连接后再试一次")); return false }
+        do {
+            let result = try await requestMutation("companion.chats.change", payload: [
+                "id": .string(chatId),
+                "action": .string("pin"),
+                "pinned": .bool(pinned),
+            ])
+            if case .array = result["sessions"] {
+                applySessionsPayload(result)
+            } else {
+                await refreshSessions()
+            }
+            return true
+        } catch {
+            show(error)
+            return false
+        }
+    }
+
+    /// Archives or unarchives a side chat (`action: "archive"`).
+    @discardableResult
+    func toggleArchiveChat(chatId: String, archived: Bool) async -> Bool {
+        guard !chatId.isEmpty, chatId != mainChatID else { return false }
+        guard connected else { show(ServiceError.message("连接后再试一次")); return false }
+        do {
+            let result = try await requestMutation("companion.chats.change", payload: [
+                "id": .string(chatId),
+                "action": .string("archive"),
+                "archived": .bool(archived),
+            ])
+            if case .array = result["sessions"] {
+                applySessionsPayload(result)
+            } else {
+                await refreshSessions()
+            }
+            return true
+        } catch {
+            show(error)
+            return false
+        }
+    }
+
+    /// Prunes empty unpinned side chats (`action: "prune_empty"`) and returns the removed count.
+    @discardableResult
+    func pruneEmptyChats() async -> Int {
+        guard connected else { show(ServiceError.message("连接后再试一次")); return 0 }
+        do {
+            let result = try await requestMutation("companion.chats.change", payload: [
+                "action": .string("prune_empty"),
+            ])
+            let removed = result["removed_count"].intValue ?? 0
+            if case .array = result["sessions"] {
+                applySessionsPayload(result)
+            } else {
+                await refreshSessions()
+            }
+            if !currentChatID.isEmpty && currentChatID != mainChatID && sessionSummaries[currentChatID] == nil {
+                purgeLocalChat(currentChatID)
+                if !mainChatID.isEmpty { await changeChat(mainChatID) }
+            }
+            return removed
+        } catch {
+            show(error)
+            return 0
+        }
+    }
+
+    /// Fetches active context window usage (`GET /api/sessions/websocket:<id>/context`).
+    func fetchChatContext(chatId: String) async throws -> ChatContextStatus {
+        guard let api, !api.apiToken.isEmpty else { throw ServiceError.message("连接后再试一次") }
+        guard !chatId.isEmpty else { throw ServiceError.message("找不到这个对话") }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let encodedKey = ("websocket:" + chatId).addingPercentEncoding(withAllowedCharacters: allowed) ?? chatId
+        let raw = try await api.get("/api/sessions/\(encodedKey)/context")
+        return ChatContextStatus(json: raw)
+    }
+
+    /// Saves or updates an artifact in Creations (`companion.creations.save`).
+    func saveCreationArtifact(
+        id: String? = nil,
+        title: String,
+        content: String,
+        format: String,
+        prompt: String? = nil
+    ) async throws -> (savedID: String?, updated: Bool) {
+        var payload: [String: JSONValue] = [
+            "title": .string(title),
+            "content": .string(content),
+            "format": .string(format),
+        ]
+        if let id, !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            payload["id"] = .string(id)
+        }
+        if let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            payload["prompt"] = .string(prompt)
+        }
+        let result = try await changeResource("companion.creations.save", payload: payload)
+        let savedID = result["saved_id"].nonemptyString ?? id
+        let updated = result["updated"].boolValue || (id != nil)
+        return (savedID, updated)
     }
 
     @discardableResult

@@ -27,6 +27,7 @@ struct LibraryScreen: View {
     @State private var kbUploading = false
     @State private var kbToast: String?
     @State private var selectedHit: KnowledgeSearchHit?
+    @State private var readingDoc: KnowledgeDocument?
     @State private var deletingDoc: KnowledgeDocument?
 
     private let filters = [("all", "全部"), ("image", "图片"), ("video", "视频"), ("document", "文档"), ("audio", "音频")]
@@ -120,10 +121,17 @@ struct LibraryScreen: View {
         content
             .fullScreenCover(item: $viewing) { MediaViewer(destination: $0) }
             .sheet(item: $selectedHit) { hit in
-                KnowledgeHitDetailSheet(hit: hit, query: trimmedKBQuery) { prompt in
-                    store.composeDraft(prompt)
+                KnowledgeHitDetailSheet(hit: hit, query: trimmedKBQuery) { prompt, quote in
+                    store.composeDraft(prompt, quote: quote)
                     selectedHit = nil
                 }
+            }
+            .sheet(item: $readingDoc) { doc in
+                KnowledgeDocumentReaderSheet(document: doc) { prompt, quote in
+                    store.composeDraft(prompt, quote: quote)
+                    readingDoc = nil
+                }
+                .environmentObject(store)
             }
             .fileImporter(
                 isPresented: $kbImporting,
@@ -348,39 +356,64 @@ struct LibraryScreen: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 20)
                 ForEach(hits) { hit in
-                    Button { selectedHit = hit; Haptics.selection() } label: {
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "books.vertical.fill")
-                                    .font(.caption)
-                                    .foregroundStyle(CompanionPalette.primary)
-                                Text(hit.title)
-                                    .font(.system(size: 15, weight: .semibold))
-                                    .lineLimit(1)
-                                Spacer(minLength: 4)
-                                Text(hit.collection)
-                                    .font(.caption2.weight(.medium))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 8).padding(.vertical, 3)
-                                    .background(CompanionPalette.elevated, in: Capsule())
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button { selectedHit = hit; Haptics.selection() } label: {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "books.vertical.fill")
+                                        .font(.caption)
+                                        .foregroundStyle(CompanionPalette.primary)
+                                    Text(hit.title)
+                                        .font(.system(size: 15, weight: .semibold))
+                                        .lineLimit(1)
+                                    Spacer(minLength: 4)
+                                    Text(hit.collection)
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 8).padding(.vertical, 3)
+                                        .background(CompanionPalette.elevated, in: Capsule())
+                                }
+                                if !hit.heading.isEmpty {
+                                    Text(hit.heading)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Text(highlightedSnippet(hit.snippet, matches: hit.matches))
+                                    .font(.system(size: 14))
+                                    .lineLimit(4)
+                                    .multilineTextAlignment(.leading)
                             }
-                            if !hit.heading.isEmpty {
-                                Text(hit.heading)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                            Text(highlightedSnippet(hit.snippet, matches: hit.matches))
-                                .font(.system(size: 14))
-                                .lineLimit(4)
-                                .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                         }
-                        .padding(14)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 16))
-                        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(CompanionPalette.border))
+                        .buttonStyle(.plain)
+
+                        HStack(spacing: 12) {
+                            Spacer()
+                            Button {
+                                let excerpt = hit.content.isEmpty ? hit.snippet : hit.content
+                                let quote = Self.formatKnowledgeQuote(title: hit.title, heading: hit.heading, content: excerpt)
+                                let prompt = trimmedKBQuery.isEmpty
+                                    ? "请结合《\(hit.title)》的这段内容帮我解读"
+                                    : "关于「\(trimmedKBQuery)」，请结合知识库《\(hit.title)》详细说明"
+                                store.composeDraft(prompt, quote: quote)
+                                Haptics.selection()
+                            } label: {
+                                Label("引用去提问", systemImage: "quote.bubble")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(CompanionPalette.primary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(CompanionPalette.primary.opacity(0.12), in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
-                    .buttonStyle(.plain)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 16))
+                    .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(CompanionPalette.border))
                     .padding(.horizontal, 16)
                 }
             }
@@ -405,27 +438,42 @@ struct LibraryScreen: View {
                 ForEach(knowledge.documents) { doc in
                     let kind = FileKind.of(doc.filename)
                     HStack(spacing: 12) {
-                        FileBadge(name: doc.filename, kind: kind, size: 34)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(doc.title).font(.system(size: 15, weight: .semibold)).lineLimit(2)
-                            HStack(spacing: 6) {
-                                Text(doc.collection)
-                                    .font(.caption2.weight(.medium))
-                                    .padding(.horizontal, 7).padding(.vertical, 2)
-                                    .background(CompanionPalette.elevated, in: Capsule())
-                                Text("\(doc.chunkCount) 片段 · \(ByteCountFormatter.string(fromByteCount: Int64(doc.sizeBytes), countStyle: .file))")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                        Button {
+                            readingDoc = doc
+                            Haptics.selection()
+                        } label: {
+                            HStack(spacing: 12) {
+                                FileBadge(name: doc.filename, kind: kind, size: 34)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(doc.title).font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary).lineLimit(2)
+                                    HStack(spacing: 6) {
+                                        Text(doc.collection)
+                                            .font(.caption2.weight(.medium))
+                                            .foregroundStyle(.primary)
+                                            .padding(.horizontal, 7).padding(.vertical, 2)
+                                            .background(CompanionPalette.elevated, in: Capsule())
+                                        Text("\(doc.chunkCount) 片段 · \(ByteCountFormatter.string(fromByteCount: Int64(doc.sizeBytes), countStyle: .file))")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Text("\(doc.originLabel) · \(formatDocDate(doc.updatedAt))")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             }
-                            Text("\(doc.originLabel) · \(formatDocDate(doc.updatedAt))")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                            .contentShape(Rectangle())
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("阅读知识库文档：\(doc.title)")
 
                         Menu {
-                            Button("在对话中基于此文档提问", systemImage: "bubble.left.and.text.bubble.right") {
-                                store.composeDraft("请结合知识库里的《\(doc.title)》帮我总结核心要点")
+                            Button("阅读全文分块", systemImage: "doc.text.magnifyingglass") {
+                                readingDoc = doc
+                                Haptics.selection()
+                            }
+                            Button("引用去提问", systemImage: "quote.bubble") {
+                                store.composeDraft("请结合知识库里的《\(doc.title)》帮我总结核心要点", quote: "知识库文档：《\(doc.title)》（\(doc.collection)）")
                                 Haptics.selection()
                             }
                             Button("删除文档", systemImage: "trash", role: .destructive) {
@@ -444,8 +492,11 @@ struct LibraryScreen: View {
                     .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 16))
                     .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(CompanionPalette.border))
                     .contextMenu {
-                        Button("在对话中提问", systemImage: "bubble.left.and.text.bubble.right") {
-                            store.composeDraft("请结合知识库里的《\(doc.title)》帮我总结核心要点")
+                        Button("阅读全文分块", systemImage: "doc.text.magnifyingglass") {
+                            readingDoc = doc
+                        }
+                        Button("引用去提问", systemImage: "quote.bubble") {
+                            store.composeDraft("请结合知识库里的《\(doc.title)》帮我总结核心要点", quote: "知识库文档：《\(doc.title)》（\(doc.collection)）")
                         }
                         Button("删除文档", systemImage: "trash", role: .destructive) {
                             deletingDoc = doc
@@ -588,13 +639,22 @@ struct LibraryScreen: View {
         if Calendar.current.isDateInToday(date) { return "今天 " + date.formatted(date: .omitted, time: .shortened) }
         return date.formatted(.dateTime.month().day())
     }
+
+    fileprivate nonisolated static func formatKnowledgeQuote(title: String, heading: String, content: String) -> String {
+        let header = heading.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "《\(title)》"
+            : "《\(title)》· \(heading.trimmingCharacters(in: .whitespacesAndNewlines))"
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let snippet = trimmed.count > 360 ? String(trimmed.prefix(360)) + "…" : trimmed
+        return snippet.isEmpty ? header : "\(header)\n\(snippet)"
+    }
 }
 
 @MainActor
 private struct KnowledgeHitDetailSheet: View {
     let hit: KnowledgeSearchHit
     let query: String
-    var onAsk: (String) -> Void
+    var onAsk: (String, String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
 
@@ -639,9 +699,11 @@ private struct KnowledgeHitDetailSheet: View {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                     }
                     .accessibilityLabel("复制片段")
-                    Button("去提问") {
+                    Button("引用去提问") {
+                        let bodyText = hit.content.isEmpty ? hit.snippet : hit.content
+                        let quote = LibraryScreen.formatKnowledgeQuote(title: hit.title, heading: hit.heading, content: bodyText)
                         let base = query.isEmpty ? "请结合《\(hit.title)》的这段内容帮我解读" : "关于「\(query)」，请结合知识库《\(hit.title)》详细说明"
-                        onAsk(base)
+                        onAsk(base, quote)
                         dismiss()
                     }
                 }
@@ -650,6 +712,207 @@ private struct KnowledgeHitDetailSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .tint(CompanionPalette.primary)
+    }
+}
+
+/// Full chunked reader sheet for a Knowledge Vault document (`companion.knowledge.change` `{action: "read", id}`).
+@MainActor
+private struct KnowledgeDocumentReaderSheet: View {
+    let document: KnowledgeDocument
+    var onQuoteAsk: (String, String) -> Void
+    @EnvironmentObject private var store: CompanionStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var detail: KnowledgeDocumentDetail?
+    @State private var loading = false
+    @State private var error: String?
+    @State private var filterText = ""
+    @State private var copiedChunkIndex: Int?
+
+    private var activeDoc: KnowledgeDocument { detail?.document ?? document }
+    private var chunks: [KnowledgeChunk] { detail?.chunks ?? [] }
+    private var filteredChunks: [KnowledgeChunk] {
+        let q = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return chunks }
+        return chunks.filter {
+            $0.heading.localizedCaseInsensitiveContains(q) || $0.content.localizedCaseInsensitiveContains(q)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    headerCard
+                    if chunks.count > 3 {
+                        chunkFilterBar
+                    }
+                    if loading && detail == nil {
+                        ProgressView("正在读取文档分块…")
+                            .frame(maxWidth: .infinity)
+                            .padding(28)
+                    } else if let error {
+                        ResourceErrorView(message: error) { Task { await loadDocument() } }
+                    } else if filteredChunks.isEmpty {
+                        Text(chunks.isEmpty ? "该文档暂无可阅读的文本片段。" : "没有匹配「\(filterText)」的片段。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(28)
+                    } else {
+                        ForEach(filteredChunks) { chunk in
+                            chunkCard(chunk)
+                        }
+                    }
+                }
+                .padding(16)
+            }
+            .background(CompanionPalette.background)
+            .navigationTitle(activeDoc.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("引用去提问") {
+                        let firstText = chunks.first?.content ?? ""
+                        let quote = LibraryScreen.formatKnowledgeQuote(title: activeDoc.title, heading: chunks.first?.heading ?? "", content: firstText)
+                        onQuoteAsk("请结合知识库《\(activeDoc.title)》帮我梳理重点", quote)
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .tint(CompanionPalette.primary)
+        .task(id: document.id) { await loadDocument() }
+    }
+
+    private var headerCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Label(activeDoc.collection, systemImage: "books.vertical.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(CompanionPalette.primary)
+                    .padding(.horizontal, 9).padding(.vertical, 4)
+                    .background(CompanionPalette.primary.opacity(0.12), in: Capsule())
+                Text("\(max(activeDoc.chunkCount, chunks.count)) 个片段")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if activeDoc.sizeBytes > 0 {
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(activeDoc.sizeBytes), countStyle: .file))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text(activeDoc.filename)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(CompanionPalette.border))
+    }
+
+    private var chunkFilterBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("筛选本文档片段", text: $filterText)
+                .accessibilityLabel("筛选文档片段")
+            if !filterText.isEmpty {
+                Button { filterText = "" } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("清除筛选")
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 38)
+        .background(CompanionPalette.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(CompanionPalette.border))
+    }
+
+    private func chunkCard(_ chunk: KnowledgeChunk) -> some View {
+        let copied = copiedChunkIndex == chunk.chunkIndex
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("片段 #\(chunk.chunkIndex + 1)")
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(CompanionPalette.primary)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(CompanionPalette.primary.opacity(0.12), in: Capsule())
+                if !chunk.heading.isEmpty {
+                    Text(chunk.heading)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+            }
+
+            Text(chunk.content)
+                .font(.system(size: 14.5))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 10) {
+                Button {
+                    UIPasteboard.general.string = chunk.content
+                    Haptics.selection()
+                    copiedChunkIndex = chunk.chunkIndex
+                    let current = chunk.chunkIndex
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.5))
+                        if copiedChunkIndex == current { copiedChunkIndex = nil }
+                    }
+                } label: {
+                    Label(copied ? "已复制" : "复制片段", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(CompanionPalette.elevated, in: Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button {
+                    let quote = LibraryScreen.formatKnowledgeQuote(title: activeDoc.title, heading: chunk.heading, content: chunk.content)
+                    onQuoteAsk("请结合这段内容帮我解读：", quote)
+                    Haptics.selection()
+                    dismiss()
+                } label: {
+                    Label("引用去提问", systemImage: "quote.bubble")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(CompanionPalette.primaryText)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(CompanionPalette.primary, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(CompanionPalette.border))
+    }
+
+    private func loadDocument() async {
+        loading = true
+        error = nil
+        defer { loading = false }
+        do {
+            detail = try await store.readKnowledgeDocument(id: document.id)
+        } catch is CancellationError { }
+        catch {
+            self.error = error.localizedDescription
+        }
     }
 }
 

@@ -27,6 +27,7 @@ struct CompanionRootView: View {
     @State private var keyboardUp = false
     @State private var editSide = false
     @State private var sideName = ""
+    @State private var sessionControls = false
     @State private var exportedChatFile: SharedFile?
     @State private var exportCleanupFolder: URL?
     @State private var exportingChat = false
@@ -53,78 +54,105 @@ struct CompanionRootView: View {
         return feedPosts.filter { ($0["ts"].doubleValue ?? 0) > seen }.count
     }
     var body: some View {
-        Group {
+        let base = Group {
             if store.needsServer || store.needsPairing { ConnectionView() }
             else { appShell.inAppLinks() }  // links in 动态, replies and cards open inside the app
         }
         .tint(CompanionPalette.primary)
         .preferredColorScheme(colorScheme)
-        .sheet(isPresented: $settings) {
-            SettingsView().presentationDetents([.large]).presentationDragIndicator(.visible).tint(CompanionPalette.primary)
-                .environment(\.openAppearance, {
-                    settings = false
-                    Task { try? await Task.sleep(for: .milliseconds(450)); appearance = true }
-                })
-        }
-        // 外观 sits low over the main screen, so the chat above it previews each choice.
-        .sheet(isPresented: $appearance) {
-            AppearanceSettingsPage()
-                .presentationDetents([.height(300)]).presentationDragIndicator(.visible)
-                .presentationBackgroundInteraction(.enabled).presentationBackground(.regularMaterial)
-                .tint(CompanionPalette.primary)
-        }
-        .sheet(isPresented: $identity) {
-            IdentityView().presentationDetents([.large]).presentationDragIndicator(.hidden).tint(CompanionPalette.primary)
-        }
-        .sheet(item: $exportedChatFile, onDismiss: { exportedChatFile = nil; cleanupExportedChat() }) { file in
-            ShareSheet(items: [file.url])
-        }
-        .alert("旁聊设置", isPresented: $editSide) {
-            TextField("旁聊名称", text: $sideName)
-            Button("保存") { Task { await store.renameChat(id: store.currentChatID, title: sideName) } }
-            Button("删除旁聊", role: .destructive) { Task { await store.deleteChat(id: store.currentChatID) } }
-            Button("取消", role: .cancel) { }
-        }
-        .alert("要切换到新的服务器吗？", isPresented: Binding(
-            get: { store.pendingDeepLink != nil },
-            set: { if !$0 { store.cancelPendingDeepLink() } }
-        )) {
-            Button("取消", role: .cancel) { store.cancelPendingDeepLink() }
-            Button("切换并连接", role: .destructive) {
-                settings = false; identity = false; appearance = false; menu = false
-                Task { await store.confirmPendingDeepLink() }
+        let withSheets = applyRootSheets(base)
+        let withAlerts = applyRootAlerts(withSheets)
+        let withNavObservers = applyRootNavigationObservers(withAlerts)
+        return applyRootDeviceObservers(withNavObservers)
+    }
+
+    private func applyRootSheets<Content: View>(_ content: Content) -> some View {
+        content
+            .sheet(isPresented: $settings) {
+                SettingsView().presentationDetents([.large]).presentationDragIndicator(.visible).tint(CompanionPalette.primary)
+                    .environment(\.openAppearance, {
+                        settings = false
+                        Task { try? await Task.sleep(for: .milliseconds(450)); appearance = true }
+                    })
             }
-        } message: {
-            Text("当前已配置服务器 \(store.serverAddress)。切换后将连接到 \(store.pendingDeepLink?.server ?? "")。")
-        }
-        .task(id: store.connected) {
-            guard store.connected else { return }
-            while !Task.isCancelled {
-                await loadBadge()
-                do { try await Task.sleep(for: .seconds(60)) } catch { break }
+            // 外观 sits low over the main screen, so the chat above it previews each choice.
+            .sheet(isPresented: $appearance) {
+                AppearanceSettingsPage()
+                    .presentationDetents([.height(300)]).presentationDragIndicator(.visible)
+                    .presentationBackgroundInteraction(.enabled).presentationBackground(.regularMaterial)
+                    .tint(CompanionPalette.primary)
             }
-        }
-        .onChange(of: selectedTab) { old, new in if old == .feed || new == .feed { Task { await loadBadge() } } }
-        .onChange(of: store.feedRevision) { _, _ in Task { await loadBadge() } }
-        // 问伙伴 from Siri or Shortcuts: sent in the chat once there is one to send it in.
-        .onChange(of: inbox.pending) { _, _ in deliverAsked() }
-        .onChange(of: store.currentChatID) { _, _ in deliverAsked() }
-        // A reply may have set a reminder (or changed one): the phone's notifications follow.
-        .onChange(of: store.running) { was, now in if was && !now { Task { await store.planReminders() } } }
-        .onChange(of: store.needsPairing) { _, needed in
-            if needed { settings = false; identity = false; appearance = false; menu = false }
-        }
-        .onChange(of: store.needsServer) { _, needed in
-            if needed { settings = false; identity = false; appearance = false; menu = false }
-        }
-        .onAppear { deliverAsked() }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            if !menu { keyboardUp = true }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardUp = false }
-        .onChange(of: store.suggestedDraft) { _, value in
-            if value != nil { selectedTab = .chat; settings = false; identity = false }
-        }
+            .sheet(isPresented: $identity) {
+                IdentityView().presentationDetents([.large]).presentationDragIndicator(.hidden).tint(CompanionPalette.primary)
+            }
+            .sheet(isPresented: $sessionControls) {
+                ChatSessionControlsSheet(chatID: store.currentChatID)
+                    .environmentObject(store)
+            }
+            .sheet(item: $exportedChatFile, onDismiss: { exportedChatFile = nil; cleanupExportedChat() }) { file in
+                ShareSheet(items: [file.url])
+            }
+    }
+
+    private func applyRootAlerts<Content: View>(_ content: Content) -> some View {
+        content
+            .alert("旁聊设置", isPresented: $editSide) {
+                TextField("旁聊名称", text: $sideName)
+                Button("保存") { Task { await store.renameChat(id: store.currentChatID, title: sideName) } }
+                Button("删除旁聊", role: .destructive) { Task { await store.deleteChat(id: store.currentChatID) } }
+                Button("取消", role: .cancel) { }
+            }
+            .alert("要切换到新的服务器吗？", isPresented: Binding(
+                get: { store.pendingDeepLink != nil },
+                set: { if !$0 { store.cancelPendingDeepLink() } }
+            )) {
+                Button("取消", role: .cancel) { store.cancelPendingDeepLink() }
+                Button("切换并连接", role: .destructive) {
+                    settings = false; identity = false; appearance = false; menu = false; sessionControls = false
+                    Task { await store.confirmPendingDeepLink() }
+                }
+            } message: {
+                Text("当前已配置服务器 \(store.serverAddress)。切换后将连接到 \(store.pendingDeepLink?.server ?? "")。")
+            }
+            .task(id: store.connected) {
+                guard store.connected else { return }
+                while !Task.isCancelled {
+                    await loadBadge()
+                    do { try await Task.sleep(for: .seconds(60)) } catch { break }
+                }
+            }
+    }
+
+    private func applyRootNavigationObservers<Content: View>(_ content: Content) -> some View {
+        content
+            .onChange(of: selectedTab) { old, new in if old == .feed || new == .feed { Task { await loadBadge() } } }
+            .onChange(of: store.feedRevision) { _, _ in Task { await loadBadge() } }
+            // 问伙伴 from Siri or Shortcuts: sent in the chat once there is one to send it in.
+            .onChange(of: inbox.pending) { _, _ in deliverAsked() }
+            .onChange(of: store.currentChatID) { _, _ in deliverAsked() }
+            // A reply may have set a reminder (or changed one): the phone's notifications follow.
+            .onChange(of: store.running) { was, now in if was && !now { Task { await store.planReminders() } } }
+            .onAppear { deliverAsked() }
+    }
+
+    private func applyRootDeviceObservers<Content: View>(_ content: Content) -> some View {
+        content
+            .onChange(of: store.needsPairing) { _, needed in
+                if needed { settings = false; identity = false; appearance = false; menu = false; sessionControls = false }
+            }
+            .onChange(of: store.needsServer) { _, needed in
+                if needed { settings = false; identity = false; appearance = false; menu = false; sessionControls = false }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                if !menu { keyboardUp = true }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardUp = false }
+            .onChange(of: store.suggestedDraft) { _, value in
+                if value != nil { selectedTab = .chat; settings = false; identity = false }
+            }
+            .onChange(of: store.suggestedQuote) { _, value in
+                if value != nil { selectedTab = .chat; settings = false; identity = false }
+            }
     }
 
     private func deliverAsked() {
@@ -213,39 +241,7 @@ struct CompanionRootView: View {
                     roundButton("line.3.horizontal", "打开菜单") { toggleMenu(true) }
                     Spacer()
                     if selectedTab == .chat && !store.currentChatID.isEmpty {
-                        Menu {
-                            Button {
-                                Task { await exportCurrentChat() }
-                            } label: {
-                                Label(exportingChat ? "正在导出…" : "导出分享对话", systemImage: "square.and.arrow.up")
-                            }
-                            .disabled(exportingChat || !store.connected)
-
-                            Button {
-                                Haptics.selection()
-                                Task { await store.forkChat(chatId: store.currentChatID) }
-                            } label: {
-                                Label("分叉为新旁聊", systemImage: "arrow.triangle.branch")
-                            }
-                            .disabled(!store.connected)
-
-                            if store.currentChatID != store.mainChatID {
-                                Divider()
-                                Button {
-                                    sideName = store.sideChats.first { $0.id == store.currentChatID }?.title ?? "新的旁聊"
-                                    editSide = true
-                                } label: {
-                                    Label("旁聊改名 / 删除", systemImage: "slider.horizontal.3")
-                                }
-                            }
-                        } label: {
-                            Image(systemName: store.currentChatID != store.mainChatID ? "slider.horizontal.3" : "ellipsis")
-                                .font(.system(size: 20))
-                                .frame(width: 44, height: 44)
-                                .modifier(FloatingPanel(radius: 22))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(store.currentChatID != store.mainChatID ? "旁聊设置与导出" : "更多聊天操作")
+                        chatHeaderActions
                     }
                 }.padding(.horizontal, 16)
             }.padding(.top, 6)
@@ -260,6 +256,76 @@ struct CompanionRootView: View {
                 .allowsHitTesting(false)
         }
     }
+    @ViewBuilder
+    private var chatHeaderActions: some View {
+        let activeSummary = store.sessionSummary(for: store.currentChatID)
+        let hasCustomPreset = (activeSummary?.modelPreset?.isEmpty == false) || (activeSummary?.reasoningEffort?.isEmpty == false)
+        HStack(spacing: 8) {
+            Button {
+                sessionControls = true
+                Haptics.selection()
+            } label: {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 18, weight: .medium))
+                        .frame(width: 44, height: 44)
+                        .modifier(FloatingPanel(radius: 22))
+                    if hasCustomPreset {
+                        Circle()
+                            .fill(CompanionPalette.primary)
+                            .frame(width: 8, height: 8)
+                            .offset(x: -7, y: 7)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(!store.connected)
+            .accessibilityLabel("当前会话算力预设")
+
+            Menu {
+                Button {
+                    sessionControls = true
+                    Haptics.selection()
+                } label: {
+                    Label("切换本聊预设与上下文", systemImage: "cpu")
+                }
+                .disabled(!store.connected)
+
+                Button {
+                    Task { await exportCurrentChat() }
+                } label: {
+                    Label(exportingChat ? "正在导出…" : "导出分享对话", systemImage: "square.and.arrow.up")
+                }
+                .disabled(exportingChat || !store.connected)
+
+                Button {
+                    Haptics.selection()
+                    Task { await store.forkChat(chatId: store.currentChatID) }
+                } label: {
+                    Label("分叉为新旁聊", systemImage: "arrow.triangle.branch")
+                }
+                .disabled(!store.connected)
+
+                if store.currentChatID != store.mainChatID {
+                    Divider()
+                    Button {
+                        sideName = store.sideChats.first { $0.id == store.currentChatID }?.title ?? "新的旁聊"
+                        editSide = true
+                    } label: {
+                        Label("旁聊改名 / 删除", systemImage: "slider.horizontal.3")
+                    }
+                }
+            } label: {
+                Image(systemName: store.currentChatID != store.mainChatID ? "slider.horizontal.3" : "ellipsis")
+                    .font(.system(size: 20))
+                    .frame(width: 44, height: 44)
+                    .modifier(FloatingPanel(radius: 22))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(store.currentChatID != store.mainChatID ? "旁聊设置与导出" : "更多聊天操作")
+        }
+    }
+
     private var avatarSize: CGFloat {
         switch store.companionState["pet_size"].stringValue {
         case "small": return 72

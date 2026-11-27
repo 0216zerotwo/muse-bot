@@ -93,11 +93,9 @@ struct KnowledgeDocument: Identifiable, Codable, Equatable, Sendable {
     var updatedAt: Double
 
     var originLabel: String {
-        switch origin {
-        case "creation": return "作品导入"
-        case "local": return "本地导入"
-        default: return "上传"
-        }
+        if origin == "creation" || origin.hasPrefix("creation:") { return "作品导入" }
+        if origin == "local" { return "本地导入" }
+        return "上传"
     }
 
     init(id: String, title: String, filename: String, collection: String = "默认", mime: String = "text/plain",
@@ -253,5 +251,187 @@ struct KnowledgePayload: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         self.init(json: try JSONValue(from: decoder))
+    }
+}
+
+/// One parsed section chunk returned by `companion.knowledge.change` `{action: "read", id}`.
+struct KnowledgeChunk: Identifiable, Codable, Equatable, Sendable {
+    var chunkIndex: Int
+    var heading: String
+    var content: String
+
+    var id: Int { chunkIndex }
+
+    enum CodingKeys: String, CodingKey {
+        case chunkIndex = "chunk_index"
+        case heading, content
+    }
+
+    init(chunkIndex: Int, heading: String = "", content: String = "") {
+        self.chunkIndex = chunkIndex
+        self.heading = heading
+        self.content = content
+    }
+
+    init(json: JSONValue, fallbackIndex: Int = 0) {
+        self.init(
+            chunkIndex: json["chunk_index"].intValue ?? json["chunkIndex"].intValue ?? fallbackIndex,
+            heading: json["heading"].stringValue,
+            content: json["content"].stringValue
+        )
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        chunkIndex = try container.decodeIfPresent(Int.self, forKey: .chunkIndex) ?? 0
+        heading = try container.decodeIfPresent(String.self, forKey: .heading) ?? ""
+        content = try container.decodeIfPresent(String.self, forKey: .content) ?? ""
+    }
+}
+
+/// Full chunked knowledge document returned by `companion.knowledge.change` `{action: "read", id}`.
+struct KnowledgeDocumentDetail: Codable, Equatable, Sendable {
+    var document: KnowledgeDocument
+    var chunks: [KnowledgeChunk]
+
+    init(document: KnowledgeDocument, chunks: [KnowledgeChunk] = []) {
+        self.document = document
+        self.chunks = chunks
+    }
+
+    init(json: JSONValue) {
+        let doc = KnowledgeDocument(json: json["document"])
+        let parsedChunks = json["chunks"].records.enumerated().map { offset, row in
+            KnowledgeChunk(json: row, fallbackIndex: offset)
+        }
+        self.init(document: doc, chunks: parsedChunks)
+    }
+
+    init(from decoder: Decoder) throws {
+        self.init(json: try JSONValue(from: decoder))
+    }
+}
+
+/// One day's aggregated token and cost bucket returned in `GET /api/webui/companion/usage` (`daily[]`).
+struct DailyUsageBucket: Identifiable, Codable, Equatable, Sendable {
+    var date: String
+    var inputTokens: Int
+    var cachedTokens: Int
+    var outputTokens: Int
+    var cost: Double?
+    var mediaCost: Double?
+    var requests: Int?
+
+    var id: String { date }
+
+    enum CodingKeys: String, CodingKey {
+        case date
+        case inputTokens = "input_tokens"
+        case cachedTokens = "cached_tokens"
+        case outputTokens = "output_tokens"
+        case cost
+        case mediaCost = "media_cost"
+        case requests
+    }
+
+    /// Non-cached input tokens (clamped >= 0).
+    var freshInputTokens: Int { max(0, inputTokens - cachedTokens) }
+    var totalTokens: Int { max(0, inputTokens) + max(0, outputTokens) }
+    /// Server `cost` already includes `media_cost` when non-null; fall back to `media_cost` only when `cost` is null.
+    var combinedCost: Double? {
+        if let cost, cost.isFinite { return max(0, cost) }
+        if let mediaCost, mediaCost.isFinite, mediaCost > 0 { return mediaCost }
+        return nil
+    }
+
+    var shortDateLabel: String {
+        let parts = date.split(separator: "-")
+        if parts.count == 3, let month = Int(parts[1]), let day = Int(parts[2]) {
+            return "\(month)/\(day)"
+        }
+        return date
+    }
+
+    init(
+        date: String,
+        inputTokens: Int = 0,
+        cachedTokens: Int = 0,
+        outputTokens: Int = 0,
+        cost: Double? = nil,
+        mediaCost: Double? = nil,
+        requests: Int? = nil
+    ) {
+        self.date = date
+        self.inputTokens = max(0, inputTokens)
+        self.cachedTokens = max(0, cachedTokens)
+        self.outputTokens = max(0, outputTokens)
+        self.cost = cost
+        self.mediaCost = mediaCost
+        self.requests = requests
+    }
+
+    init(json: JSONValue) {
+        self.init(
+            date: json["date"].stringValue,
+            inputTokens: json["input_tokens"].intValue ?? 0,
+            cachedTokens: json["cached_tokens"].intValue ?? 0,
+            outputTokens: json["output_tokens"].intValue ?? 0,
+            cost: json["cost"].doubleValue,
+            mediaCost: json["media_cost"].doubleValue,
+            requests: json["requests"].intValue
+        )
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        date = try container.decodeIfPresent(String.self, forKey: .date) ?? ""
+        inputTokens = max(0, try container.decodeIfPresent(Int.self, forKey: .inputTokens) ?? 0)
+        cachedTokens = max(0, try container.decodeIfPresent(Int.self, forKey: .cachedTokens) ?? 0)
+        outputTokens = max(0, try container.decodeIfPresent(Int.self, forKey: .outputTokens) ?? 0)
+        cost = try container.decodeIfPresent(Double.self, forKey: .cost)
+        mediaCost = try container.decodeIfPresent(Double.self, forKey: .mediaCost)
+        requests = try container.decodeIfPresent(Int.self, forKey: .requests)
+    }
+}
+
+/// Optional Wave 3 analytics extension fields on `GET /api/webui/companion/usage`.
+struct UsageSummaryPayload: Codable, Equatable, Sendable {
+    var daily: [DailyUsageBucket]?
+    var cacheHitRate: Double?
+    var cacheSavedCost: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case daily
+        case cacheHitRate = "cache_hit_rate"
+        case cacheSavedCost = "cache_saved_cost"
+    }
+
+    init(daily: [DailyUsageBucket]? = nil, cacheHitRate: Double? = nil, cacheSavedCost: Double? = nil) {
+        self.daily = daily
+        self.cacheHitRate = cacheHitRate
+        self.cacheSavedCost = cacheSavedCost
+    }
+
+    init(json: JSONValue) {
+        let parsedDaily: [DailyUsageBucket]?
+        if case .array = json["daily"] {
+            parsedDaily = json["daily"].records
+                .map(DailyUsageBucket.init(json:))
+                .filter { !$0.date.isEmpty }
+        } else {
+            parsedDaily = nil
+        }
+        self.init(
+            daily: parsedDaily,
+            cacheHitRate: json["cache_hit_rate"].doubleValue,
+            cacheSavedCost: json["cache_saved_cost"].doubleValue
+        )
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        daily = try container.decodeIfPresent([DailyUsageBucket].self, forKey: .daily)
+        cacheHitRate = try container.decodeIfPresent(Double.self, forKey: .cacheHitRate)
+        cacheSavedCost = try container.decodeIfPresent(Double.self, forKey: .cacheSavedCost)
     }
 }
