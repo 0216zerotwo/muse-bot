@@ -4,10 +4,12 @@ import {
   useEffect,
   useMemo,
   useState,
+  type ComponentPropsWithoutRef,
   type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { Check, Globe2 } from "lucide-react";
+import { Check, Copy, Download, FileCode2, Globe2, Table2 } from "lucide-react";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { decodeString } from "micromark-util-decode-string";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -347,6 +349,241 @@ function nodeText(value: ReactNode): string {
       return nodeText(child.props.children);
     })
     .join("");
+}
+
+export interface TableMatrix {
+  headers: string[];
+  rows: string[][];
+}
+
+interface TableElementProps {
+  children?: ReactNode;
+  node?: { tagName?: string };
+  "data-streamdown"?: string;
+}
+
+function tableTagOf(child: ReactNode): string {
+  if (!isValidElement<TableElementProps>(child)) return "";
+  if (typeof child.type === "string") return child.type.toLowerCase();
+  const hastTag = child.props?.node?.tagName;
+  if (typeof hastTag === "string") return hastTag.toLowerCase();
+  const sd = child.props?.["data-streamdown"];
+  if (sd === "table-header") return "thead";
+  if (sd === "table-body") return "tbody";
+  if (sd === "table-row") return "tr";
+  if (sd === "table-header-cell") return "th";
+  if (sd === "table-cell") return "td";
+  return "";
+}
+
+function collectRowCells(trNode: ReactNode): string[] {
+  if (!isValidElement<TableElementProps>(trNode)) return [];
+  const cells: string[] = [];
+  for (const child of Children.toArray(trNode.props.children)) {
+    const tag = tableTagOf(child);
+    if ((tag === "th" || tag === "td") && isValidElement<TableElementProps>(child)) {
+      cells.push(nodeText(child.props.children).replace(/\s+/g, " ").trim());
+    }
+  }
+  return cells;
+}
+
+/** Extract normalized header and body cell text arrays from rendered React or Streamdown table children. */
+export function extractTableMatrix(children: ReactNode): TableMatrix {
+  let headers: string[] = [];
+  const rows: string[][] = [];
+  const walk = (nodes: ReactNode, inHead: boolean) => {
+    for (const child of Children.toArray(nodes)) {
+      if (!isValidElement<TableElementProps>(child)) continue;
+      const tag = tableTagOf(child);
+      if (tag === "thead") {
+        walk(child.props.children, true);
+      } else if (tag === "tbody" || tag === "tfoot") {
+        walk(child.props.children, false);
+      } else if (tag === "tr") {
+        const cells = collectRowCells(child);
+        if (cells.length === 0) continue;
+        if (inHead && headers.length === 0) headers = cells;
+        else rows.push(cells);
+      } else if (child.props.children) {
+        walk(child.props.children, inHead);
+      }
+    }
+  };
+  walk(children, false);
+  return { headers, rows };
+}
+
+function cleanTsvCell(cell: string): string {
+  return cell.replace(/[\t\r\n]+/g, " ");
+}
+
+/** Format a GFM table as tab-separated values for lossless paste into Excel/Feishu/Sheets. */
+export function tableMatrixToTsv(headers: string[], rows: string[][]): string {
+  const all = headers.length > 0 ? [headers, ...rows] : rows;
+  return all.map((row) => row.map(cleanTsvCell).join("\t")).join("\n");
+}
+
+function escapeMdCell(cell: string): string {
+  return cell.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
+}
+
+/** Format a GFM table back to clean pipe Markdown syntax. */
+export function tableMatrixToMarkdown(headers: string[], rows: string[][]): string {
+  const colCount = Math.max(headers.length, ...rows.map((r) => r.length), 0);
+  if (colCount === 0) return "";
+  const pad = (row: string[]) =>
+    Array.from({ length: colCount }, (_, i) => escapeMdCell(row[i] ?? ""));
+  const head = headers.length > 0 ? pad(headers) : pad(rows[0] ?? []);
+  const body = headers.length > 0 ? rows : rows.slice(1);
+  const lines = [
+    `| ${head.join(" | ")} |`,
+    `| ${Array.from({ length: colCount }, () => "---").join(" | ")} |`,
+    ...body.map((r) => `| ${pad(r).join(" | ")} |`),
+  ];
+  return lines.join("\n");
+}
+
+function escapeCsvCell(cell: string): string {
+  const safe = cell.replace(/\r?\n/g, " ");
+  if (/[",\r\n]/.test(safe)) return `"${safe.replace(/"/g, '""')}"`;
+  return safe;
+}
+
+/** Format a GFM table as RFC 4180 CSV with UTF-8 BOM for Excel CJK compatibility. */
+export function tableMatrixToCsv(headers: string[], rows: string[][]): string {
+  const all = headers.length > 0 ? [headers, ...rows] : rows;
+  return `\uFEFF${all.map((row) => row.map(escapeCsvCell).join(",")).join("\r\n")}`;
+}
+
+function triggerCsvDownload(csv: string): void {
+  if (typeof document === "undefined" || typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
+    return;
+  }
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const href = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.download = "table.csv";
+  anchor.rel = "noopener";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  try {
+    anchor.click();
+  } finally {
+    anchor.remove();
+    URL.revokeObjectURL(href);
+  }
+}
+
+function MarkdownTableCard({
+  tableChildren,
+  ariaLabel,
+  tableProps,
+}: {
+  tableChildren: ReactNode;
+  ariaLabel: string;
+  tableProps: ComponentPropsWithoutRef<"table">;
+}) {
+  const [copiedKind, setCopiedKind] = useState<"tsv" | "md" | null>(null);
+  const matrix = useMemo(() => extractTableMatrix(tableChildren), [tableChildren]);
+  const colCount = Math.max(matrix.headers.length, ...matrix.rows.map((r) => r.length), 0);
+  const rowCount = matrix.rows.length > 0 ? matrix.rows.length : matrix.headers.length > 0 ? 1 : 0;
+
+  const copyAs = (kind: "tsv" | "md") => {
+    const text =
+      kind === "tsv"
+        ? tableMatrixToTsv(matrix.headers, matrix.rows)
+        : tableMatrixToMarkdown(matrix.headers, matrix.rows);
+    void copyTextToClipboard(text).then((ok) => {
+      if (!ok) return;
+      setCopiedKind(kind);
+      window.setTimeout(() => setCopiedKind((curr) => (curr === kind ? null : curr)), 1_500);
+    });
+  };
+
+  return (
+    <div
+      data-testid="markdown-data-table"
+      data-table-kind="data"
+      role="region"
+      tabIndex={0}
+      aria-label={ariaLabel}
+      className={cn(
+        "not-prose mb-5 mt-3 w-full max-w-full overflow-hidden rounded-lg",
+        "border border-border/65 bg-muted/20",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+      )}
+    >
+      {colCount > 0 && (
+        <div
+          data-testid="markdown-table-toolbar"
+          className="flex flex-wrap items-center justify-between gap-2 border-b border-border/55 bg-muted/35 px-3 py-1.5 text-[11.5px] text-muted-foreground"
+        >
+          <span
+            className="inline-flex items-center gap-1 font-medium tabular-nums"
+            aria-label={`表格尺寸 ${rowCount} 行 ${colCount} 列`}
+          >
+            <Table2 className="h-3.5 w-3.5 opacity-75" aria-hidden="true" />
+            {rowCount}×{colCount}
+          </span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => copyAs("tsv")}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11.5px] font-medium transition-colors hover:bg-muted hover:text-foreground"
+            >
+              {copiedKind === "tsv" ? (
+                <Check className="h-3 w-3 text-emerald-500" aria-hidden="true" />
+              ) : (
+                <Copy className="h-3 w-3" aria-hidden="true" />
+              )}
+              {copiedKind === "tsv" ? "已复制" : "复制表格"}
+            </button>
+            <button
+              type="button"
+              onClick={() => copyAs("md")}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11.5px] font-medium transition-colors hover:bg-muted hover:text-foreground"
+            >
+              {copiedKind === "md" ? (
+                <Check className="h-3 w-3 text-emerald-500" aria-hidden="true" />
+              ) : (
+                <FileCode2 className="h-3 w-3" aria-hidden="true" />
+              )}
+              {copiedKind === "md" ? "已复制 MD" : "复制 MD"}
+            </button>
+            <button
+              type="button"
+              onClick={() => triggerCsvDownload(tableMatrixToCsv(matrix.headers, matrix.rows))}
+              className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11.5px] font-medium transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <Download className="h-3 w-3" aria-hidden="true" />
+              下载 CSV
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="w-full overflow-x-auto overscroll-x-contain">
+        <table
+          className={cn(
+            "w-full table-fixed border-collapse text-[13px] leading-5",
+            "[&_thead]:bg-muted/45 [&_thead]:text-muted-foreground",
+            "[&_th]:border-b [&_th]:border-border/65 [&_th]:px-3 [&_th]:py-2",
+            "[&_th]:text-left [&_th]:font-medium [&_th]:whitespace-normal",
+            "[&_th]:[overflow-wrap:anywhere]",
+            "[&_td]:border-b [&_td]:border-border/55 [&_td]:px-3 [&_td]:py-2",
+            "[&_td]:whitespace-normal [&_td]:[overflow-wrap:anywhere]",
+            "[&_th:not(:last-child)]:border-r [&_th:not(:last-child)]:border-border/45",
+            "[&_td:not(:last-child)]:border-r [&_td:not(:last-child)]:border-border/45",
+            "[&_tbody_tr:last-child_td]:border-b-0",
+          )}
+          {...tableProps}
+        >
+          {tableChildren}
+        </table>
+      </div>
+    </div>
+  );
 }
 
 function cleanFileReferenceTarget(value: string): string {
@@ -731,36 +968,11 @@ export default function MarkdownTextRenderer({
       table({ children: tableChildren, node: _node, ...props }) {
         void _node;
         return (
-          <div
-            data-testid="markdown-data-table"
-            data-table-kind="data"
-            role="region"
-            tabIndex={0}
-            aria-label={t("message.dataTable", { defaultValue: "Data table" })}
-            className={cn(
-              "not-prose mb-5 mt-3 w-full max-w-full overflow-x-auto rounded-lg",
-              "border border-border/65 bg-muted/20",
-              "overscroll-x-contain focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-            )}
-          >
-            <table
-              className={cn(
-                "w-full table-fixed border-collapse text-[13px] leading-5",
-                "[&_thead]:bg-muted/45 [&_thead]:text-muted-foreground",
-                "[&_th]:border-b [&_th]:border-border/65 [&_th]:px-3 [&_th]:py-2",
-                "[&_th]:text-left [&_th]:font-medium [&_th]:whitespace-normal",
-                "[&_th]:[overflow-wrap:anywhere]",
-                "[&_td]:border-b [&_td]:border-border/55 [&_td]:px-3 [&_td]:py-2",
-                "[&_td]:whitespace-normal [&_td]:[overflow-wrap:anywhere]",
-                "[&_th:not(:last-child)]:border-r [&_th:not(:last-child)]:border-border/45",
-                "[&_td:not(:last-child)]:border-r [&_td:not(:last-child)]:border-border/45",
-                "[&_tbody_tr:last-child_td]:border-b-0",
-              )}
-              {...props}
-            >
-              {tableChildren}
-            </table>
-          </div>
+          <MarkdownTableCard
+            tableChildren={tableChildren}
+            ariaLabel={t("message.dataTable", { defaultValue: "Data table" })}
+            tableProps={props}
+          />
         );
       },
       li({ children: markdownChildren, className: itemClassName }) {

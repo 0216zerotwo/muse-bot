@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
 import { ArrowUp, FileText, Loader2, Mic, Plus, Quote, Square, X } from "lucide-react";
 
 import type { SendAttachment } from "@/hooks/useNanobotStream";
@@ -37,6 +37,7 @@ const VOICE_ERRORS: Record<VoiceRecorderErrorKey, string> = {
 const MAX_TEXTAREA_PX = 132;
 const MAX_FILES = 6;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const CHAR_COUNT_THRESHOLD = 600;
 
 function readAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -73,6 +74,8 @@ export function Composer({
   onClearQuote,
   voiceEnabled = true,
   droppedFiles = null,
+  sentHistory,
+  toolbar,
 }: {
   value: string;
   onChange: (next: string) => void;
@@ -92,6 +95,10 @@ export function Composer({
   voiceEnabled?: boolean;
   /** External files dropped on the surrounding chat area to attach to the next message. */
   droppedFiles?: { files: File[]; seq: number } | null;
+  /** Recent user messages sent in this chat (oldest -> newest) for desktop Up/Down recall. */
+  sentHistory?: string[];
+  /** Optional compact bar rendered directly above the composer pill (e.g. model/context picker). */
+  toolbar?: ReactNode;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -111,6 +118,8 @@ export function Composer({
   const [mentionIndex, setMentionIndex] = useState(0);
   const [dismissedValue, setDismissedValue] = useState<string | null>(null);
   const activeValueDismissed = dismissedValue === value;
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  const stashedDraftRef = useRef("");
 
   /* @名字: name a helper to hand this to. Typing "@" lists them; picking one fills its name in. */
   const { token } = useClient();
@@ -233,9 +242,12 @@ export function Composer({
     onSend(value.trim(), images, dictated.current);
     setImages([]);
     setNotice(null);
+    setHistoryIndex(null);
+    stashedDraftRef.current = "";
   }, [canSend, images, onSend, value]);
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    const coarse = window.matchMedia?.("(any-pointer: coarse)").matches;
     if (!event.nativeEvent.isComposing) {
       if (pickable.length > 0) {
         if (event.key === "ArrowDown") {
@@ -281,10 +293,52 @@ export function Composer({
           if (chosen) pickHelper(chosen);
           return;
         }
+      } else if (!coarse && sentHistory && sentHistory.length > 0) {
+        const box = event.currentTarget;
+        const start = box.selectionStart ?? 0;
+        const end = box.selectionEnd ?? 0;
+        const atStart = start === 0 && end === 0;
+        const onFirstLine = !value.slice(0, start).includes("\n");
+        const onLastLine = !value.slice(end).includes("\n");
+        if (event.key === "ArrowUp" && (value.length === 0 || atStart || (historyIndex !== null && onFirstLine))) {
+          event.preventDefault();
+          if (historyIndex === null) {
+            stashedDraftRef.current = value;
+            const nextIdx = sentHistory.length - 1;
+            setHistoryIndex(nextIdx);
+            onChange(sentHistory[nextIdx]);
+          } else {
+            const nextIdx = Math.max(0, historyIndex - 1);
+            setHistoryIndex(nextIdx);
+            onChange(sentHistory[nextIdx]);
+          }
+          window.requestAnimationFrame(() => {
+            textareaRef.current?.setSelectionRange(0, 0);
+          });
+          return;
+        }
+        if (event.key === "ArrowDown" && historyIndex !== null && (atStart || onLastLine)) {
+          event.preventDefault();
+          if (historyIndex < sentHistory.length - 1) {
+            const nextIdx = historyIndex + 1;
+            setHistoryIndex(nextIdx);
+            onChange(sentHistory[nextIdx]);
+            window.requestAnimationFrame(() => {
+              textareaRef.current?.setSelectionRange(0, 0);
+            });
+          } else {
+            const restored = stashedDraftRef.current;
+            setHistoryIndex(null);
+            onChange(restored);
+            window.requestAnimationFrame(() => {
+              textareaRef.current?.setSelectionRange(restored.length, restored.length);
+            });
+          }
+          return;
+        }
       }
     }
     // Touch keyboards insert newlines; hardware keyboards send on Enter.
-    const coarse = window.matchMedia?.("(any-pointer: coarse)").matches;
     if (event.key === "Enter" && !event.shiftKey && !coarse && !event.nativeEvent.isComposing) {
       event.preventDefault();
       submit();
@@ -487,6 +541,7 @@ export function Composer({
           })}
         </ul>
       )}
+      {toolbar}
       <div className="c-float flex flex-col rounded-[26px]">
         {quote && (
           <div className="flex items-center gap-2 px-3 pt-2.5">
@@ -558,7 +613,10 @@ export function Composer({
               ref={textareaRef}
               rows={1}
               value={value}
-              onChange={(event) => onChange(event.target.value)}
+              onChange={(event) => {
+                if (historyIndex !== null) setHistoryIndex(null);
+                onChange(event.target.value);
+              }}
               onKeyDown={onKeyDown}
               onPaste={onPaste}
               onFocus={() => {
@@ -624,6 +682,14 @@ export function Composer({
             </button>
           ) : null}
         </div>
+        {value.length > CHAR_COUNT_THRESHOLD && !recording && (
+          <div
+            data-testid="composer-char-count"
+            className="c-muted flex justify-end px-4 pb-1.5 text-[11px] tabular-nums"
+          >
+            {value.length.toLocaleString()} 字
+          </div>
+        )}
       </div>
     </div>
   );

@@ -322,8 +322,8 @@ describe("ArtifactContext, ArtifactPane, and MermaidDiagram", () => {
       expect(iframe).toHaveAttribute("sandbox", "allow-scripts");
       expect(iframe.getAttribute("srcdoc")).toContain("Content-Security-Policy");
 
-      // Toggle to Source tab, toggle wrap, and back to Preview tab
-      fireEvent.click(within(pane).getByRole("tab", { name: "源码" }));
+      // Toggle to Edit tab, toggle wrap, and back to Preview tab
+      fireEvent.click(within(pane).getByRole("tab", { name: "编辑" }));
       expect(within(pane).getByText("交互卡片.html")).toBeInTheDocument();
       const wrapBtn = within(pane).getByRole("button", { name: "自动换行" });
       expect(wrapBtn).toHaveAttribute("aria-pressed", "true");

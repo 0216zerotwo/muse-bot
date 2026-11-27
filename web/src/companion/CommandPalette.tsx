@@ -1,14 +1,19 @@
 import {
+  BarChart3,
+  BookOpen,
   Bot,
   CornerDownLeft,
   Download,
   MessageCircle,
   Moon,
+  Palette,
+  Pin,
   Plus,
   Search,
   Settings,
   Sparkles,
   Sun,
+  Trash2,
   X,
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -34,6 +39,10 @@ export interface CommandPaletteProps {
   onNewSideChat: () => void;
   onSelectHelper: (helperId: string) => void;
   onOpenSettings: (page?: SettingsPage) => void;
+  onOpenAppearance?: () => void;
+  onOpenKnowledge?: () => void;
+  onPruneEmptyChats?: () => void;
+  emptySideChatCount?: number;
   onOpenMemory: () => void;
   onExportChat: () => void;
   onToggleTheme?: () => void;
@@ -164,6 +173,10 @@ export function CommandPalette({
   onNewSideChat,
   onSelectHelper,
   onOpenSettings,
+  onOpenAppearance,
+  onOpenKnowledge,
+  onPruneEmptyChats,
+  emptySideChatCount = 0,
   onOpenMemory,
   onExportChat,
   onToggleTheme,
@@ -241,17 +254,40 @@ export function CommandPalette({
       });
     }
 
-    for (const chat of sideChats.slice(0, 6)) {
+    const orderedSideChats = [...sideChats]
+      .filter((c) => !c.archived)
+      .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+
+    for (const chat of orderedSideChats.slice(0, 6)) {
       const title = chat.title || "未命名旁聊";
       items.push({
         id: `side:${chat.chatId}`,
         section: "最近旁聊",
-        label: title,
+        label: chat.pinned ? `📌 ${title}` : title,
         detail: chat.preview || "旁聊会话",
-        keywords: `${title} 旁聊 side chat`,
-        icon: <MessageCircle className="h-4 w-4" aria-hidden="true" />,
+        keywords: `${title} 旁聊 side chat${chat.pinned ? " 置顶 pinned" : ""}`,
+        icon: chat.pinned ? (
+          <Pin className="h-4 w-4" style={{ color: "var(--c-primary)" }} aria-hidden="true" />
+        ) : (
+          <MessageCircle className="h-4 w-4" aria-hidden="true" />
+        ),
         run: () => {
           onSelectSideChat(chat.chatId);
+          onClose();
+        },
+      });
+    }
+
+    if (onOpenKnowledge) {
+      items.push({
+        id: "tab:knowledge",
+        section: "主界面",
+        label: "知识库",
+        detail: "全文检索与分块阅读个人知识资料",
+        keywords: "知识库 资料 文档 检索 knowledge vault rag fts",
+        icon: <BookOpen className="h-4 w-4" aria-hidden="true" />,
+        run: () => {
+          onOpenKnowledge();
           onClose();
         },
       });
@@ -276,7 +312,7 @@ export function CommandPalette({
       });
     }
 
-    const settingShortcuts: Array<{ id: string; label: string; detail: string; keywords: string; run: () => void }> = [
+    const settingShortcuts: Array<{ id: string; label: string; detail: string; keywords: string; icon?: ReactNode; run: () => void }> = [
       {
         id: "setting:models",
         label: "模型设置",
@@ -287,6 +323,32 @@ export function CommandPalette({
           onClose();
         },
       },
+      {
+        id: "setting:usage",
+        label: "用量统计",
+        detail: "查看近 14 天趋势、缓存省钱与花费估算",
+        keywords: "用量 统计 费用 缓存 usage cost tokens analytics",
+        icon: <BarChart3 className="h-4 w-4" aria-hidden="true" />,
+        run: () => {
+          onOpenSettings("usage");
+          onClose();
+        },
+      },
+      ...(onOpenAppearance
+        ? [
+            {
+              id: "setting:appearance",
+              label: "外观设置",
+              detail: "调整深浅模式与宠物尺寸",
+              keywords: "外观 主题 宠物 尺寸 appearance theme dock",
+              icon: <Palette className="h-4 w-4" aria-hidden="true" />,
+              run: () => {
+                onClose();
+                onOpenAppearance();
+              },
+            },
+          ]
+        : []),
       {
         id: "setting:memory",
         label: "记忆管理",
@@ -335,7 +397,7 @@ export function CommandPalette({
         label: entry.label,
         detail: entry.detail,
         keywords: entry.keywords,
-        icon: <Settings className="h-4 w-4" aria-hidden="true" />,
+        icon: entry.icon ?? <Settings className="h-4 w-4" aria-hidden="true" />,
         run: entry.run,
       });
     }
@@ -352,6 +414,20 @@ export function CommandPalette({
         onNewSideChat();
       },
     });
+    if (onPruneEmptyChats) {
+      items.push({
+        id: "action:prune-empty",
+        section: "快捷操作",
+        label: "清理空旁聊",
+        detail: emptySideChatCount > 0 ? `可清理 ${emptySideChatCount} 个未发消息的空旁聊` : "一键清理无消息的空旁聊",
+        keywords: "清理 空 旁聊 prune empty chats",
+        icon: <Trash2 className="h-4 w-4" aria-hidden="true" />,
+        run: () => {
+          onClose();
+          onPruneEmptyChats();
+        },
+      });
+    }
     if (canExport) {
       items.push({
         id: "action:export",
@@ -387,13 +463,17 @@ export function CommandPalette({
   }, [
     activeChatTitle,
     canExport,
+    emptySideChatCount,
     helpers,
     isDark,
     onClose,
     onExportChat,
     onNewSideChat,
+    onOpenAppearance,
+    onOpenKnowledge,
     onOpenMemory,
     onOpenSettings,
+    onPruneEmptyChats,
     onSelectHelper,
     onSelectSideChat,
     onSelectTab,

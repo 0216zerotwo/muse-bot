@@ -3,12 +3,13 @@
  * 旁聊 (side chats on a topic of their own, kept apart from the main chat); and at the bottom
  * settings, search and a new side chat.
  */
-import { Clock, Download, Loader2, MoreHorizontal, Search, Settings, SquarePen, X } from "lucide-react";
-import { Fragment, useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Archive, ArchiveRestore, ChevronDown, Clock, Download, Loader2, MoreHorizontal, Pin, Search, Settings, SquarePen, Trash2, X } from "lucide-react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import type { ChatSummary } from "@/lib/types";
 
 import type { ChatSearchHit } from "../companion-api";
+import { useDraftChatIds } from "../draftStore";
 import { useBackKey } from "../Screen";
 
 import { useSheetDrag } from "../sheetDrag";
@@ -143,6 +144,7 @@ export function SwipeRow({
   onOpen,
   onEdit,
   onDelete,
+  quickActions,
 }: {
   children: ReactNode;
   /** Layout of the row itself. */
@@ -155,6 +157,8 @@ export function SwipeRow({
   onOpen: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  /** Optional hover/focus sibling actions rendered beside 编辑. */
+  quickActions?: ReactNode;
 }) {
   const press = useRef<{ x: number; y: number; timer: number | null; dragging: boolean; done: boolean } | null>(null);
   const [drag, setDragState] = useState<number | null>(null);
@@ -263,17 +267,20 @@ export function SwipeRow({
         {children}
       </button>
       {!swiped && (
-        <button
-          type="button"
-          aria-label="编辑"
-          onClick={(event) => {
-            event.stopPropagation();
-            onEdit();
-          }}
-          className="c-muted c-pressable absolute right-2 top-1/2 z-10 grid h-8 w-8 -translate-y-1/2 place-items-center rounded-full opacity-0 transition-opacity focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
-        >
-          <MoreHorizontal className="h-4 w-4" aria-hidden="true" />
-        </button>
+        <div className="absolute right-2 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100">
+          {quickActions}
+          <button
+            type="button"
+            aria-label="编辑"
+            onClick={(event) => {
+              event.stopPropagation();
+              onEdit();
+            }}
+            className="c-muted c-pressable grid h-8 w-8 place-items-center rounded-full"
+          >
+            <MoreHorizontal className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
       )}
     </li>
   );
@@ -294,6 +301,9 @@ export function MuseDrawer({
   onOpenSettings,
   onEditChat,
   onDeleteChat,
+  onPinChat,
+  onArchiveChat,
+  onPruneEmptyChats,
   search,
   onOpenHit,
   onExportCurrentChat,
@@ -315,6 +325,12 @@ export function MuseDrawer({
   onEditChat: (chat: ChatSummary) => void;
   /** Swiped left and 删除 tapped. */
   onDeleteChat: (chatId: string) => void;
+  /** Toggle pin state for a side chat. */
+  onPinChat?: (chatId: string, pinned: boolean) => void;
+  /** Toggle archive state for a side chat. */
+  onArchiveChat?: (chatId: string, archived: boolean) => void;
+  /** Bulk-remove empty, unpinned side chats. */
+  onPruneEmptyChats?: () => void;
   /** 查找聊天记录: messages in any chat that say the words (searched once typing pauses). */
   search?: (words: string) => Promise<ChatSearchHit[]>;
   onOpenHit?: (hit: ChatSearchHit) => void;
@@ -325,6 +341,8 @@ export function MuseDrawer({
   const [searching, setSearching] = useState(false);
   const [found, setFound] = useState<{ words: string; hits: ChatSearchHit[] } | null>(null);
   const [recentSearches, setRecentSearches] = useState<string[]>(() => readRecentSearches());
+  const [showArchived, setShowArchived] = useState(false);
+  const draftChatIds = useDraftChatIds();
 
   const rememberSearch = useCallback((raw: string) => {
     const clean = tokenizeSearchQuery(raw).join(" ");
@@ -380,6 +398,7 @@ export function MuseDrawer({
     if (!open) {
       setQuery("");
       setSwiped(null);
+      setShowArchived(false);
     } else {
       setRecentSearches(readRecentSearches());
     }
@@ -387,13 +406,28 @@ export function MuseDrawer({
   useBackKey(onClose, open);
 
   const tokens = tokenizeSearchQuery(query).map((t) => t.toLowerCase());
-  const chats =
+  const filteredChats =
     tokens.length > 0
       ? sideChats.filter((chat) => {
           const haystack = `${chat.title ?? ""} ${chat.preview}`.toLowerCase();
           return tokens.every((t) => haystack.includes(t));
         })
       : sideChats;
+  const activeChats = useMemo(() => {
+    const visible = filteredChats.filter((chat) => !chat.archived);
+    return [...visible].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+  }, [filteredChats]);
+  const archivedChats = useMemo(
+    () => filteredChats.filter((chat) => Boolean(chat.archived)),
+    [filteredChats],
+  );
+  const emptyCount = useMemo(
+    () =>
+      sideChats.filter(
+        (chat) => !chat.archived && !chat.pinned && (chat.empty ?? (!chat.preview.trim() && !(chat.title ?? "").trim())),
+      ).length,
+    [sideChats],
+  );
   const label = (chat: ChatSummary) => chat.title || chat.preview.slice(0, 16) || "新的旁聊";
 
   return (
@@ -442,34 +476,160 @@ export function MuseDrawer({
             onReorder={onReorder}
           />
           <div className="c-divider mx-3 my-4 border-t" />
-          <p className="c-muted px-3 pb-2 text-[13px] font-medium">旁聊</p>
-          {chats.length === 0 ? (
+          <div className="flex items-center justify-between gap-2 px-3 pb-2">
+            <p className="c-muted text-[13px] font-medium">旁聊</p>
+            {emptyCount > 0 && onPruneEmptyChats && (
+              <button
+                type="button"
+                onClick={onPruneEmptyChats}
+                className="c-muted c-pressable inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11.5px] font-medium"
+                style={{ background: "var(--c-fill)" }}
+              >
+                <Trash2 className="h-3 w-3" aria-hidden="true" />
+                清理空旁聊
+              </button>
+            )}
+          </div>
+          {activeChats.length === 0 && archivedChats.length === 0 ? (
             <p className="c-muted px-3 py-2 text-[14px] leading-relaxed">
               {tokens.length > 0 ? "没有找到匹配的旁聊" : "还没有旁聊"}
             </p>
           ) : (
-            <ul className="flex flex-col gap-0.5">
-              {chats.map((chat) => (
-                <SwipeRow
-                  key={chat.chatId}
-                  active={activeChatId === chat.chatId}
-                  swiped={swiped === chat.chatId}
-                  onSwipe={(open) => setSwiped(open ? chat.chatId : null)}
-                  onOpen={() => {
-                    if (query.trim()) rememberSearch(query);
-                    onOpenChat(chat.chatId);
-                    onClose();
-                  }}
-                  onEdit={() => onEditChat(chat)}
-                  onDelete={() => {
-                    setSwiped(null);
-                    onDeleteChat(chat.chatId);
-                  }}
-                >
-                  <span className="block truncate text-[18px] leading-snug">{label(chat)}</span>
-                </SwipeRow>
-              ))}
-            </ul>
+            <>
+              {activeChats.length > 0 && (
+                <ul className="flex flex-col gap-0.5" aria-label="旁聊列表">
+                  {activeChats.map((chat) => {
+                    const hasChatDraft = draftChatIds.has(chat.chatId);
+                    return (
+                      <SwipeRow
+                        key={chat.chatId}
+                        active={activeChatId === chat.chatId}
+                        swiped={swiped === chat.chatId}
+                        onSwipe={(isOpen) => setSwiped(isOpen ? chat.chatId : null)}
+                        onOpen={() => {
+                          if (query.trim()) rememberSearch(query);
+                          onOpenChat(chat.chatId);
+                          onClose();
+                        }}
+                        onEdit={() => onEditChat(chat)}
+                        onDelete={() => {
+                          setSwiped(null);
+                          onDeleteChat(chat.chatId);
+                        }}
+                        quickActions={
+                          onPinChat ? (
+                            <button
+                              type="button"
+                              aria-label={chat.pinned ? `取消置顶「${label(chat)}」` : `置顶「${label(chat)}」`}
+                              title={chat.pinned ? "取消置顶" : "置顶"}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onPinChat(chat.chatId, !chat.pinned);
+                              }}
+                              className="c-muted c-pressable grid h-8 w-8 place-items-center rounded-full"
+                              style={chat.pinned ? { color: "var(--c-primary)" } : undefined}
+                            >
+                              <Pin className="h-3.5 w-3.5" aria-hidden="true" />
+                            </button>
+                          ) : undefined
+                        }
+                      >
+                        <span className="flex w-full min-w-0 items-center gap-1.5">
+                          {chat.pinned && (
+                            <Pin
+                              className="h-3.5 w-3.5 shrink-0"
+                              style={{ color: "var(--c-primary)" }}
+                              aria-hidden="true"
+                              data-testid="drawer-pin-icon"
+                            />
+                          )}
+                          {hasChatDraft && (
+                            <span
+                              data-testid="drawer-draft-badge"
+                              className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-semibold leading-none"
+                              style={{ background: "var(--c-accent-soft)", color: "var(--c-primary)" }}
+                            >
+                              [草稿]
+                            </span>
+                          )}
+                          <span className="min-w-0 flex-1 truncate text-[18px] leading-snug">{label(chat)}</span>
+                        </span>
+                      </SwipeRow>
+                    );
+                  })}
+                </ul>
+              )}
+              {archivedChats.length > 0 && (
+                <div className="mt-2">
+                  <button
+                    type="button"
+                    aria-expanded={showArchived || tokens.length > 0}
+                    onClick={() => setShowArchived((v) => !v)}
+                    className="c-muted c-pressable flex w-full items-center gap-1.5 rounded-xl px-3 py-1.5 text-[12.5px] font-medium"
+                  >
+                    <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    <span>已归档 ({archivedChats.length})</span>
+                    <ChevronDown
+                      className={`ml-auto h-3.5 w-3.5 transition-transform ${
+                        showArchived || tokens.length > 0 ? "rotate-180" : ""
+                      }`}
+                      aria-hidden="true"
+                    />
+                  </button>
+                  {(showArchived || tokens.length > 0) && (
+                    <ul className="mt-0.5 flex flex-col gap-0.5 opacity-80" aria-label="已归档旁聊">
+                      {archivedChats.map((chat) => (
+                        <SwipeRow
+                          key={chat.chatId}
+                          active={activeChatId === chat.chatId}
+                          swiped={swiped === chat.chatId}
+                          onSwipe={(isOpen) => setSwiped(isOpen ? chat.chatId : null)}
+                          onOpen={() => {
+                            if (query.trim()) rememberSearch(query);
+                            onOpenChat(chat.chatId);
+                            onClose();
+                          }}
+                          onEdit={() => onEditChat(chat)}
+                          onDelete={() => {
+                            setSwiped(null);
+                            onDeleteChat(chat.chatId);
+                          }}
+                          quickActions={
+                            onArchiveChat ? (
+                              <button
+                                type="button"
+                                aria-label={`取消归档「${label(chat)}」`}
+                                title="取消归档"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  onArchiveChat(chat.chatId, false);
+                                }}
+                                className="c-muted c-pressable grid h-8 w-8 place-items-center rounded-full"
+                              >
+                                <ArchiveRestore className="h-3.5 w-3.5" aria-hidden="true" />
+                              </button>
+                            ) : undefined
+                          }
+                        >
+                          <span className="flex w-full min-w-0 items-center gap-1.5">
+                            {draftChatIds.has(chat.chatId) && (
+                              <span
+                                data-testid="drawer-draft-badge"
+                                className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-semibold leading-none"
+                                style={{ background: "var(--c-accent-soft)", color: "var(--c-primary)" }}
+                              >
+                                [草稿]
+                              </span>
+                            )}
+                            <span className="min-w-0 flex-1 truncate text-[16px] leading-snug">{label(chat)}</span>
+                          </span>
+                        </SwipeRow>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </>
           )}
           {found && (
             <>

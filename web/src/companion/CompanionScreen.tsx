@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
-import { ArrowDown, Loader2, Menu, Settings2, SlidersHorizontal, Square, Volume2, X } from "lucide-react";
+import { ArrowDown, Loader2, Menu, Search, Settings2, SlidersHorizontal, Square, Volume2, X } from "lucide-react";
 
 import { useNanobotStream, type SendAttachment } from "@/hooks/useNanobotStream";
 import { useSessionHistory } from "@/hooks/useSessions";
@@ -16,6 +16,7 @@ import {
   editAndResubmitMessage,
   fetchAllApprovals,
   fetchApprovals,
+  fetchChatContext,
   changeFeed,
   fetchComputer,
   fetchFeed,
@@ -23,16 +24,20 @@ import {
   regenerateReply,
   type ApprovalRecord,
   type ApprovalScope,
+  type ChatContextUsage,
   type CompanionChanges,
   type CompanionState,
   type ComputerStatus,
   type FeedPayload,
   type FeedPost,
+  type ModelsPayload,
   type TaughtStep,
   type RoutingDecision,
 } from "./companion-api";
 import { ApprovalCard } from "./ApprovalCard";
+import { ChatModelBar } from "./ChatModelBar";
 import { Composer } from "./Composer";
+import { clearDraft, loadDraft, saveDraft } from "./draftStore";
 import { androidShell } from "./android-shell";
 import { FollowUpChips } from "./FollowUpChips";
 import { readsAfterVoice, type MessageAction } from "./MessageActions";
@@ -131,6 +136,9 @@ export function CompanionScreen({
   jumpRequest,
   teachRequest,
   onOpenMenu,
+  onOpenPalette,
+  onSessionChanged,
+  creationsSectionRequest,
   onUpdateCompanion,
   onChangeLook,
   onTurnEnd,
@@ -165,20 +173,40 @@ export function CompanionScreen({
   /** Changes when 教它做 was asked for: open the browser, recording. */
   teachRequest: number;
   onOpenMenu: () => void;
+  /** Open the global Cmd/Ctrl+K command palette (desktop header shortcut). */
+  onOpenPalette?: () => void;
+  /** Notify parent shell when session metadata changes (e.g., per-chat model override). */
+  onSessionChanged?: () => void;
+  /** Request CreationsView to switch directly to 作品归档 or 知识库. */
+  creationsSectionRequest?: { section: "creations" | "knowledge"; at: number } | null;
   onUpdateCompanion: (changes: CompanionChanges) => Promise<void>;
   /** 换形象: to the main chat with “把虚拟形象改为” in the box. */
   onChangeLook: () => void;
   onTurnEnd: () => void;
 }) {
   const history = useSessionHistory(session.key);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(() => loadDraft(session.chatId)?.text ?? "");
+  const [quote, setQuote] = useState<string | null>(() => loadDraft(session.chatId)?.quote ?? null);
   const [localFocusAt, setLocalFocusAt] = useState<number | undefined>(undefined);
   useEffect(() => {
     if (draftRequest) setDraft(draftRequest.text);
   }, [draftRequest]);
+  useEffect(() => {
+    saveDraft(session.chatId, draft, quote);
+  }, [session.chatId, draft, quote]);
   const handleRefineDraft = useCallback(
-    (text: string) => {
+    (text: string, nextQuote?: string) => {
       setDraft(text);
+      if (nextQuote !== undefined) setQuote(nextQuote);
+      setLocalFocusAt(Date.now());
+      onTab("chat");
+    },
+    [onTab],
+  );
+  const handleQuoteToAsk = useCallback(
+    (quotedText: string, promptText?: string) => {
+      setQuote(quotedText);
+      if (promptText !== undefined) setDraft(promptText);
       setLocalFocusAt(Date.now());
       onTab("chat");
     },
@@ -205,6 +233,7 @@ export function CompanionScreen({
       key={session.key}
       ready={ready}
       historyVersion={history.version}
+      session={session}
       chatId={session.chatId}
       sessionKey={session.key}
       onReload={refresh}
@@ -223,13 +252,19 @@ export function CompanionScreen({
       teachRequest={teachRequest}
       jumpRequest={jumpRequest}
       draft={draft}
+      quote={quote}
+      onQuote={setQuote}
       focusRequest={combinedFocus > 0 ? combinedFocus : undefined}
       memoryOpenRequest={memoryOpenRequest}
       onMemoryRequestHandled={onMemoryRequestHandled}
       onForkChat={onForkChat}
       onDraft={setDraft}
       onRefineDraft={handleRefineDraft}
+      onQuoteToAsk={handleQuoteToAsk}
       onOpenMenu={onOpenMenu}
+      onOpenPalette={onOpenPalette}
+      onSessionChanged={onSessionChanged}
+      creationsSectionRequest={creationsSectionRequest}
       onUpdateCompanion={onUpdateCompanion}
       onChangeLook={onChangeLook}
       onTurnEnd={onTurnEnd}
@@ -240,6 +275,7 @@ export function CompanionScreen({
 export function LiveScreen({
   ready,
   historyVersion,
+  session,
   chatId,
   sessionKey,
   initial,
@@ -257,13 +293,19 @@ export function LiveScreen({
   teachRequest,
   jumpRequest,
   draft,
+  quote: controlledQuote,
+  onQuote: onControlledQuote,
   focusRequest,
   memoryOpenRequest,
   onMemoryRequestHandled,
   onForkChat,
   onDraft,
   onRefineDraft,
+  onQuoteToAsk,
   onOpenMenu,
+  onOpenPalette,
+  onSessionChanged,
+  creationsSectionRequest,
   onUpdateCompanion,
   onChangeLook,
   onTurnEnd,
@@ -271,6 +313,7 @@ export function LiveScreen({
 }: {
   ready: boolean;
   historyVersion: number;
+  session?: ChatSummary;
   chatId: string;
   sessionKey: string;
   initial: Parameters<typeof useNanobotStream>[1];
@@ -289,13 +332,19 @@ export function LiveScreen({
   teachRequest: number;
   jumpRequest?: { turnId: string; at: number } | null;
   draft: string;
+  quote?: string | null;
+  onQuote?: (quote: string | null) => void;
   focusRequest?: number;
   memoryOpenRequest?: number;
   onMemoryRequestHandled?: () => void;
   onForkChat?: (message: UIMessage) => Promise<void> | void;
   onDraft: (draft: string) => void;
-  onRefineDraft?: (draft: string) => void;
+  onRefineDraft?: (draft: string, quote?: string) => void;
+  onQuoteToAsk?: (quote: string, prompt?: string) => void;
   onOpenMenu: () => void;
+  onOpenPalette?: () => void;
+  onSessionChanged?: () => void;
+  creationsSectionRequest?: { section: "creations" | "knowledge"; at: number } | null;
   onUpdateCompanion: (changes: CompanionChanges) => Promise<void>;
   /** 换形象: to the main chat with “把虚拟形象改为” in the box. */
   onChangeLook: () => void;
@@ -387,20 +436,63 @@ export function LiveScreen({
     return Array.from(byId.values());
   }, [approvals, allApprovals]);
 
-  /* Which model answered each turn, when the router chose it. */
+  /* Which model answered each turn, plus presets for the per-chat quick model picker. */
   const [routes, setRoutes] = useState<ReadonlyMap<string, RoutingDecision>>(new Map());
+  const [modelsData, setModelsData] = useState<ModelsPayload | null>(null);
+  const [contextUsage, setContextUsage] = useState<ChatContextUsage | null>(null);
+  const [contextTick, setContextTick] = useState(0);
   useEffect(() => {
     if (!ready || isStreaming) return;
+    let cancelled = false;
     fetchModels(token)
-      .then((data) =>
-        setRoutes(new Map(data.decisions.filter((d) => d.turn_id).map((d) => [d.turn_id as string, d]))),
-      )
+      .then((data) => {
+        if (cancelled) return;
+        setModelsData(data);
+        setRoutes(new Map((data.decisions ?? []).filter((d) => d.turn_id).map((d) => [d.turn_id as string, d])));
+      })
       .catch(() => {
         // Without decisions replies simply show no "由 … 回答" line.
       });
+    return () => {
+      cancelled = true;
+    };
   }, [ready, isStreaming, token]);
 
   const items = useMemo(() => chatItems(messages, Date.now(), approvals), [messages, approvals]);
+  const hasConversationMessages = useMemo(
+    () => messages.some((m) => (m.role === "user" || m.role === "assistant") && m.kind !== "trace" && m.content.trim().length > 0),
+    [messages],
+  );
+  const sentHistory = useMemo(() => {
+    const out: string[] = [];
+    for (const msg of messages) {
+      if (msg.role !== "user") continue;
+      const text = parseQuotedUserMessage(msg.content).content.trim();
+      if (!text) continue;
+      if (out[out.length - 1] !== text) out.push(text);
+    }
+    return out.slice(-50);
+  }, [messages]);
+
+  useEffect(() => {
+    if (!ready || isStreaming || !hasConversationMessages) {
+      if (!hasConversationMessages) setContextUsage(null);
+      return;
+    }
+    let cancelled = false;
+    const controller = new AbortController();
+    fetchChatContext(token, chatId, controller.signal)
+      .then((usage) => {
+        if (!cancelled) setContextUsage(usage);
+      })
+      .catch(() => {
+        // Older servers without /context endpoint simply omit the meter.
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [ready, isStreaming, hasConversationMessages, token, chatId, historyVersion, contextTick]);
   // What it was last asked (a goal's page shows it working when this names the goal).
   const lastAsked = useMemo(() => [...messages].reverse().find((m) => m.role === "user")?.content ?? "", [messages]);
   const activity = currentActivity(messages, isStreaming);
@@ -601,7 +693,15 @@ export function LiveScreen({
   }, [tab]);
 
   /* Long-press a message: 引用 puts it above the box (sent with the next message), 复制, 删除. */
-  const [quote, setQuote] = useState<string | null>(null);
+  const [uncontrolledQuote, setUncontrolledQuote] = useState<string | null>(null);
+  const quote = controlledQuote !== undefined ? controlledQuote : uncontrolledQuote;
+  const setQuote = useCallback(
+    (next: string | null) => {
+      if (onControlledQuote) onControlledQuote(next);
+      else setUncontrolledQuote(next);
+    },
+    [onControlledQuote],
+  );
   const petPx = usePetScale();
   const submit = useCallback(
     (text: string, images: SendAttachment[] = [], spoken = false) => {
@@ -610,11 +710,12 @@ export function LiveScreen({
       if (send(text, images.length ? images : undefined, quote ? { quotedContext: quote } : undefined)) {
         // Asked by voice in the Android app: the answer is read out when it is done (as on iPhone).
         readNext.current = spoken && (Boolean(companion.capabilities?.tts) || !!androidShell()?.speak) && readsAfterVoice();
+        clearDraft(chatId);
         onDraft("");
         setQuote(null);
       }
     },
-    [companion.capabilities?.tts, onDraft, send, quote, setPinned],
+    [chatId, companion.capabilities?.tts, onDraft, send, quote, setPinned, setQuote],
   );
   const onMessageAction = useCallback(
     (action: MessageAction, message: UIMessage, role: "user" | "reply") => {
@@ -793,15 +894,37 @@ export function LiveScreen({
   const effectiveFocusRequest = (focusRequest ?? 0) + localFocusRequest || undefined;
 
   const refineDraft = useCallback(
-    (text: string) => {
-      if (onRefineDraft) onRefineDraft(text);
+    (text: string, nextQuote?: string) => {
+      if (onRefineDraft) onRefineDraft(text, nextQuote);
       else {
         onDraft(text);
+        if (nextQuote !== undefined) setQuote(nextQuote);
         onTab("chat");
       }
     },
-    [onDraft, onRefineDraft, onTab],
+    [onDraft, onRefineDraft, onTab, setQuote],
   );
+  const quoteToAsk = useCallback(
+    (quotedText: string, promptText?: string) => {
+      if (onQuoteToAsk) {
+        onQuoteToAsk(quotedText, promptText);
+      } else {
+        setQuote(quotedText);
+        if (promptText !== undefined) onDraft(promptText);
+        setLocalFocusRequest((n) => n + 1);
+        onTab("chat");
+      }
+    },
+    [onDraft, onQuoteToAsk, onTab, setQuote],
+  );
+  const effectiveSession: ChatSummary = session ?? {
+    key: sessionKey,
+    channel: "websocket",
+    chatId,
+    createdAt: null,
+    updatedAt: null,
+    preview: "",
+  };
 
   return (
     <ViewerProvider>
@@ -920,7 +1043,13 @@ export function LiveScreen({
                   />
                 )}
                 {key === "helpers" && <HelpersScreen active={tab === "helpers"} onOpenChat={onOpenChat} />}
-                {key === "creations" && <CreationsView active={tab === "creations"} />}
+                {key === "creations" && (
+                  <CreationsView
+                    active={tab === "creations"}
+                    sectionRequest={creationsSectionRequest}
+                    onQuoteToAsk={quoteToAsk}
+                  />
+                )}
               </LazyBoundary>
             </div>
           </div>
@@ -961,16 +1090,38 @@ export function LiveScreen({
             <Menu size={22} />
           </MuseRoundButton>
         }
-        // Settings are in the sidebar; only a page with settings of its own (动态) has a button here.
+        // Settings are in the sidebar; desktop shows the quick ⌘K palette entry beside any page button.
         trailing={
-          side ? (
-            <MuseRoundButton onClick={onEditSide} label={sideName ? "资料与设置" : "旁聊设置"}>
-              <Settings2 size={20} />
-            </MuseRoundButton>
-          ) : tab === "feed" ? (
-            <MuseRoundButton onClick={() => setFeedSettings(true)} label="动态版块说明">
-              <SlidersHorizontal size={20} />
-            </MuseRoundButton>
+          onOpenPalette || side || tab === "feed" ? (
+            <>
+              {onOpenPalette && (
+                <button
+                  type="button"
+                  onClick={onOpenPalette}
+                  aria-label="全局搜索与指令 (⌘K)"
+                  data-testid="desktop-cmdk-button"
+                  className="c-pressable hidden h-11 items-center gap-2 rounded-full bg-om-surface px-3.5 text-[13px] text-om-muted shadow-[0_1px_4px_rgba(0,0,0,0.14)] transition-transform active:scale-95 hover:text-om-fg dark:border dark:border-om-border dark:shadow-none sm:inline-flex"
+                >
+                  <Search className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>搜索</span>
+                  <kbd
+                    className="rounded-md border px-1.5 py-0.5 font-mono text-[11px] leading-none"
+                    style={{ borderColor: "var(--c-border)" }}
+                  >
+                    ⌘K
+                  </kbd>
+                </button>
+              )}
+              {side ? (
+                <MuseRoundButton onClick={onEditSide} label={sideName ? "资料与设置" : "旁聊设置"}>
+                  <Settings2 size={20} />
+                </MuseRoundButton>
+              ) : tab === "feed" ? (
+                <MuseRoundButton onClick={() => setFeedSettings(true)} label="动态版块说明">
+                  <SlidersHorizontal size={20} />
+                </MuseRoundButton>
+              ) : null}
+            </>
           ) : null
         }
         under={tab === "chat" && activeGoal ? <GoalBanner goal={activeGoal} onStop={stopGoal} /> : null}
@@ -1052,6 +1203,25 @@ export function LiveScreen({
               onClearQuote={() => setQuote(null)}
               focusRequest={effectiveFocusRequest}
               droppedFiles={droppedFiles}
+              sentHistory={sentHistory}
+              toolbar={
+                !chatApp ? (
+                  <ChatModelBar
+                    chatId={chatId}
+                    session={effectiveSession}
+                    models={modelsData}
+                    contextUsage={contextUsage}
+                    hasMessages={hasConversationMessages}
+                    streaming={isStreaming}
+                    connected={connected && ready}
+                    onModelChanged={() => {
+                      onSessionChanged?.();
+                      setContextTick((n) => n + 1);
+                    }}
+                    onCompact={() => submit("/compact")}
+                  />
+                ) : undefined
+              }
             />
           )}
           {/* Inside a conversation with a helper there is no tab bar, as in a chat app (‹ goes back). */}

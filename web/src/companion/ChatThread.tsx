@@ -1,5 +1,5 @@
-import { memo, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
-import { BellRing, Brain, ChevronDown, ChevronRight, ListChecks, Quote, Target } from "lucide-react";
+import { memo, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { BellRing, Brain, ChevronDown, ChevronRight, ChevronUp, ListChecks, ListTree, Quote, Target } from "lucide-react";
 
 import { MarkdownText } from "@/components/MarkdownText";
 import { formatQuotedUserMessage, parseQuotedUserMessage } from "@/lib/user-message-quote";
@@ -309,6 +309,41 @@ function TaskChip({ task }: { task: TurnTask }) {
   );
 }
 
+export interface MarkdownHeading {
+  level: 2 | 3;
+  text: string;
+  index: number;
+}
+
+const LONG_REPLY_CHAR_THRESHOLD = 1800;
+
+/** Extract level 2/3 headings from completed Markdown replies while ignoring fenced code blocks. */
+export function extractMarkdownHeadings(markdown: string): MarkdownHeading[] {
+  const out: MarkdownHeading[] = [];
+  let inFence: string | null = null;
+  for (const rawLine of markdown.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    const fenceMatch = /^(`{3,}|~{3,})/.exec(trimmed);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0];
+      if (!inFence) inFence = marker;
+      else if (inFence === marker) inFence = null;
+      continue;
+    }
+    if (inFence) continue;
+    const match = /^(#{2,3})\s+(.+?)\s*#*$/.exec(trimmed);
+    if (!match) continue;
+    const level = match[1].length as 2 | 3;
+    const clean = match[2]
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+      .replace(/[*_`~]/g, "")
+      .trim();
+    if (!clean) continue;
+    out.push({ level, text: clean, index: out.length });
+  }
+  return out;
+}
+
 function ReplyTurn({
   message,
   blocks,
@@ -335,10 +370,45 @@ function ReplyTurn({
   const attached = mediaOf(message);
   const media = [...attached, ...linked.filter((item) => !attached.some((own) => own.url === item.url))];
   const proactive = isProactive(message);
-  // Every reply in full: nothing folds away behind 展开.
   const visible = blocks;
+  const replyContainerRef = useRef<HTMLDivElement>(null);
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+
+  const fullText = useMemo(
+    () =>
+      visible
+        .filter((b): b is Extract<ReplyBlock, { type: "bubble" }> => b.type === "bubble")
+        .map((b) => b.text)
+        .join("\n\n"),
+    [visible],
+  );
+  const headings = useMemo(
+    () => (message.isStreaming ? [] : extractMarkdownHeadings(fullText)),
+    [fullText, message.isStreaming],
+  );
+  const hasOutline = headings.length >= 3;
+  const isLongReply = !message.isStreaming && fullText.length > LONG_REPLY_CHAR_THRESHOLD;
+  const showLongControls = !message.isStreaming && (hasOutline || isLongReply);
+
+  const jumpToHeading = (headingIndex: number) => {
+    const scrollTarget = () => {
+      const nodes = replyContainerRef.current?.querySelectorAll<HTMLElement>("h2, h3");
+      const target = nodes?.[headingIndex];
+      if (!target) return;
+      const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      target.scrollIntoView?.({ behavior: reduced ? "auto" : "smooth", block: "start" });
+    };
+    if (collapsed) {
+      setCollapsed(false);
+      window.requestAnimationFrame(scrollTarget);
+    } else {
+      scrollTarget();
+    }
+  };
+
   const body = (
-    <div className={`c-rise flex flex-col items-start gap-1 ${speaker ? "min-w-0 flex-1" : ""}`}>
+    <div ref={replyContainerRef} className={`c-rise flex flex-col items-start gap-1 ${speaker ? "min-w-0 flex-1" : ""}`}>
       {speaker ? (
         speaker.name && <span className="c-muted px-1 text-[12.5px]">{speaker.name}</span>
       ) : message.source?.kind === "helper" ? (
@@ -357,38 +427,121 @@ function ReplyTurn({
           </span>
         )
       )}
-      {visible.map((block, index) => {
-        // Cards keep their position in the full reply, so a saved answer stays attached to them.
-        const key = blocks.indexOf(block) >= 0 ? blocks.indexOf(block) : index;
-        if (block.type === "card") return <CardView key={key} card={block.card} send={send} stateKey={`${message.id}:${key}`} />;
-        if (block.type === "pending") return <CardPlaceholder key={key} kind={block.kind} />;
-        // Consecutive bubbles read as one message: tight corners where they meet, a tail on the last.
-        const joined = index > 0 && visible[index - 1].type === "bubble";
-        const streaming = Boolean(message.isStreaming && index === visible.length - 1);
-        // Chat-app style the tail is at the top, by the face.
-        const corners = speaker ? "rounded-tl-[6px]" : `rounded-bl-[6px] ${joined ? "rounded-tl-[6px]" : ""}`;
-        return (
-          <div
-            key={key}
-            data-reply-body="true"
-            className={`c-bubble-agent c-bubble-text max-w-[85%] rounded-[20px] px-4 py-2.5 ${corners} ${
-              streaming
-                ? "[&>div:first-child:not(:has(*))]:inline [&>div:first-child:has(>p:last-child)]:contents [&>div:first-child>p:has(+p:last-child)]:mb-[0.5em] [&>div:first-child>p:last-child]:inline"
-                : ""
-            }`}
-          >
-            <MarkdownText streaming={streaming}>{block.text}</MarkdownText>
-            {streaming && (
-              <span
-                aria-hidden="true"
-                data-streaming-cursor="true"
-                className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse rounded-full align-baseline motion-reduce:animate-none"
-                style={{ background: "var(--c-primary)" }}
-              />
+      {showLongControls && (
+        <div
+          data-testid="reply-outline-bar"
+          className="flex max-w-[85%] flex-col items-start gap-1.5 pb-0.5"
+        >
+          <div className="flex flex-wrap items-center gap-1.5">
+            {hasOutline && (
+              <button
+                type="button"
+                aria-expanded={outlineOpen}
+                onClick={() => setOutlineOpen((v) => !v)}
+                className="c-pressable inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-medium"
+                style={{ background: "var(--c-fill)", color: "var(--c-text)" }}
+              >
+                <ListTree className="h-3.5 w-3.5" style={{ color: "var(--c-primary)" }} aria-hidden="true" />
+                目录 ({headings.length} 节)
+                <ChevronDown
+                  className={`h-3 w-3 transition-transform ${outlineOpen ? "rotate-180" : ""}`}
+                  aria-hidden="true"
+                />
+              </button>
             )}
+            <button
+              type="button"
+              aria-expanded={!collapsed}
+              onClick={() => setCollapsed((v) => !v)}
+              className="c-muted c-pressable inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-medium"
+              style={{ background: "var(--c-fill)" }}
+            >
+              {collapsed ? (
+                <>
+                  <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                  展开全文
+                </>
+              ) : (
+                <>
+                  <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                  收起长文
+                </>
+              )}
+            </button>
           </div>
-        );
-      })}
+          {hasOutline && outlineOpen && (
+            <nav
+              aria-label="回复章节目录"
+              data-testid="reply-outline-nav"
+              className="c-card flex w-full flex-col gap-0.5 rounded-2xl px-2.5 py-2"
+            >
+              {headings.map((h) => (
+                <button
+                  key={`${h.index}-${h.text}`}
+                  type="button"
+                  onClick={() => jumpToHeading(h.index)}
+                  className={`c-pressable truncate rounded-lg px-2 py-1 text-left text-[12.5px] leading-snug hover:underline ${
+                    h.level === 3 ? "c-muted pl-5" : "font-medium"
+                  }`}
+                >
+                  {h.text}
+                </button>
+              ))}
+            </nav>
+          )}
+        </div>
+      )}
+      <div className={collapsed ? "relative max-h-[220px] w-full overflow-hidden" : "contents"}>
+        {visible.map((block, index) => {
+          // Cards keep their position in the full reply, so a saved answer stays attached to them.
+          const key = blocks.indexOf(block) >= 0 ? blocks.indexOf(block) : index;
+          if (block.type === "card") return <CardView key={key} card={block.card} send={send} stateKey={`${message.id}:${key}`} />;
+          if (block.type === "pending") return <CardPlaceholder key={key} kind={block.kind} />;
+          // Consecutive bubbles read as one message: tight corners where they meet, a tail on the last.
+          const joined = index > 0 && visible[index - 1].type === "bubble";
+          const streaming = Boolean(message.isStreaming && index === visible.length - 1);
+          // Chat-app style the tail is at the top, by the face.
+          const corners = speaker ? "rounded-tl-[6px]" : `rounded-bl-[6px] ${joined ? "rounded-tl-[6px]" : ""}`;
+          return (
+            <div
+              key={key}
+              data-reply-body="true"
+              className={`c-bubble-agent c-bubble-text max-w-[85%] rounded-[20px] px-4 py-2.5 ${corners} ${
+                streaming
+                  ? "[&>div:first-child:not(:has(*))]:inline [&>div:first-child:has(>p:last-child)]:contents [&>div:first-child>p:has(+p:last-child)]:mb-[0.5em] [&>div:first-child>p:last-child]:inline"
+                  : ""
+              }`}
+            >
+              <MarkdownText streaming={streaming}>{block.text}</MarkdownText>
+              {streaming && (
+                <span
+                  aria-hidden="true"
+                  data-streaming-cursor="true"
+                  className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse rounded-full align-baseline motion-reduce:animate-none"
+                  style={{ background: "var(--c-primary)" }}
+                />
+              )}
+            </div>
+          );
+        })}
+        {collapsed && (
+          <div
+            data-testid="reply-collapsed-fade"
+            className="pointer-events-none absolute inset-x-0 bottom-0 flex max-w-[85%] items-end justify-center pb-2 pt-12"
+            style={{ background: "linear-gradient(to top, var(--c-bg) 35%, transparent)" }}
+          >
+            <button
+              type="button"
+              onClick={() => setCollapsed(false)}
+              className="c-float c-pressable pointer-events-auto inline-flex items-center gap-1 rounded-full px-3 py-1 text-[12px] font-medium"
+              style={{ color: "var(--c-primary)" }}
+            >
+              <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+              展开全文
+            </button>
+          </div>
+        )}
+      </div>
       {media.length > 0 && <MediaCards media={media} align="start" />}
       {!message.isStreaming && message.sources && message.sources.length > 0 && <SourcesBar sources={message.sources} />}
       {task && !message.isStreaming && <TaskChip task={task} />}
