@@ -7,11 +7,17 @@ import hashlib
 import os
 import re
 import shutil
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 MAX_TTS_CHARS = 4000
+MAX_AUDIO_CACHE_FILES = 200
+TTS_PREFIX = "/api/webui/companion/tts/file"
+
+_SYNTH_LOCKS_GUARD = threading.Lock()
+_SYNTH_LOCKS: dict[str, list[Any]] = {}  # digest -> [threading.Lock, active_refcount]
 
 _MEDIA_LINE_RE = re.compile(r"^\s*MEDIA:.*$", re.MULTILINE)
 _CARD_BLOCK_RE = re.compile(r"```(?:card|ui|json)[ \t]*\n[\s\S]*?(?:\n```|$)", re.IGNORECASE)
@@ -160,70 +166,139 @@ def _friendly_error_zh(raw_error: str) -> str:
     return "语音生成失败，请稍后再试"
 
 
+def audio_cache_dir() -> Path:
+    """Return the cached TTS audio directory ``<MUSE_HOME>/cache/audio``."""
+    from muse.media._common import get_media_cache_dir
+
+    return get_media_cache_dir("audio")
+
+
+@contextlib.contextmanager
+def _digest_singleflight(digest: str):
+    """Serialize concurrent TTS synthesis requests for identical ``digest`` keys."""
+    with _SYNTH_LOCKS_GUARD:
+        slot = _SYNTH_LOCKS.get(digest)
+        if slot is None:
+            slot = [threading.Lock(), 0]
+            _SYNTH_LOCKS[digest] = slot
+        slot[1] += 1
+        lock = slot[0]
+    try:
+        with lock:
+            yield
+    finally:
+        with _SYNTH_LOCKS_GUARD:
+            slot[1] -= 1
+            if slot[1] <= 0:
+                _SYNTH_LOCKS.pop(digest, None)
+
+
+def _prune_audio_cache(cache_dir: Path, *, max_files: int = MAX_AUDIO_CACHE_FILES, keep: Optional[Path] = None) -> None:
+    """Retain at most ``max_files`` newest ``tts_*.mp3`` entries in ``cache_dir``."""
+    if max_files <= 0 or not cache_dir.is_dir():
+        return
+    entries: list[tuple[int, str, Path]] = []
+    for path in cache_dir.glob("tts_*.mp3"):
+        if path.name.startswith("."):
+            continue
+        with contextlib.suppress(OSError):
+            st = path.stat()
+            if path.is_file():
+                entries.append((st.st_mtime_ns, path.name, path))
+    if len(entries) <= max_files:
+        return
+    entries.sort(key=lambda item: (item[0], item[1]))
+    excess = len(entries) - max_files
+    keep_resolved = keep.resolve() if keep is not None else None
+    removed = 0
+    for _, _, path in entries:
+        if removed >= excess:
+            break
+        if keep_resolved is not None:
+            with contextlib.suppress(OSError):
+                if path.resolve() == keep_resolved:
+                    continue
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+            removed += 1
+
+
 def synthesize(adapter: Any, payload: dict[str, Any]) -> dict[str, Any]:
-    """Synthesize (or reuse cached) MP3 speech for `payload['text']` and return a signed media URL."""
+    """Synthesize (or reuse cached) MP3 speech for `payload['text']` and return a zero-copy signed URL."""
     if not isinstance(payload, dict):
         raise TtsError(400, "请求格式不正确")
     cleaned = clean_text_for_speech(str(payload.get("text") or ""))
     if not cleaned:
         raise TtsError(400, "没有可以朗读的文字内容")
 
-    from muse.media._common import get_media_cache_dir
     from muse.media.tts import text_to_speech
 
     provider, voice, model, speed = _resolve_provider_and_voice(payload)
     digest = _cache_key(provider, voice, cleaned, speed=speed)
-    cache_dir = get_media_cache_dir("audio")
+    cache_dir = audio_cache_dir()
     cache_path = cache_dir / f"tts_{digest}.mp3"
 
-    cached = cache_path.is_file() and cache_path.stat().st_size > 0
     used_provider = provider
-
-    if not cached:
-        tmp_path = cache_dir / f".tts_{digest[:16]}_{uuid.uuid4().hex[:8]}.mp3"
-        try:
-            res = text_to_speech(
-                cleaned,
-                voice=voice,
-                model=model,
-                speed=speed,
-                output_path=str(tmp_path),
-                provider=provider,
-            )
-            if not isinstance(res, dict) or not res.get("success"):
-                err_msg = str((res or {}).get("error") or "")
-                raise TtsError(503, _friendly_error_zh(err_msg))
-            used_provider = str(res.get("provider") or provider)
-            if tmp_path.is_file() and tmp_path.stat().st_size > 0:
-                try:
-                    os.replace(tmp_path, cache_path)
-                except PermissionError:
-                    if not (cache_path.is_file() and cache_path.stat().st_size > 0):
-                        raise
-            else:
-                alt = Path(str(res.get("file_path") or ""))
-                if not alt.is_file() or alt.stat().st_size == 0:
-                    raise TtsError(503, "语音文件生成异常，请稍后再试")
-                shutil.copyfile(alt, tmp_path)
-                try:
-                    os.replace(tmp_path, cache_path)
-                except PermissionError:
-                    if not (cache_path.is_file() and cache_path.stat().st_size > 0):
-                        raise
-        finally:
+    with _digest_singleflight(digest):
+        cached = cache_path.is_file() and cache_path.stat().st_size > 0
+        if cached:
             with contextlib.suppress(OSError):
-                tmp_path.unlink(missing_ok=True)
+                os.utime(cache_path, None)
+        else:
+            tmp_path = cache_dir / f".tts_{digest[:16]}_{uuid.uuid4().hex[:8]}.mp3"
+            try:
+                res = text_to_speech(
+                    cleaned,
+                    voice=voice,
+                    model=model,
+                    speed=speed,
+                    output_path=str(tmp_path),
+                    provider=provider,
+                )
+                if not isinstance(res, dict) or not res.get("success"):
+                    err_msg = str((res or {}).get("error") or "")
+                    raise TtsError(503, _friendly_error_zh(err_msg))
+                used_provider = str(res.get("provider") or provider)
+                if tmp_path.is_file() and tmp_path.stat().st_size > 0:
+                    try:
+                        os.replace(tmp_path, cache_path)
+                    except PermissionError:
+                        if not (cache_path.is_file() and cache_path.stat().st_size > 0):
+                            raise
+                else:
+                    alt = Path(str(res.get("file_path") or ""))
+                    if not alt.is_file() or alt.stat().st_size == 0:
+                        raise TtsError(503, "语音文件生成异常，请稍后再试")
+                    shutil.copyfile(alt, tmp_path)
+                    try:
+                        os.replace(tmp_path, cache_path)
+                    except PermissionError:
+                        if not (cache_path.is_file() and cache_path.stat().st_size > 0):
+                            raise
+                _prune_audio_cache(cache_dir, max_files=MAX_AUDIO_CACHE_FILES, keep=cache_path)
+            finally:
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink(missing_ok=True)
 
-    staged = adapter.media.stage_file(cache_path, name=f"read-aloud-{digest[:12]}.mp3")
-    if not staged or not staged.get("url"):
+    url = adapter.media.sign(TTS_PREFIX, cache_path.name)
+    if not url:
         raise TtsError(500, "签发语音地址失败，请稍后再试")
     return {
         "ok": True,
-        "url": staged["url"],
+        "url": url,
         "cached": cached,
         "provider": used_provider,
         "voice": voice,
     }
 
 
-__all__ = ["MAX_TTS_CHARS", "TtsError", "clean_text_for_speech", "synthesize", "tts_available"]
+__all__ = [
+    "MAX_AUDIO_CACHE_FILES",
+    "MAX_TTS_CHARS",
+    "TTS_PREFIX",
+    "TtsError",
+    "audio_cache_dir",
+    "clean_text_for_speech",
+    "synthesize",
+    "tts_available",
+]

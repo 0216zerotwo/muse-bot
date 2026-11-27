@@ -741,6 +741,87 @@ def apply_to_hermes(timezone: Optional[str] = None) -> bool:
     return True
 
 
+def resolve_session_override(meta: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Resolve per-chat ``model_preset`` / ``reasoning_effort`` metadata into an engine override dict."""
+    if not isinstance(meta, dict):
+        return None
+    raw_preset = meta.get("model_preset")
+    raw_effort = meta.get("reasoning_effort")
+    preset_name = str(raw_preset or "").strip()
+    effort_val = str(raw_effort or "").strip().lower() if raw_effort is not None and str(raw_effort).strip() else None
+    if effort_val is not None and effort_val not in REASONING_EFFORTS:
+        raise ValueError(f"思考强度只能是 {', '.join(REASONING_EFFORTS)} 之一")
+    if not preset_name:
+        if effort_val is None:
+            return None
+        return {
+            "preset": None,
+            "provider": None,
+            "model": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+            "vision": None,
+            "context_length": None,
+            "reasoning_effort": effort_val,
+        }
+
+    data = read_models()
+    preset = (data.get("presets") or {}).get(preset_name)
+    if not isinstance(preset, dict) or not preset.get("model"):
+        raise ValueError(f"找不到这个模型：{preset_name}")
+
+    provider = runtime_provider(preset_name, preset)
+    is_oauth = bool(preset.get("auth")) or str(provider).strip().lower() in ("openai-codex", "xai-oauth")
+    runtime: dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        from muse.llm.providers import resolve_runtime_provider
+
+        runtime = resolve_runtime_provider(
+            requested=provider,
+            target_model=preset["model"],
+            allow_oauth_refresh=False,
+        )
+        if not runtime.get("base_url") and not is_oauth and preset.get("provider"):
+            fallback_rt = resolve_runtime_provider(
+                requested=preset["provider"],
+                target_model=preset["model"],
+                allow_oauth_refresh=False,
+            )
+            if fallback_rt.get("base_url"):
+                runtime = {**fallback_rt, "provider": runtime.get("provider") or provider}
+
+    rmodels = ((data.get("router") or {}).get("models") or {}) if isinstance(data.get("router"), dict) else {}
+    raw_info = rmodels.get(preset_name) if isinstance(rmodels, dict) else None
+    vision = bool(raw_info["vision"]) if isinstance(raw_info, dict) and "vision" in raw_info else True
+    raw_ctx = preset.get("context_window_tokens") or runtime.get("context_length") or 131_072
+    context_length = int(raw_ctx) if isinstance(raw_ctx, (int, float)) and raw_ctx > 0 else 131_072
+    eff_effort = effort_val if effort_val is not None else preset.get("reasoning_effort")
+    return {
+        "preset": preset_name,
+        "provider": provider,
+        "model": str(preset["model"]),
+        "base_url": str(runtime.get("base_url") or preset.get("base_url") or ""),
+        "api_key": "" if is_oauth else str(runtime.get("api_key") or ""),
+        "api_mode": str(runtime.get("api_mode") or preset.get("api_mode") or ""),
+        "vision": vision,
+        "context_length": context_length,
+        "reasoning_effort": eff_effort,
+    }
+
+
+def resolve_sink_session_override(sink: Any, chat_id: str) -> tuple[bool, Optional[dict[str, Any]]]:
+    """Read per-chat override from ``sink.store``; returns ``(configured, override_or_none)``."""
+    store = getattr(sink, "store", None)
+    meta = store.meta(chat_id) if callable(getattr(store, "meta", None)) else {}
+    if not isinstance(meta, dict) or not (meta.get("model_preset") or meta.get("reasoning_effort")):
+        return (False, None)
+    try:
+        return (True, resolve_session_override(meta))
+    except Exception:
+        return (True, None)
+
+
 def _apply_presets(config: dict[str, Any], data: dict[str, Any]) -> None:
     services = {k: v for k, v in (config.get("providers") or {}).items() if not k.startswith(_PROVIDER_PREFIX)}
     wanted = hermes_settings(data, services)
@@ -798,8 +879,17 @@ def _apply_media(config: dict[str, Any], data: dict[str, Any]) -> None:
 # ---------- 用量 ----------
 
 
+def _zone_of(timezone: Optional[str]) -> Optional[ZoneInfo]:
+    if not timezone:
+        return None
+    try:
+        return ZoneInfo(timezone)
+    except Exception:
+        return None
+
+
 def _since(days: int, timezone: Optional[str]) -> float:
-    zone = ZoneInfo(timezone) if timezone else None
+    zone = _zone_of(timezone)
     now = datetime.now(zone) if zone else datetime.now().astimezone()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
     return start.timestamp()
@@ -838,7 +928,7 @@ def _period(rows: list[tuple], data: dict[str, Any]) -> dict[str, Any]:
         if not info or info["price_in"] is None or info["price_out"] is None:
             entry["cost"] = None
             continue
-        fresh = entry["input_tokens"] - entry["cached_tokens"]
+        fresh = max(0, entry["input_tokens"] - entry["cached_tokens"])
         cached_price = info.get("price_cached") if info.get("price_cached") is not None else info["price_in"] * CACHED_INPUT_RATE
         entry["cost"] = round(fresh / 1e6 * info["price_in"] + entry["cached_tokens"] / 1e6 * cached_price
                               + entry["output_tokens"] / 1e6 * info["price_out"], 4)
@@ -913,6 +1003,143 @@ def _media_period(since: float, data: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(rows.values(), key=lambda r: -r["count"])
 
 
+def _daily_usage_buckets(
+    raw_rows: list[tuple[Any, ...]],
+    data: dict[str, Any],
+    timezone: Optional[str],
+    *,
+    days: int = 14,
+) -> list[dict[str, Any]]:
+    from .model_catalog import vendor
+    from .model_check import cost_of
+
+    zone = _zone_of(timezone)
+    now_local = datetime.now(zone) if zone else datetime.now().astimezone()
+    tzinfo = now_local.tzinfo
+    today = now_local.date()
+    day_keys = [(today - timedelta(days=offset)).isoformat() for offset in range(days - 1, -1, -1)]
+    since_ts = datetime(
+        (today - timedelta(days=days - 1)).year,
+        (today - timedelta(days=days - 1)).month,
+        (today - timedelta(days=days - 1)).day,
+        tzinfo=tzinfo,
+    ).timestamp()
+
+    buckets: dict[str, dict[str, Any]] = {
+        key: {
+            "date": key,
+            "input_tokens": 0,
+            "cached_tokens": 0,
+            "output_tokens": 0,
+            "cost": 0.0,
+            "media_cost": 0.0,
+            "requests": 0,
+            "_has_priced": False,
+            "_has_unpriced": False,
+        }
+        for key in day_keys
+    }
+    preset_of = {p["model"]: name for name, p in data["presets"].items()}
+
+    for model, calls, tokens_in, tokens_out, cached, last_seen in raw_rows:
+        ts = float(last_seen or 0.0)
+        if ts < since_ts:
+            continue
+        day_key = datetime.fromtimestamp(ts, tz=tzinfo).date().isoformat()
+        bucket = buckets.get(day_key)
+        if bucket is None:
+            continue
+        c = int(calls or 0)
+        ti = int(tokens_in or 0)
+        to = int(tokens_out or 0)
+        tc = int(cached or 0)
+        bucket["requests"] += c
+        bucket["input_tokens"] += ti
+        bucket["cached_tokens"] += tc
+        bucket["output_tokens"] += to
+        pname = preset_of.get(model)
+        is_sub = bool(pname and (data["presets"].get(pname) or {}).get("auth"))
+        if is_sub:
+            bucket["_has_priced"] = True
+            continue
+        info = _info(data, pname) if pname else None
+        if not info or info["price_in"] is None or info["price_out"] is None:
+            if ti + to > 0:
+                bucket["_has_unpriced"] = True
+            continue
+        fresh = max(0, ti - tc)
+        cached_price = (
+            info.get("price_cached") if info.get("price_cached") is not None else info["price_in"] * CACHED_INPUT_RATE
+        )
+        bucket["cost"] += fresh / 1e6 * info["price_in"] + tc / 1e6 * cached_price + to / 1e6 * info["price_out"]
+        bucket["_has_priced"] = True
+
+    with contextlib.suppress(OSError):
+        for line in _media_log().read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(item, dict) or item.get("kind") not in MEDIA_KINDS:
+                continue
+            ts = float(item.get("t") or 0.0)
+            if ts < since_ts:
+                continue
+            day_key = datetime.fromtimestamp(ts, tz=tzinfo).date().isoformat()
+            bucket = buckets.get(day_key)
+            if bucket is None:
+                continue
+            name = str(item.get("name") or "")
+            entry = data["media"][item["kind"]]["models"].get(name) or {}
+            subscription = bool((vendor(entry.get("vendor") or "") or {}).get("login"))
+            count = int(item.get("count") or 1)
+            mc = (
+                0.0
+                if subscription
+                else cost_of(
+                    entry.get("price"),
+                    count=count,
+                    seconds=item.get("seconds"),
+                    resolution=item.get("resolution") or "",
+                )
+            )
+            if mc is not None:
+                bucket["media_cost"] += mc
+
+    daily: list[dict[str, Any]] = []
+    for key in day_keys:
+        b = buckets[key]
+        has_priced = bool(b.pop("_has_priced"))
+        has_unpriced = bool(b.pop("_has_unpriced"))
+        media_cost = round(float(b["media_cost"]), 4)
+        b["media_cost"] = media_cost
+        if has_unpriced and not has_priced and media_cost == 0.0:
+            b["cost"] = None
+        else:
+            b["cost"] = round(float(b["cost"]) + media_cost, 4)
+        daily.append(b)
+    return daily
+
+
+def _cache_savings(week_period: dict[str, Any], data: dict[str, Any]) -> tuple[float, float]:
+    week_in = int(week_period.get("input_tokens") or 0)
+    week_cached = int(week_period.get("cached_tokens") or 0)
+    hit_rate = round(min(1.0, max(0.0, week_cached / week_in)), 4) if week_in > 0 else 0.0
+    saved = 0.0
+    for entry in week_period.get("by_model") or ():
+        if entry.get("subscription"):
+            continue
+        pname = entry.get("preset")
+        info = _info(data, pname) if pname else None
+        if not info or info["price_in"] is None:
+            continue
+        cached_price = (
+            info.get("price_cached") if info.get("price_cached") is not None else info["price_in"] * CACHED_INPUT_RATE
+        )
+        saved += int(entry.get("cached_tokens") or 0) / 1e6 * max(0.0, info["price_in"] - cached_price)
+    return hit_rate, round(saved, 4)
+
+
 def usage_summary(timezone: Optional[str] = None) -> dict[str, Any]:
     from muse.db import sync_from_legacy_state_db
     from muse.paths import get_muse_db_path
@@ -920,7 +1147,9 @@ def usage_summary(timezone: Optional[str] = None) -> dict[str, Any]:
 
     data = read_models()
     periods = {label: _since(days, timezone) for label, days in (("today", 1), ("week", 7))}
+    since_14d = _since(14, timezone)
     fetched: dict[str, list[tuple]] = {label: [] for label in periods}
+    daily_rows: list[tuple[Any, ...]] = []
     try:
         sync_from_legacy_state_db()
         muse_path = get_muse_db_path()
@@ -928,15 +1157,32 @@ def usage_summary(timezone: Optional[str] = None) -> dict[str, Any]:
             with use_shared_db(db_path=muse_path) as db:
                 for label, since in periods.items():
                     fetched[label] = db.query_usage_since(since)
+                with db._lock:
+                    daily_rows = [
+                        tuple(r)
+                        for r in db._require_conn()
+                        .execute(
+                            "SELECT model, api_call_count, "
+                            "input_tokens + cache_read_tokens + cache_write_tokens, "
+                            "output_tokens, cache_read_tokens, last_seen "
+                            "FROM session_model_usage WHERE last_seen >= ?",
+                            (float(since_14d),),
+                        )
+                        .fetchall()
+                    ]
     except (sqlite3.Error, OSError, ValueError) as exc:
         logger.debug("companion: could not read usage from muse.db (%s)", type(exc).__name__)
-    result = {}
+    result: dict[str, Any] = {}
     for label, since in periods.items():
         period = _period(fetched[label], data)
         period["media"] = _media_period(since, data)
         costs = [c for c in [period["cost"], *(r["cost"] for r in period["media"])] if c is not None]
         period["cost"] = round(sum(costs), 4) if costs else None
         result[label] = period
+    hit_rate, saved_cost = _cache_savings(result["week"], data)
+    result["daily"] = _daily_usage_buckets(daily_rows, data, timezone, days=14)
+    result["cache_hit_rate"] = hit_rate
+    result["cache_saved_cost"] = saved_cost
     return result
 
 

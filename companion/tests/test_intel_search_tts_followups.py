@@ -184,7 +184,7 @@ class TtsApiTest(unittest.TestCase):
         self.assertLessEqual(len(long_clean), 4000)
 
     def test_tts_available_and_synthesize_caching_and_errors(self) -> None:
-        from companion.media import MediaStore
+        from companion.media import MediaStore, child_file
 
         with tempfile.TemporaryDirectory() as tmp, muse_home_override(tmp):
             adapter = SimpleNamespace(media=MediaStore(Path(tmp) / "companion"))
@@ -221,16 +221,20 @@ class TtsApiTest(unittest.TestCase):
                 self.assertTrue(first["ok"])
                 self.assertFalse(first["cached"])
                 self.assertEqual(first["provider"], "edge")
-                self.assertTrue(first["url"].startswith("/api/media/"))
+                self.assertTrue(first["url"].startswith(self.tts_api.TTS_PREFIX + "/"))
                 self.assertEqual(len(calls), 1)
+                self.assertFalse(adapter.media.root.exists())
 
                 # Cache file created under <MUSE_HOME>/cache/audio/tts_<hash>.mp3
                 audio_files = list((Path(tmp) / "cache" / "audio").glob("tts_*.mp3"))
                 self.assertEqual(len(audio_files), 1)
                 self.assertEqual(audio_files[0].read_bytes(), b"ID3-FAKE-MP3-AUDIO-DATA")
 
-                # Signed URL resolves through MediaStore
-                resolved = adapter.media.path_of({"url": first["url"]})
+                # Signed URL verifies under TTS_PREFIX and resolves inside audio_cache_dir() (zero-copy)
+                sig, payload = first["url"].rsplit("/", 2)[-2:]
+                rel = adapter.media.verify(self.tts_api.TTS_PREFIX, sig, payload)
+                self.assertIsNotNone(rel)
+                resolved = child_file(self.tts_api.audio_cache_dir(), rel)
                 self.assertIsNotNone(resolved)
                 self.assertEqual(Path(resolved).read_bytes(), b"ID3-FAKE-MP3-AUDIO-DATA")
 

@@ -26,7 +26,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from .modules import chat_branch
 from .modules import chat_export as chat_export_module
 from .modules import chat_search as chat_search_module
-from .modules import automations, avatars, companion_state, computer, connections, creations, feed, followups, helpers, ideas, knowledge, memory, memory_learn, model_catalog, models, oauth_login, permissions, plans, push, routines, skills_page, stt_sensevoice, triggers, tts_api, vault, widgets
+from .modules import automations, avatars, chat_context, companion_state, computer, connections, creations, feed, followups, helpers, ideas, knowledge, memory, memory_learn, model_catalog, models, oauth_login, permissions, plans, push, routines, skills_page, stt_sensevoice, triggers, tts_api, vault, widgets
 from .approvals import SCOPES as APPROVAL_SCOPES
 from .media import child_file
 from .store import chat_id_of
@@ -497,6 +497,7 @@ async def _creations_hide(adapter: "CompanionAdapter", payload: dict[str, Any]) 
 
 
 async def _creations_save(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
+    creation_id = str(payload.get("id") or "").strip() or None
     title = str(payload.get("title") or "").strip()
     content = payload.get("content")
     fmt = str(payload.get("fmt") or payload.get("format") or "md").strip() or "md"
@@ -512,15 +513,26 @@ async def _creations_save(adapter: "CompanionAdapter", payload: dict[str, Any]) 
             content=content,
             fmt=fmt,
             prompt=prompt,
+            creation_id=creation_id,
         )
     except ValueError as exc:
-        raise ApiError(400, str(exc)) from None
-    return {**(await asyncio.to_thread(_creations, adapter)), "saved_id": rel}
+        msg = str(exc)
+        raise ApiError(404 if "找不到" in msg else 400, msg) from None
+    return {**(await asyncio.to_thread(_creations, adapter)), "saved_id": rel, "updated": bool(creation_id)}
 
 
 async def _knowledge_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
     action = payload.get("action")
     list_collection = str(payload.get("list_collection") or "").strip() or None
+    if action == "read":
+        doc_id = str(payload.get("id") or payload.get("doc_id") or "").strip()
+        if not doc_id:
+            raise ApiError(400, "缺少文档 ID")
+        try:
+            return await asyncio.to_thread(knowledge.get_document, doc_id)
+        except ValueError as exc:
+            msg = str(exc)
+            raise ApiError(404 if "找不到" in msg else 400, msg) from None
     if action == "delete":
         doc_id = str(payload.get("id") or "").strip()
         if not doc_id:
@@ -554,8 +566,14 @@ async def _knowledge_change(adapter: "CompanionAdapter", payload: dict[str, Any]
         if not creation_id:
             raise ApiError(400, "缺少作品 ID")
         collection = str(payload.get("collection") or "").strip() or knowledge.DEFAULT_COLLECTION
+        replace_existing = payload.get("replace_existing", True) is not False
         try:
-            added = await asyncio.to_thread(knowledge.import_from_creation, creation_id, collection=collection)
+            added = await asyncio.to_thread(
+                knowledge.import_from_creation,
+                creation_id,
+                collection=collection,
+                replace_existing=replace_existing,
+            )
         except ValueError as exc:
             msg = str(exc)
             raise ApiError(404 if "找不到" in msg else 400, msg) from None
@@ -817,15 +835,40 @@ async def _feed_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -> 
 
 
 async def _chats_change(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
-    """A side chat (旁聊): rename or delete it (the main chat is neither); or, in any chat, fork,
-    edit & resubmit a user message, regenerate the last answer, or delete one message."""
+    """Manage chats: pin/archive/prune/rename/delete side chats, set per-chat model, fork, edit, regenerate, or delete messages."""
     chat_id, action = str(payload.get("id") or ""), payload.get("action")
-    if action == "delete" and chat_id and not adapter.store.exists(chat_id):
-        return {"sessions": adapter.store.list()}  # already gone (deleted on another device, say)
-    if action not in {"rename", "delete", "delete_message", "regenerate", "fork", "edit_message"} or not chat_id:
+    if action == "prune_empty":
+        protected: set[str] = set(getattr(adapter, "_turns", {}).keys())
+        main_id = companion_state.read_companion_state().get("chat_id")
+        if main_id:
+            protected.add(str(main_id))
+        engine = getattr(adapter, "engine", None) or getattr(adapter, "_engine", None)
+        actors = getattr(engine, "_actors", None) if engine is not None else None
+        if isinstance(actors, dict):
+            for cid, actor in actors.items():
+                if getattr(actor, "active_turn_id", None) is not None or getattr(actor, "_phase", "idle") != "idle":
+                    protected.add(str(cid))
+        with contextlib.suppress(Exception):
+            for h in await asyncio.to_thread(helpers.all_helpers):
+                if h.get("chat_id"):
+                    protected.add(str(h["chat_id"]))
+        removed = await asyncio.to_thread(adapter.store.prune_empty, protected)
+        del_chat_fn = getattr(adapter, "delete_chat", None) or getattr(engine, "delete_chat", None)
+        for cid in removed:
+            followups.invalidate_followups(cid)
+            if callable(del_chat_fn):
+                await del_chat_fn(cid)
+        return {"sessions": await asyncio.to_thread(adapter.store.list), "removed_count": len(removed)}
+
+    if action == "delete" and chat_id and not await asyncio.to_thread(adapter.store.exists, chat_id):
+        return {"sessions": await asyncio.to_thread(adapter.store.list)}  # already gone (deleted on another device, say)
+    valid_actions = {
+        "rename", "delete", "delete_message", "regenerate", "fork", "edit_message", "set_model", "pin", "archive",
+    }
+    if action not in valid_actions or not chat_id:
         raise ApiError(400, "找不到这个对话，或操作类型不正确")
-    if not adapter.store.exists(chat_id):
-        status = 404 if action in {"fork", "edit_message"} else 400
+    if not await asyncio.to_thread(adapter.store.exists, chat_id):
+        status = 404 if action in {"fork", "edit_message", "delete_message", "set_model", "pin", "archive"} else 400
         raise ApiError(status, "找不到这个对话" if status == 404 else "找不到这个对话，或操作类型不正确")
     if action == "fork":
         turn_id = str(payload.get("turn_id") or payload.get("up_to_turn_id") or "").strip() or None
@@ -837,12 +880,14 @@ async def _chats_change(adapter: "CompanionAdapter", payload: dict[str, Any]) ->
     if action == "edit_message":
         raw_content = payload.get("content") if "content" in payload else payload.get("text")
         try:
-            return await chat_branch.edit_and_resubmit(
+            result = await chat_branch.edit_and_resubmit(
                 adapter,
                 chat_id,
                 turn_id=str(payload.get("turn_id") or ""),
                 content=str(raw_content or ""),
             )
+            followups.invalidate_followups(chat_id)
+            return result
         except chat_branch.ChatBusyError as exc:
             raise ApiError(409, str(exc)) from None
         except ValueError as exc:
@@ -852,30 +897,83 @@ async def _chats_change(adapter: "CompanionAdapter", payload: dict[str, Any]) ->
             await adapter.regenerate(chat_id, str(payload.get("turn_id") or ""))
         except ValueError as exc:
             raise ApiError(409, str(exc)) from None
-        return {"sessions": adapter.store.list()}
+        followups.invalidate_followups(chat_id)
+        return {"sessions": await asyncio.to_thread(adapter.store.list)}
     if action == "delete_message":
-        turn_id, role = str(payload.get("turn_id") or ""), payload.get("role")
-        if not turn_id or role not in ("user", "reply"):
-            raise ApiError(400, "缺少消息标识或消息角色不正确")
-        await asyncio.to_thread(adapter.store.remove_events, chat_id, lambda e: e.get("turn_id") == turn_id and (
-            (e.get("event") == "user_message") == (role == "user")) and e.get("event") != "turn_end")
-        del_turn_fn = getattr(adapter, "delete_turn", None) or getattr(getattr(adapter, "engine", None), "delete_turn", None)
-        if callable(del_turn_fn):
-            await del_turn_fn(chat_id, turn_id, role=role)
-        return {"sessions": adapter.store.list()}
+        try:
+            result = await chat_branch.delete_message(
+                adapter,
+                chat_id,
+                turn_id=str(payload.get("turn_id") or ""),
+                role=str(payload.get("role") or ""),
+            )
+        except chat_branch.ChatBusyError as exc:
+            raise ApiError(409, str(exc)) from None
+        except ValueError as exc:
+            raise ApiError(getattr(exc, "status", 400), str(exc)) from None
+        followups.invalidate_followups(chat_id)
+        return result
+    if action == "set_model":
+        raw_preset = payload.get("model_preset")
+        raw_effort = payload.get("reasoning_effort")
+        if raw_preset is not None and not isinstance(raw_preset, str):
+            raise ApiError(400, "模型预设格式不正确")
+        if raw_effort is not None and not isinstance(raw_effort, str):
+            raise ApiError(400, "思考强度格式不正确")
+        preset_val = raw_preset.strip() or None if isinstance(raw_preset, str) else None
+        effort_val = raw_effort.strip().lower() or None if isinstance(raw_effort, str) else None
+        try:
+            override = await asyncio.to_thread(
+                models.resolve_session_override,
+                {"model_preset": preset_val, "reasoning_effort": effort_val},
+            )
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from None
+        await asyncio.to_thread(
+            adapter.store.set_model_override,
+            chat_id,
+            model_preset=preset_val,
+            reasoning_effort=effort_val,
+        )
+        engine = getattr(adapter, "engine", None) or getattr(adapter, "_engine", None)
+        set_ov_fn = getattr(engine, "set_session_model_override", None)
+        if callable(set_ov_fn):
+            set_ov_fn(chat_id, override)
+        return {
+            "sessions": await asyncio.to_thread(adapter.store.list),
+            "chat_id": chat_id,
+            "model_preset": preset_val,
+            "reasoning_effort": effort_val,
+        }
+    if action == "pin":
+        pinned = payload.get("pinned")
+        if pinned is not None and not isinstance(pinned, bool):
+            raise ApiError(400, "置顶状态格式不正确")
+        await asyncio.to_thread(adapter.store.set_pinned, chat_id, pinned)
+        return {"sessions": await asyncio.to_thread(adapter.store.list, include_archived=True)}
+
     if chat_id == companion_state.read_companion_state().get("chat_id"):
-        raise ApiError(409, "主要聊天不能改名或删除")
-    if action == "rename":
+        raise ApiError(409, "主要聊天不能改名、归档或删除")
+    if action == "archive":
+        archived = payload.get("archived")
+        if archived is not None and not isinstance(archived, bool):
+            raise ApiError(400, "归档状态格式不正确")
+        await asyncio.to_thread(adapter.store.set_archived, chat_id, archived)
+    elif action == "rename":
         title = str(payload.get("title") or "").strip()
         if not title:
             raise ApiError(400, "名字不能为空")
-        adapter.store.set_title(chat_id, title)
+        await asyncio.to_thread(adapter.store.set_title, chat_id, title)
     else:
-        adapter.store.delete(chat_id)
+        await asyncio.to_thread(adapter.store.delete, chat_id)
+        followups.invalidate_followups(chat_id)
         del_chat_fn = getattr(adapter, "delete_chat", None) or getattr(getattr(adapter, "engine", None), "delete_chat", None)
         if callable(del_chat_fn):
             await del_chat_fn(chat_id)
-    return {"sessions": adapter.store.list()}
+    return {"sessions": await asyncio.to_thread(adapter.store.list)}
+
+
+TTS_PREFIX = tts_api.TTS_PREFIX
 
 
 async def _oauth_start(adapter: "CompanionAdapter", payload: dict[str, Any]) -> Any:
@@ -1088,19 +1186,25 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
     async def sessions(request: Request) -> Response:
         if not authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return JSONResponse({"sessions": adapter.store.list()}, headers=NO_STORE)
+        raw_inc = request.query_params.get("include_archived")
+        include_archived = True if raw_inc is None else raw_inc.strip().lower() not in ("0", "false", "no")
+        query = request.query_params.get("q") or ""
+        rows = await asyncio.to_thread(adapter.store.list, include_archived=include_archived, query=query)
+        return JSONResponse({"sessions": rows}, headers=NO_STORE)
 
     async def thread(request: Request) -> Response:
         if not authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         chat_id = chat_id_of(request.path_params["key"])
-        if not chat_id or not adapter.store.exists(chat_id):
+        if not chat_id or not await asyncio.to_thread(adapter.store.exists, chat_id):
             return JSONResponse({"error": "not found"}, status_code=404)
         # A phone keeping the chat itself asks only for what came after its copy (known/last).
         def number(name: str) -> Optional[int]:
             value = request.query_params.get(name, "")
             return int(value) if value.isdigit() else None
-        payload = adapter.store.thread_payload(chat_id, known=number("known"), last=number("last"))
+        payload = await asyncio.to_thread(
+            adapter.store.thread_payload, chat_id, known=number("known"), last=number("last")
+        )
         # Whether a turn is running right now, from the gateway itself: a turn cut off by a restart
         # never gets its turn_end in the log, and an app that missed the turn_end (asleep, offline)
         # must not keep showing it at work.
@@ -1140,10 +1244,19 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
         if not authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401, headers=NO_STORE)
         chat_id = chat_id_of(request.path_params["key"])
-        if not chat_id or not adapter.store.exists(chat_id):
+        if not chat_id or not await asyncio.to_thread(adapter.store.exists, chat_id):
             return JSONResponse({"error": "not found"}, status_code=404, headers=NO_STORE)
         turn_id = (request.query_params.get("turn_id") or "").strip() or None
         payload = await followups.get_followups(adapter.store, chat_id, turn_id=turn_id)
+        return JSONResponse(payload, headers=NO_STORE)
+
+    async def session_context(request: Request) -> Response:
+        if not authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401, headers=NO_STORE)
+        chat_id = chat_id_of(request.path_params["key"])
+        if not chat_id or not await asyncio.to_thread(adapter.store.exists, chat_id):
+            return JSONResponse({"error": "not found"}, status_code=404, headers=NO_STORE)
+        payload = await asyncio.to_thread(chat_context.get_session_context, adapter, chat_id)
         return JSONResponse(payload, headers=NO_STORE)
 
     async def companion(request: Request) -> Response:
@@ -1213,6 +1326,17 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
             logger.exception("companion: tts synthesize failed")
             return JSONResponse({"ok": False, "error": "语音生成失败，请稍后再试"}, status_code=500, headers=NO_STORE)
         return JSONResponse(result, headers=NO_STORE)
+
+    async def tts_file(request: Request) -> Response:
+        rel = adapter.media.verify(TTS_PREFIX, request.path_params["sig"], request.path_params["payload"])
+        path = child_file(tts_api.audio_cache_dir(), rel) if rel else None
+        if path is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(
+            path,
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "private, max-age=31536000, immutable"},
+        )
 
     async def automation_run(request: Request) -> Response:
         """One scheduled run's report (运行记录 → a run)."""
@@ -1481,10 +1605,12 @@ def build_app(adapter: "CompanionAdapter") -> "_Compressed":
         Route("/api/sessions/{key}/webui-thread", thread),
         Route("/api/sessions/{key}/export", session_export),
         Route("/api/sessions/{key}/followups", session_followups),
+        Route("/api/sessions/{key}/context", session_context),
         Route("/api/webui/companion", companion),
         Route("/api/webui/approvals", approvals),
         Route("/api/webui/companion/search", chat_search),
         Route("/api/webui/companion/tts", tts_synthesize, methods=["POST"]),
+        Route(TTS_PREFIX + "/{sig}/{payload}", tts_file),
         Route("/api/webui/approvals/grants", guarded(lambda: _grants(adapter))),
         Route("/api/webui/companion/models", guarded(models.models_payload)),
         Route("/api/webui/companion/model-catalog", guarded(lambda: model_catalog.catalog_payload(models.saved_key_urls()))),
@@ -1539,7 +1665,11 @@ class _Compressed:
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         path = scope.get("path", "") if scope.get("type") == "http" else ""
-        text = path == "/" or path.endswith(self._TEXT) or (path.startswith("/api/") and not path.startswith("/api/media/"))
+        text = (
+            path == "/"
+            or path.endswith(self._TEXT)
+            or (path.startswith("/api/") and not path.startswith(("/api/media/", TTS_PREFIX + "/")))
+        )
         await (self.gzip if text else self.app)(scope, receive, send)
 
 
