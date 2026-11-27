@@ -149,6 +149,7 @@ def import_file(source: Path, *, key: str, title: str, origin: str, prompt: Opti
     if is_secret_path(source):
         return None
     root = creations_root()
+    root_resolved = root.resolve()
     with _LOCK:
         data = _read_index(root)
         if key in data["imported"]:
@@ -160,7 +161,7 @@ def import_file(source: Path, *, key: str, title: str, origin: str, prompt: Opti
             shutil.move(str(source), target)
         else:
             shutil.copy2(source, target)
-        rel = target.relative_to(root).as_posix()
+        rel = target.resolve().relative_to(root_resolved).as_posix()
         data["imported"][key] = rel
         data["entries"][rel] = {
             "title": title, "origin": origin, "prompt": prompt,
@@ -213,13 +214,14 @@ def save_artifact(
             if root_resolved not in target.parents or not target.is_file():
                 raise ValueError("找不到要更新的作品")
 
+            rel = target.relative_to(root_resolved).as_posix()
             old_bytes = target.read_bytes()
             history_dir = root / ".history"
             history_dir.mkdir(parents=True, exist_ok=True)
             backup_name = f"{uuid.uuid4().hex[:12]}{target.suffix}"
             atomic_write_bytes(history_dir / backup_name, old_bytes)
 
-            entry = dict(data["entries"].get(cid) or {})
+            entry = dict(data["entries"].get(rel) or data["entries"].get(cid) or {})
             versions = list(entry.get("versions") or [])
             versions.append({
                 "backup": backup_name,
@@ -237,7 +239,6 @@ def save_artifact(
                             (history_dir / Path(old_bak).name).unlink(missing_ok=True)
 
             atomic_write_text(target, clean_content)
-            rel = target.relative_to(root).as_posix()
             data["entries"][rel] = {
                 "title": clean_title if str(title or "").strip() else (entry.get("title") or clean_title),
                 "origin": entry.get("origin") or "canvas",
@@ -250,10 +251,11 @@ def save_artifact(
             return rel
 
         target = _place(root, kind, clean_title, suffix)
-        if root_resolved not in target.resolve().parents:
+        target_resolved = target.resolve()
+        if root_resolved not in target_resolved.parents:
             raise ValueError("保存路径不合法")
         atomic_write_text(target, clean_content)
-        rel = target.relative_to(root).as_posix()
+        rel = target.resolve().relative_to(root_resolved).as_posix()
         data["entries"][rel] = {
             "title": clean_title,
             "origin": "canvas",
@@ -267,12 +269,14 @@ def save_artifact(
 def hide_creation(creation_id: str) -> None:
     """Take a file off the 创意 list; the file itself stays on disk."""
     root = creations_root()
+    root_resolved = root.resolve()
     path = (root / creation_id).resolve()
-    if root.resolve() not in path.parents or not path.is_file():
+    if root_resolved not in path.parents or not path.is_file():
         raise ValueError("找不到这个作品")
+    rel = path.relative_to(root_resolved).as_posix()
     with _LOCK:
         data = _read_index(root)
-        data["entries"].setdefault(creation_id, {})["hidden"] = True
+        data["entries"].setdefault(rel, {})["hidden"] = True
         _write_index(root, data)
 
 
@@ -471,6 +475,7 @@ def thumbnail(path: Path) -> Path:
 def list_creations(sign: Callable[[str], str]) -> dict[str, Any]:
     """Everything filed under 创意 (newest first) with counts per kind; hidden files left out."""
     root = creations_root()
+    root_resolved = root.resolve()
     items: list[dict[str, Any]] = []
     with _LOCK:
         entries = _read_index(root)["entries"]
@@ -481,7 +486,7 @@ def list_creations(sign: Callable[[str], str]) -> dict[str, Any]:
             for path in directory.iterdir():
                 if not path.is_file() or path.name.startswith("."):
                     continue
-                rel = path.relative_to(root).as_posix()
+                rel = path.resolve().relative_to(root_resolved).as_posix()
                 meta = entries.get(rel, {})
                 if meta.get("hidden"):
                     continue

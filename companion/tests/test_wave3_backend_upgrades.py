@@ -813,6 +813,50 @@ class PinArchiveCreationsKnowledgeUsageContextTest(unittest.TestCase):
             self.assertGreater(ctx["estimated_tokens"], 0)
             self.assertGreater(ctx["usage_ratio"], 0.0)
 
+    def test_creations_short_path_and_unresolved_root_regression(self) -> None:
+        """Verify creations save/update/list/hide/kb-import work when MUSE_HOME uses 8.3 short paths or symlinks."""
+        import ctypes
+        import sys
+
+        real_dir = self.home / "w3-long-name-83-regression-root"
+        real_dir.mkdir(parents=True, exist_ok=True)
+        alias_dir: Path | None = None
+        if sys.platform == "win32":
+            buf = ctypes.create_unicode_buffer(1024)
+            n = ctypes.windll.kernel32.GetShortPathNameW(str(real_dir), buf, len(buf))
+            if n and buf.value:
+                cand = Path(buf.value)
+                if cand != cand.resolve():
+                    alias_dir = cand
+        if alias_dir is None:
+            link_dir = self.home / "w3-symlink-root"
+            try:
+                os.symlink(real_dir, link_dir, target_is_directory=True)
+                alias_dir = link_dir
+            except OSError:
+                alias_dir = None
+
+        if alias_dir is None:
+            self.skipTest("Neither Windows 8.3 short paths nor symlinks available on this volume")
+
+        with muse_home_override(alias_dir):
+            try:
+                rel = self.creations_mod.save_artifact(title="短路径测试", content="# V1", fmt="md")
+                rel_updated = self.creations_mod.save_artifact(
+                    title="短路径测试", content="# V2", fmt="md", creation_id=rel,
+                )
+                self.assertEqual(rel_updated, rel)
+                listed = self.creations_mod.list_creations(lambda r: f"/s/{r}")
+                self.assertTrue(any(it["id"] == rel for it in listed["items"]))
+                doc = self.knowledge_mod.import_from_creation(rel, collection="默认")
+                self.assertEqual(doc["source_ref"], f"creation:{rel}")
+                self.creations_mod.hide_creation(rel)
+                listed_after = self.creations_mod.list_creations(lambda r: f"/s/{r}")
+                self.assertFalse(any(it["id"] == rel for it in listed_after["items"]))
+            finally:
+                close_all_shared_dbs()
+                close_all()
+
 
 if __name__ == "__main__":
     unittest.main()

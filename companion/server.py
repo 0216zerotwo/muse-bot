@@ -605,10 +605,10 @@ AVATARS_PREFIX = "/api/webui/companion/avatars/file"
 
 
 def _avatars(adapter: "CompanionAdapter", created: Any = None) -> Any:
-    root = avatars.avatars_root()
+    root = avatars.avatars_root().resolve()
 
     def sign(path: Any) -> Any:
-        return adapter.media.sign(AVATARS_PREFIX, path.relative_to(root).as_posix())
+        return adapter.media.sign(AVATARS_PREFIX, path.resolve().relative_to(root).as_posix())
 
     listing = avatars.list_avatars(sign)
     if created is not None:
