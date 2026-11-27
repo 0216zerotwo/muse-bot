@@ -236,8 +236,9 @@ struct ChatSessionControlsSheet: View {
     }
 
     private func syncFromStore() {
-        selectedPreset = summary?.modelPreset ?? ""
-        selectedEffort = summary?.reasoningEffort ?? "default"
+        let resolved = Self.resolvedControlsSelection(summary: summary, status: contextStatus)
+        selectedPreset = resolved.preset
+        selectedEffort = resolved.effort
     }
 
     private func loadInitialData() async {
@@ -253,14 +254,33 @@ struct ChatSessionControlsSheet: View {
         contextError = nil
         defer { loadingContext = false }
         do {
+            async let refreshSessionsTask: Void = store.refreshSessions()
             let status = try await store.fetchChatContext(chatId: chatID)
+            _ = await refreshSessionsTask
             contextStatus = status
-            if let preset = status.modelPreset { selectedPreset = preset }
-            if let effort = status.reasoningEffort { selectedEffort = effort }
+            if !savingModel {
+                let resolved = Self.resolvedControlsSelection(summary: summary, status: status)
+                selectedPreset = resolved.preset
+                selectedEffort = resolved.effort
+            }
         } catch is CancellationError { }
         catch {
             contextError = error.localizedDescription
         }
+    }
+
+    /// Derive picker values from authoritative session overrides without letting preset default effort from `/context` leak as an override.
+    nonisolated static func resolvedControlsSelection(summary: ChatSummary?, status: ChatContextStatus?) -> (preset: String, effort: String) {
+        let preset = summary?.modelPreset ?? status?.modelPreset ?? ""
+        let effort: String
+        if let summary {
+            effort = summary.reasoningEffort ?? "default"
+        } else if status?.modelPreset == nil {
+            effort = status?.reasoningEffort ?? "default"
+        } else {
+            effort = "default"
+        }
+        return (preset, effort)
     }
 
     private func applyModelChange(fallbackPreset: String, fallbackEffort: String) async {

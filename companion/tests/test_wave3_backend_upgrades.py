@@ -707,6 +707,16 @@ class PinArchiveCreationsKnowledgeUsageContextTest(unittest.TestCase):
                 self.assertFalse(bad_upd["ok"])
                 self.assertEqual(bad_upd["error"]["status"], 404)
 
+                # In-place update with empty title must preserve existing title instead of reverting to 画布作品
+                keep_title = _ws_mutation(
+                    ws, "companion.creations.save",
+                    {"id": saved_id, "title": "", "content": "# V14\n\n新版关键词BetaVersion14。", "format": "md"},
+                    "cr-keep-title",
+                )
+                self.assertTrue(keep_title["ok"], keep_title)
+                saved_item = next(it for it in keep_title["result"]["items"] if it["id"] == saved_id)
+                self.assertEqual(saved_item["title"], "架构说明")
+
                 # 4) Re-import updated creation into same collection -> replaces stale AlphaVersion chunks cleanly!
                 imp2 = _ws_mutation(
                     ws, "companion.knowledge.change",
@@ -715,9 +725,34 @@ class PinArchiveCreationsKnowledgeUsageContextTest(unittest.TestCase):
                 )
                 self.assertTrue(imp2["ok"], imp2)
                 self.assertEqual(self.knowledge_mod.search_knowledge("AlphaVersion", collection="架构"), [])
-                beta_hits = self.knowledge_mod.search_knowledge("BetaVersion13", collection="架构")
+                beta_hits = self.knowledge_mod.search_knowledge("BetaVersion14", collection="架构")
                 self.assertEqual(len(beta_hits), 1)
                 self.assertEqual(self.knowledge_mod.list_knowledge(collection="架构")["stats"]["doc_count"], 1)
+
+                # 5) Mermaid (.mmd/.mermaid) creations and uploads can be imported & read cleanly in knowledge vault
+                mmd_save = _ws_mutation(
+                    ws, "companion.creations.save",
+                    {"title": "调用链流程图", "content": "flowchart TD\n  GatewayNode-->MuseEngineNode", "format": "mermaid"},
+                    "cr-mmd",
+                )
+                self.assertTrue(mmd_save["ok"], mmd_save)
+                mmd_id = mmd_save["result"]["saved_id"]
+                self.assertTrue(mmd_id.endswith(".mmd"))
+                mmd_imp = _ws_mutation(
+                    ws, "companion.knowledge.change",
+                    {"action": "import_creation", "creation_id": mmd_id, "collection": "架构"},
+                    "kb-imp-mmd",
+                )
+                self.assertTrue(mmd_imp["ok"], mmd_imp)
+                mmd_doc_id = mmd_imp["result"]["added"]["id"]
+                mmd_read = _ws_mutation(ws, "companion.knowledge.change", {"action": "read", "id": mmd_doc_id}, "kb-read-mmd")
+                self.assertTrue(mmd_read["ok"], mmd_read)
+                self.assertIn("MuseEngineNode", mmd_read["result"]["chunks"][0]["content"])
+                direct_mermaid = self.knowledge_mod.ingest_bytes(
+                    "pipeline.mermaid", b"sequenceDiagram\n  User->>Agent: PingMermaid", collection="架构",
+                )
+                self.assertEqual(len(self.knowledge_mod.search_knowledge("PingMermaid", collection="架构")), 1)
+                self.assertTrue(direct_mermaid["id"])
 
                 # Read missing doc -> 404
                 miss_read = _ws_mutation(ws, "companion.knowledge.change", {"action": "read", "id": "missing-id"}, "kb-read-404")

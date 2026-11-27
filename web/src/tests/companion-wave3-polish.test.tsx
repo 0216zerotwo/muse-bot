@@ -6,6 +6,12 @@ import { ChatThread, extractMarkdownHeadings } from "@/companion/ChatThread";
 import { CommandPalette } from "@/companion/CommandPalette";
 import { Composer } from "@/companion/Composer";
 import { CreationsView } from "@/companion/Creations";
+import {
+  FollowUpChips,
+  clearFollowupsCache,
+  followupReplyFingerprint,
+  invalidateFollowupsCacheFor,
+} from "@/companion/FollowUpChips";
 import { KnowledgeVault } from "@/companion/KnowledgeVault";
 import { DailyUsageChart, UsagePanel } from "@/companion/UsagePanel";
 import {
@@ -1239,5 +1245,137 @@ describe("Wave 3.5b: Knowledge reader error/retry and CompanionScreen desktop Cm
 
     fireEvent.click(within(sheet).getByRole("button", { name: "重试" }));
     expect(await within(sheet).findByText("该文档暂无可读分块")).toBeInTheDocument();
+  });
+
+  it("does not leak preset default reasoning_effort into ChatModelBar reset and respects router.enabled", async () => {
+    const models: ModelsPayload = {
+      presets: [
+        {
+          name: "flash",
+          model: "deepseek-chat",
+          provider: "deepseek",
+          vendor: "deepseek",
+          reasoning_effort: null,
+          max_tokens: 8192,
+          temperature: 0.2,
+          context_window_tokens: 128_000,
+        },
+        {
+          name: "pro",
+          model: "claude-sonnet",
+          provider: "anthropic",
+          vendor: "anthropic",
+          reasoning_effort: "high",
+          max_tokens: 8192,
+          temperature: 0.2,
+          context_window_tokens: 200_000,
+        },
+      ],
+      max_tool_iterations: 50,
+      default: "pro",
+      fallbacks: [],
+      settings: { enabled: true, router: null, fixed: "flash", models: {} },
+      health: {},
+      decisions: [],
+      media: { image: { active: null, models: [] }, video: { active: null, models: [] } },
+    };
+    // Session has model_preset="pro" but NO reasoning_effort override (reasoningEffort undefined),
+    // while /context returns the preset's own reasoning_effort="high".
+    const session = makeChat("c-leak", { modelPreset: "pro" });
+    const usage: ChatContextUsage = {
+      estimated_tokens: 12_000,
+      context_window: 200_000,
+      usage_ratio: 0.06,
+      tier1_threshold: 120_000,
+      tier2_threshold: 160_000,
+      has_summary_checkpoint: false,
+      model: "claude-sonnet",
+      model_preset: "pro",
+      reasoning_effort: "high",
+    };
+
+    requestMutation.mockResolvedValueOnce({ chat_id: "c-leak", model_preset: null, reasoning_effort: null });
+
+    renderWithClient(
+      <ChatModelBar
+        chatId="c-leak"
+        session={session}
+        models={models}
+        contextUsage={usage}
+        hasMessages
+        streaming={false}
+        connected
+      />,
+    );
+
+    const capsule = screen.getByTestId("chat-model-capsule");
+    expect(capsule).toHaveTextContent("pro");
+    expect(capsule).not.toHaveTextContent("· 高");
+
+    fireEvent.click(capsule);
+    const popover = screen.getByTestId("chat-model-popover");
+    // When router.enabled is true, global default shows models.default ("pro"), not stale fixed ("flash").
+    const followDefaultBtn = within(popover).getByRole("button", { name: /跟随全局默认/ });
+    expect(followDefaultBtn).toHaveTextContent("pro");
+
+    // Resetting to global default must send reasoning_effort: null instead of leaking preset default "high".
+    fireEvent.click(followDefaultBtn);
+    await waitFor(() =>
+      expect(requestMutation).toHaveBeenCalledWith("companion.chats.change", {
+        id: "c-leak",
+        action: "set_model",
+        model_preset: null,
+        reasoning_effort: null,
+      }),
+    );
+  });
+
+  it("refreshes FollowUpChips when reply fingerprint changes or cache is invalidated on regenerate", async () => {
+    clearFollowupsCache();
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ chat_id: "c-fp", turn_id: "t1", suggestions: ["旧追问A", "旧追问B"] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ chat_id: "c-fp", turn_id: "t1", suggestions: ["新追问X", "新追问Y"] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ chat_id: "c-fp", turn_id: "t1", suggestions: ["再次刷新Z"] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+    const fp1 = followupReplyFingerprint("第一版回复");
+    const fp2 = followupReplyFingerprint("第二版重新生成的回复");
+    expect(fp1).not.toBe(fp2);
+
+    const { rerender } = renderWithClient(
+      <FollowUpChips chatId="c-fp" turnId="t1" fingerprint={fp1} enabled onSelect={vi.fn()} />,
+    );
+    expect(await screen.findByRole("button", { name: "旧追问A" })).toBeInTheDocument();
+
+    // Same turnId + new reply fingerprint misses stale cache and fetches fresh suggestions.
+    rerender(
+      <ClientProvider client={mockClient} token="tok-w3">
+        <FollowUpChips chatId="c-fp" turnId="t1" fingerprint={fp2} enabled onSelect={vi.fn()} />
+      </ClientProvider>,
+    );
+    expect(await screen.findByRole("button", { name: "新追问X" })).toBeInTheDocument();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    // Explicit invalidation clears cached entries for that (chatId, turnId).
+    invalidateFollowupsCacheFor("c-fp", "t1");
+    cleanup();
+    renderWithClient(<FollowUpChips chatId="c-fp" turnId="t1" fingerprint={fp2} enabled onSelect={vi.fn()} />);
+    expect(await screen.findByRole("button", { name: "再次刷新Z" })).toBeInTheDocument();
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
   });
 });

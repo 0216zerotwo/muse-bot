@@ -95,16 +95,27 @@ export function ChatModelBar({
     };
   }, [openPopover]);
 
+  const presets = Array.isArray(models?.presets) ? models.presets : [];
   const activeOverride = localOverride?.chatId === chatId ? localOverride : null;
+  // /api/sessions omits reasoning_effort when unoverridden while /context promotes the preset's own
+  // default effort, so once session metadata is present do not let contextUsage leak preset defaults.
+  const hasSessionModelMeta = session.modelPreset !== undefined || session.reasoningEffort !== undefined;
   const effectivePreset = activeOverride
     ? activeOverride.model_preset
-    : (session.modelPreset ?? contextUsage?.model_preset ?? null);
+    : hasSessionModelMeta
+      ? (session.modelPreset ?? null)
+      : (contextUsage?.model_preset ?? null);
   const effectiveEffort = activeOverride
     ? activeOverride.reasoning_effort
-    : (session.reasoningEffort ?? contextUsage?.reasoning_effort ?? null);
+    : hasSessionModelMeta
+      ? (session.reasoningEffort ?? null)
+      : (contextUsage?.reasoning_effort ?? null);
 
-  const presets = Array.isArray(models?.presets) ? models.presets : [];
-  const globalDefault = models?.settings?.fixed ?? models?.default ?? presets[0]?.name ?? null;
+  const fixed = models?.settings?.fixed;
+  const globalDefault =
+    models?.settings?.enabled === false && fixed && presets.some((p) => p.name === fixed)
+      ? fixed
+      : (models?.default ?? presets[0]?.name ?? null);
   const hasModelPicker = presets.length > 0;
   const hasContextMeter = Boolean(hasMessages && contextUsage && contextUsage.context_window > 0);
 

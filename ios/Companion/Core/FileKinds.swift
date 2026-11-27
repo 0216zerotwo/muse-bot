@@ -232,7 +232,7 @@ enum FileKinds {
             "pdf", "docx", "xlsx", "pptx", "odt",
             "html", "htm", "xhtml", "md", "markdown", "mdx",
             "txt", "csv", "tsv", "json", "jsonl", "yaml", "yml",
-            "xml", "svg", "rst", "log", "ini", "toml", "conf", "cfg",
+            "xml", "svg", "mmd", "mermaid", "rst", "log", "ini", "toml", "conf", "cfg",
             "py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "swift",
             "java", "kt", "kts", "go", "rs", "sh", "bash", "zsh",
             "css", "scss", "sql", "c", "h", "cpp", "hpp", "rb", "php",
