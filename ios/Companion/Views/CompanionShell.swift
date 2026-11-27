@@ -27,6 +27,7 @@ struct CompanionRootView: View {
     @State private var keyboardUp = false
     @State private var editSide = false
     @State private var sideName = ""
+    @State private var sessionControls = false
     @State private var exportedChatFile: SharedFile?
     @State private var exportCleanupFolder: URL?
     @State private var exportingChat = false
@@ -76,6 +77,10 @@ struct CompanionRootView: View {
         .sheet(isPresented: $identity) {
             IdentityView().presentationDetents([.large]).presentationDragIndicator(.hidden).tint(CompanionPalette.primary)
         }
+        .sheet(isPresented: $sessionControls) {
+            ChatSessionControlsSheet(chatID: store.currentChatID)
+                .environmentObject(store)
+        }
         .sheet(item: $exportedChatFile, onDismiss: { exportedChatFile = nil; cleanupExportedChat() }) { file in
             ShareSheet(items: [file.url])
         }
@@ -91,7 +96,7 @@ struct CompanionRootView: View {
         )) {
             Button("取消", role: .cancel) { store.cancelPendingDeepLink() }
             Button("切换并连接", role: .destructive) {
-                settings = false; identity = false; appearance = false; menu = false
+                settings = false; identity = false; appearance = false; menu = false; sessionControls = false
                 Task { await store.confirmPendingDeepLink() }
             }
         } message: {
@@ -112,10 +117,10 @@ struct CompanionRootView: View {
         // A reply may have set a reminder (or changed one): the phone's notifications follow.
         .onChange(of: store.running) { was, now in if was && !now { Task { await store.planReminders() } } }
         .onChange(of: store.needsPairing) { _, needed in
-            if needed { settings = false; identity = false; appearance = false; menu = false }
+            if needed { settings = false; identity = false; appearance = false; menu = false; sessionControls = false }
         }
         .onChange(of: store.needsServer) { _, needed in
-            if needed { settings = false; identity = false; appearance = false; menu = false }
+            if needed { settings = false; identity = false; appearance = false; menu = false; sessionControls = false }
         }
         .onAppear { deliverAsked() }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
@@ -123,6 +128,9 @@ struct CompanionRootView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardUp = false }
         .onChange(of: store.suggestedDraft) { _, value in
+            if value != nil { selectedTab = .chat; settings = false; identity = false }
+        }
+        .onChange(of: store.suggestedQuote) { _, value in
             if value != nil { selectedTab = .chat; settings = false; identity = false }
         }
     }
@@ -213,39 +221,7 @@ struct CompanionRootView: View {
                     roundButton("line.3.horizontal", "打开菜单") { toggleMenu(true) }
                     Spacer()
                     if selectedTab == .chat && !store.currentChatID.isEmpty {
-                        Menu {
-                            Button {
-                                Task { await exportCurrentChat() }
-                            } label: {
-                                Label(exportingChat ? "正在导出…" : "导出分享对话", systemImage: "square.and.arrow.up")
-                            }
-                            .disabled(exportingChat || !store.connected)
-
-                            Button {
-                                Haptics.selection()
-                                Task { await store.forkChat(chatId: store.currentChatID) }
-                            } label: {
-                                Label("分叉为新旁聊", systemImage: "arrow.triangle.branch")
-                            }
-                            .disabled(!store.connected)
-
-                            if store.currentChatID != store.mainChatID {
-                                Divider()
-                                Button {
-                                    sideName = store.sideChats.first { $0.id == store.currentChatID }?.title ?? "新的旁聊"
-                                    editSide = true
-                                } label: {
-                                    Label("旁聊改名 / 删除", systemImage: "slider.horizontal.3")
-                                }
-                            }
-                        } label: {
-                            Image(systemName: store.currentChatID != store.mainChatID ? "slider.horizontal.3" : "ellipsis")
-                                .font(.system(size: 20))
-                                .frame(width: 44, height: 44)
-                                .modifier(FloatingPanel(radius: 22))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(store.currentChatID != store.mainChatID ? "旁聊设置与导出" : "更多聊天操作")
+                        chatHeaderActions
                     }
                 }.padding(.horizontal, 16)
             }.padding(.top, 6)
@@ -260,6 +236,76 @@ struct CompanionRootView: View {
                 .allowsHitTesting(false)
         }
     }
+    @ViewBuilder
+    private var chatHeaderActions: some View {
+        let activeSummary = store.sessionSummary(for: store.currentChatID)
+        let hasCustomPreset = (activeSummary?.modelPreset?.isEmpty == false) || (activeSummary?.reasoningEffort?.isEmpty == false)
+        HStack(spacing: 8) {
+            Button {
+                sessionControls = true
+                Haptics.selection()
+            } label: {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 18, weight: .medium))
+                        .frame(width: 44, height: 44)
+                        .modifier(FloatingPanel(radius: 22))
+                    if hasCustomPreset {
+                        Circle()
+                            .fill(CompanionPalette.primary)
+                            .frame(width: 8, height: 8)
+                            .offset(x: -7, y: 7)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(!store.connected)
+            .accessibilityLabel("当前会话算力预设")
+
+            Menu {
+                Button {
+                    sessionControls = true
+                    Haptics.selection()
+                } label: {
+                    Label("切换本聊预设与上下文", systemImage: "cpu")
+                }
+                .disabled(!store.connected)
+
+                Button {
+                    Task { await exportCurrentChat() }
+                } label: {
+                    Label(exportingChat ? "正在导出…" : "导出分享对话", systemImage: "square.and.arrow.up")
+                }
+                .disabled(exportingChat || !store.connected)
+
+                Button {
+                    Haptics.selection()
+                    Task { await store.forkChat(chatId: store.currentChatID) }
+                } label: {
+                    Label("分叉为新旁聊", systemImage: "arrow.triangle.branch")
+                }
+                .disabled(!store.connected)
+
+                if store.currentChatID != store.mainChatID {
+                    Divider()
+                    Button {
+                        sideName = store.sideChats.first { $0.id == store.currentChatID }?.title ?? "新的旁聊"
+                        editSide = true
+                    } label: {
+                        Label("旁聊改名 / 删除", systemImage: "slider.horizontal.3")
+                    }
+                }
+            } label: {
+                Image(systemName: store.currentChatID != store.mainChatID ? "slider.horizontal.3" : "ellipsis")
+                    .font(.system(size: 20))
+                    .frame(width: 44, height: 44)
+                    .modifier(FloatingPanel(radius: 22))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(store.currentChatID != store.mainChatID ? "旁聊设置与导出" : "更多聊天操作")
+        }
+    }
+
     private var avatarSize: CGFloat {
         switch store.companionState["pet_size"].stringValue {
         case "small": return 72

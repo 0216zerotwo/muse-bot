@@ -49,6 +49,7 @@ struct ChatView: View {
     @State private var revealed = false
     @State private var paging = false
     @State private var draftKey = ""
+    @State private var unreadTracker = ChatUnreadTracker()
     /// The steps under 正在… are shown (kept from one task to the next).
     @State private var stepsOpen = false
     @State private var openTask: ActivityTask?
@@ -154,6 +155,12 @@ struct ChatView: View {
         "\(activeChatID)|\(latestFollowupTurnID ?? "")|\(chatRunning)|\(store.connected)"
     }
 
+    private var completedReplyIDs: [String] {
+        chatMessages.compactMap { msg in
+            msg.role != "user" && !msg.isStreaming && Presentation.isVisibleReply(msg) ? msg.id : nil
+        }
+    }
+
     var body: some View {
         applySheetsAndLifecycle(
             applyMediaPickers(
@@ -210,11 +217,7 @@ struct ChatView: View {
         .scrollDismissesKeyboard(.interactively)
         .overlay { if chatLoadingHistory && chatMessages.isEmpty { ProgressView("正在载入聊天…") } }
         .overlay(alignment: .bottomTrailing) {
-            if !followingBottom && !chatMessages.isEmpty {
-                Button { followingBottom = true; scrollBottom(proxy) } label: {
-                    Image(systemName: "arrow.down").frame(width: 44, height: 44).background(.regularMaterial, in: Circle())
-                }.accessibilityLabel("滚动到最新消息").padding(16)
-            }
+            scrollToBottomOverlay(proxy: proxy)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 6) {
@@ -228,6 +231,40 @@ struct ChatView: View {
                 }
                 composer
             }
+        }
+    }
+
+    @ViewBuilder
+    private func scrollToBottomOverlay(proxy: ScrollViewProxy) -> some View {
+        if !followingBottom && !chatMessages.isEmpty {
+            let count = unreadTracker.unreadCount
+            Button {
+                unreadTracker.reset(for: chatMessages)
+                followingBottom = true
+                scrollBottom(proxy)
+                Haptics.selection()
+            } label: {
+                if count > 0 {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 13, weight: .bold))
+                        Text("\(count) 条新回复")
+                            .font(.system(size: 13.5, weight: .semibold))
+                    }
+                    .foregroundStyle(CompanionPalette.primaryText)
+                    .padding(.horizontal, 14)
+                    .frame(minHeight: 40)
+                    .background(CompanionPalette.primary, in: Capsule())
+                    .shadow(color: .black.opacity(0.14), radius: 8, y: 3)
+                } else {
+                    Image(systemName: "arrow.down")
+                        .frame(width: 44, height: 44)
+                        .background(.regularMaterial, in: Circle())
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(count > 0 ? "查看 \(count) 条新回复" : "滚动到最新消息")
+            .padding(16)
         }
     }
 
@@ -321,24 +358,45 @@ struct ChatView: View {
                 followupSuggestions = []
                 drafts.forEach { $0.removeStagedBlob() }
                 positioned = false; settlingBottom = false; settleGeneration = UUID()
-                revealed = false; followingBottom = true; quote = nil; drafts = []; restoreDraft()
+                revealed = false; followingBottom = true; drafts = []
+                unreadTracker.reset(for: chatMessages)
+                restoreDraft()
                 followIfNeeded(proxy); revealSoon()
             }
             .onChange(of: focused) { _, value in if value && followingBottom { scrollBottom(proxy) } }
             .onChange(of: text) { oldValue, newValue in
-                if !draftKey.isEmpty { UserDefaults.standard.set(newValue, forKey: draftKey) }
+                if !draftKey.isEmpty { ChatDraftPersistence.saveText(newValue, server: store.serverAddress, chatID: activeChatID) }
                 if composerError != nil && !newValue.isEmpty { composerError = nil }
                 if newValue.isEmpty { dictated = false }
                 loadAutocompleteContextIfNeeded(from: oldValue, to: newValue)
             }
+            .onChange(of: quote) { _, newQuote in
+                if !draftKey.isEmpty { ChatDraftPersistence.saveQuote(newQuote, server: store.serverAddress, chatID: activeChatID) }
+            }
+            .onChange(of: completedReplyIDs) { _, _ in
+                unreadTracker.ingest(
+                    messages: chatMessages,
+                    followingBottom: followingBottom,
+                    positioned: positioned && !settlingBottom,
+                    paging: paging
+                )
+            }
+            .onChange(of: followingBottom) { _, atBottom in
+                if atBottom { unreadTracker.reset(for: chatMessages) }
+            }
+            .onChange(of: positioned) { _, isPositioned in
+                if isPositioned { unreadTracker.reset(for: chatMessages) }
+            }
             .onAppear {
                 restoreDraft()
                 acceptDraft()
+                unreadTracker.reset(for: chatMessages)
                 loadAutocompleteContextIfNeeded(from: "", to: text)
                 followIfNeeded(proxy)
                 revealSoon()
             }
             .onChange(of: store.suggestedDraft) { _, _ in acceptDraft() }
+            .onChange(of: store.suggestedQuote) { _, _ in acceptDraft() }
             .onChange(of: revealed) { _, _ in revealSearchHit(proxy) }
             .onChange(of: store.revealTurn) { _, _ in revealSearchHit(proxy) }
             .task(id: followupTriggerKey) { await loadFollowups() }
@@ -717,19 +775,31 @@ struct ChatView: View {
         }
     }
     private func acceptDraft() {
-        guard !isIsolatedHelperChat, let next = store.suggestedDraft else { return }
-        text = next; store.suggestedDraft = nil; focused = true
+        guard !isIsolatedHelperChat else { return }
+        guard store.suggestedDraft != nil || store.suggestedQuote != nil else { return }
+        if let next = store.suggestedDraft {
+            text = next
+            store.suggestedDraft = nil
+        }
+        if let nextQuote = store.suggestedQuote {
+            quote = nextQuote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : nextQuote
+            store.suggestedQuote = nil
+        }
+        focused = true
     }
 
     private var canSend: Bool { !encoding && !voice.recording && !voice.transcribing && !voice.requestingPermission && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !drafts.isEmpty) }
     private func send() {
         guard canSend else { return }
         let content = UserQuote.format(content: text, quotedContext: quote)
-        guard store.send(text: content, attachments: drafts, chatID: activeChatID) else { return }
+        let targetChat = activeChatID
+        guard store.send(text: content, attachments: drafts, chatID: targetChat) else { return }
         readReply = dictated && readAfterVoice
         dictated = false
         ReadAloud.shared.stop()
+        ChatDraftPersistence.clear(server: store.serverAddress, chatID: targetChat)
         text = ""; drafts = []; quote = nil; composerError = nil; followingBottom = true
+        unreadTracker.reset(for: chatMessages)
         Haptics.send()
     }
     private func quoteText(_ message: ChatMessage) -> String {
@@ -737,9 +807,12 @@ struct ChatView: View {
         return content.isEmpty ? (message.media.first?.name ?? "附件") : content
     }
     private func restoreDraft() {
-        let key = "draft.\(store.serverAddress).\(activeChatID)"
+        let key = ChatDraftPersistence.textKey(server: store.serverAddress, chatID: activeChatID)
         guard key != draftKey else { return }
-        draftKey = key; text = UserDefaults.standard.string(forKey: key) ?? ""
+        draftKey = key
+        let loaded = ChatDraftPersistence.load(server: store.serverAddress, chatID: activeChatID)
+        text = loaded.text
+        quote = loaded.quote
     }
     private func followIfNeeded(_ proxy: ScrollViewProxy, animated: Bool = true) {
         guard !paging, followingBottom || !positioned else { return }
@@ -1162,7 +1235,7 @@ private struct MessageRow: View, Equatable {
                     let joined = index > 0 && { if case .bubble = blocks[index - 1] { return true }; return false }()
                     Markdown(text, baseURL: store.baseURL, imageBaseURL: store.baseURL)
                         .markdownTheme(.basic)
-                        .markdownBlockStyle(\.codeBlock) { ChatCodeBlock(configuration: $0) }
+                        .markdownBlockStyle(\.codeBlock) { ChatCodeBlock(store: store, configuration: $0) }
                         .markdownImageProvider(ChatMarkdownImageProvider(open: onMedia))
                         .padding(.horizontal, 16).padding(.vertical, 10)
                         .modifier(BubbleFill(shape: Bubble.reply(messenger: messenger, joined: joined)))
@@ -1363,9 +1436,11 @@ private struct SelectTextSheet: View {
     }
 }
 
-/// A code block in a reply: its language, an interactive 预览 button for HTML/SVG, a 复制 button,
+/// A code block in a reply: its language, an interactive 预览 button for HTML/SVG/Markdown, a 复制 button,
 /// and the code scrolling sideways instead of wrapping.
+@MainActor
 private struct ChatCodeBlock: View {
+    let store: CompanionStore
     let configuration: CodeBlockConfiguration
     @State private var copied = false
     @State private var previewItem: ArtifactPreviewItem?
@@ -1382,7 +1457,7 @@ private struct ChatCodeBlock: View {
                 if let lang = previewLanguage {
                     Button {
                         Haptics.selection()
-                        let title = lang == "svg" ? "SVG 预览" : "HTML 预览"
+                        let title = lang == "svg" ? "SVG 预览" : lang == "md" ? "Markdown 预览" : "HTML 预览"
                         previewItem = ArtifactPreviewItem(title: title, language: lang, code: configuration.content)
                     } label: {
                         Label("预览", systemImage: "eye").font(.caption.weight(.medium))
@@ -1414,6 +1489,7 @@ private struct ChatCodeBlock: View {
         .markdownMargin(top: 4, bottom: 8)
         .sheet(item: $previewItem) { item in
             ArtifactPreviewSheet(item: item)
+                .environmentObject(store)
         }
     }
 }

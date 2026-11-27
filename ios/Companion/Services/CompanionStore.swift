@@ -34,6 +34,7 @@ final class CompanionStore: ObservableObject {
     @Published var helpers: [JSONValue] = []
     @Published var messages: [ChatMessage] = []
     @Published var sideChats: [SideChat] = []
+    @Published var sessionSummaries: [String: ChatSummary] = [:]
     @Published var currentChatID = ""
     @Published var loadingHistory = false
     @Published var hasOlder = false
@@ -44,6 +45,7 @@ final class CompanionStore: ObservableObject {
     @Published private(set) var currentDeviceID = ""
     @Published private(set) var currentGoal: GoalState?
     @Published var suggestedDraft: String?
+    @Published var suggestedQuote: String?
     @Published private(set) var helperChatID = ""
     @Published private(set) var helperMessages: [ChatMessage] = []
     @Published private(set) var helperApprovals: [JSONValue] = []
@@ -56,16 +58,25 @@ final class CompanionStore: ObservableObject {
     @Published private(set) var ttsAvailable = false
     @Published private(set) var modelsChecked = false
     @Published private(set) var hasConfiguredChatModel = true
+    @Published private(set) var availableModelPresets: [String] = []
+    @Published private(set) var defaultModelPreset = ""
     @Published private(set) var pendingDeepLink: PendingDeepLink?
 
     var baseURL: URL? { api?.baseURL ?? (try? APIClient.normalizedServer(serverAddress)) }
     var companionName: String { companionState["name"].nonemptyString ?? "伙伴" }
     var pendingApprovals: [JSONValue] { approvals.filter { $0["status"].stringValue == "pending" } }
     var mainChatID: String { companionState["chat_id"].stringValue }
-    func composeDraft(_ text: String) {
+    func sessionSummary(for chatID: String) -> ChatSummary? { sessionSummaries[chatID] }
+    func composeDraft(_ text: String, quote: String? = nil) {
         // Persist before publishing so a simultaneous chat switch cannot restore
         // an older local draft over a newly requested discussion or idea.
-        if !currentChatID.isEmpty { UserDefaults.standard.set(text, forKey: "draft.\(serverAddress).\(currentChatID)") }
+        if !currentChatID.isEmpty {
+            ChatDraftPersistence.saveText(text, server: serverAddress, chatID: currentChatID)
+            if let quote {
+                ChatDraftPersistence.saveQuote(quote, server: serverAddress, chatID: currentChatID)
+            }
+        }
+        if let quote { suggestedQuote = quote }
         suggestedDraft = text
     }
     var activityLabel: String {
@@ -912,6 +923,14 @@ final class CompanionStore: ObservableObject {
         return (KnowledgePayload(json: raw), raw["added"]["deduplicated"].boolValue)
     }
 
+    func readKnowledgeDocument(id: String) async throws -> KnowledgeDocumentDetail {
+        let raw = try await changeResource("companion.knowledge.change", payload: [
+            "action": .string("read"),
+            "id": .string(id),
+        ])
+        return KnowledgeDocumentDetail(json: raw)
+    }
+
     @discardableResult
     func refreshCompanion() async -> Bool {
         guard let api else { return false }
@@ -931,9 +950,40 @@ final class CompanionStore: ObservableObject {
         guard let api else { return }
         let attempt = generation
         guard let value = try? await api.get("/api/webui/companion/models"), attempt == generation else { return }
-        let configured = !value["presets"].array.isEmpty || value["default"].nonemptyString != nil
+        let presetNames = value["presets"].array.compactMap { $0["name"].nonemptyString }
+        let defaultName = value["default"].nonemptyString ?? value["settings"]["fixed"].nonemptyString ?? ""
+        let configured = !presetNames.isEmpty || !defaultName.isEmpty
         if !modelsChecked { modelsChecked = true }
         if hasConfiguredChatModel != configured { hasConfiguredChatModel = configured }
+        if availableModelPresets != presetNames { availableModelPresets = presetNames }
+        if defaultModelPreset != defaultName { defaultModelPreset = defaultName }
+    }
+
+    func applySessionsPayload(_ result: JSONValue) {
+        var summaries: [String: ChatSummary] = [:]
+        var chats: [SideChat] = []
+        for row in result["sessions"].records {
+            let summary = ChatSummary(json: row)
+            guard summary.key.hasPrefix("websocket:") else { continue }
+            let id = summary.id
+            guard !id.isEmpty else { continue }
+            summaries[id] = summary
+            guard (summary.helper ?? "").isEmpty, !(summary.group ?? false), id != mainChatID else { continue }
+            chats.append(
+                SideChat(
+                    id: id,
+                    title: summary.displayTitle,
+                    preview: summary.preview ?? "",
+                    pinned: summary.pinned,
+                    archived: summary.archived,
+                    empty: summary.empty,
+                    modelPreset: summary.modelPreset,
+                    reasoningEffort: summary.reasoningEffort
+                )
+            )
+        }
+        if sessionSummaries != summaries { sessionSummaries = summaries }
+        if sideChats != chats { sideChats = chats }
     }
 
     func refreshSessions() async {
@@ -942,14 +992,7 @@ final class CompanionStore: ObservableObject {
         do {
             let result = try await api.get("/api/sessions")
             guard attempt == generation else { return }
-            let chats: [SideChat] = result["sessions"].array.compactMap { row in
-                let key = row["key"].stringValue
-                guard key.hasPrefix("websocket:"), row["helper"].stringValue.isEmpty, !row["group"].boolValue else { return nil }
-                let id = String(key.dropFirst("websocket:".count))
-                guard !id.isEmpty, id != mainChatID else { return nil }
-                return SideChat(id: id, title: row["title"].nonemptyString ?? "新的旁聊", preview: row["preview"].stringValue)
-            }
-            if sideChats != chats { sideChats = chats }
+            applySessionsPayload(result)
         } catch { /* A failed sidebar refresh must not interrupt a live conversation. */ }
     }
 
@@ -1135,6 +1178,7 @@ final class CompanionStore: ObservableObject {
         companionState = .object([:])
         messages = []
         sideChats = []
+        sessionSummaries = [:]
         approvals = []
         approvalsByChat = [:]
         avatars = []
@@ -1142,11 +1186,14 @@ final class CompanionStore: ObservableObject {
         currentDeviceID = ""
         currentGoal = nil
         suggestedDraft = nil
+        suggestedQuote = nil
         closeHelperChat()
         sttAvailable = true
         ttsAvailable = false
         modelsChecked = false
         hasConfiguredChatModel = true
+        availableModelPresets = []
+        defaultModelPreset = ""
         pendingDeepLink = nil
         knownChats = []
         runningChats = []
