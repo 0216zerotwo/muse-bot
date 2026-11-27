@@ -288,6 +288,9 @@ def _open_db(home: Path | str | None = None) -> Iterator[tuple[sqlite3.Connectio
                 for stmt in _SCHEMA_SQL.strip().split(";"):
                     if stmt.strip():
                         conn.execute(stmt.strip())
+                cols = {str(r["name"]) for r in conn.execute("PRAGMA table_info('kb_documents')").fetchall()}
+                if "source_ref" not in cols:
+                    conn.execute("ALTER TABLE kb_documents ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''")
                 tokenizer = _ensure_fts_table(conn)
                 conn.execute(_FTS_DELETE_TRIGGER_SQL.strip())
             yield conn, tokenizer
@@ -578,6 +581,8 @@ def _doc_row_to_dict(row: sqlite3.Row, *, deduplicated: bool | None = None) -> d
         "created_at": float(row["created_at"]),
         "updated_at": float(row["updated_at"]),
     }
+    if "source_ref" in row.keys() and row["source_ref"]:
+        out["source_ref"] = str(row["source_ref"])
     if deduplicated is not None:
         out["deduplicated"] = deduplicated
     return out
@@ -590,6 +595,7 @@ def ingest_bytes(
     title: str | None = None,
     collection: str = DEFAULT_COLLECTION,
     origin: str = "upload",
+    source_ref: str = "",
     home: Path | str | None = None,
 ) -> dict[str, Any]:
     """Parse, scrub, chunk, and store a document into `<MUSE_HOME>/knowledge.db` (idempotent per collection+sha256)."""
@@ -599,6 +605,7 @@ def ingest_bytes(
     clean_filename = _normalize_filename(filename)
     clean_collection = _normalize_collection(collection)
     clean_origin = " ".join(str(origin or "upload").split())[:32] or "upload"
+    clean_ref = " ".join(str(source_ref or "").split())[:260]
 
     extracted, doc_kind, html_title = _extract_text(clean_filename, raw_bytes)
     clean_text = _scrub_utf8(extracted).strip()
@@ -620,9 +627,10 @@ def ingest_bytes(
             if existing is not None:
                 doc_id = str(existing["id"])
                 new_title = explicit_title if explicit_title else str(existing["title"])
+                eff_ref = clean_ref or str(existing["source_ref"] or "")
                 conn.execute(
-                    "UPDATE kb_documents SET title = ?, updated_at = ? WHERE id = ?",
-                    (new_title, now, doc_id),
+                    "UPDATE kb_documents SET title = ?, source_ref = ?, updated_at = ? WHERE id = ?",
+                    (new_title, eff_ref, now, doc_id),
                 )
                 if explicit_title and explicit_title != existing["title"]:
                     conn.execute(
@@ -640,8 +648,8 @@ def ingest_bytes(
             doc_id = uuid.uuid4().hex[:16]
             conn.execute(
                 "INSERT INTO kb_documents "
-                "(id, title, filename, collection, mime, size_bytes, char_count, chunk_count, content_sha256, origin, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(id, title, filename, collection, mime, size_bytes, char_count, chunk_count, content_sha256, origin, source_ref, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     doc_id,
                     resolved_title,
@@ -653,6 +661,7 @@ def ingest_bytes(
                     len(chunks),
                     content_sha256,
                     clean_origin,
+                    clean_ref,
                     now,
                     now,
                 ),
@@ -705,6 +714,7 @@ def import_from_creation(
     creation_id: str,
     *,
     collection: str = DEFAULT_COLLECTION,
+    replace_existing: bool = True,
     home: Path | str | None = None,
 ) -> dict[str, Any]:
     """Import a safe document from `创意` (`creations.creations_root()`) into the knowledge base."""
@@ -728,12 +738,34 @@ def import_from_creation(
 
     meta = creations._read_index(root).get("entries", {}).get(cid, {})
     title = meta.get("title") or creations._display_title(resolved.stem)
+    raw_bytes = resolved.read_bytes()
+    ref_tag = f"creation:{cid}"
+    clean_collection = _normalize_collection(collection)
+
+    if replace_existing and knowledge_db_path(home).is_file():
+        extracted, _, _ = _extract_text(resolved.name, raw_bytes)
+        clean_text = _scrub_utf8(extracted).strip()
+        if clean_text:
+            new_sha = hashlib.sha256(clean_text.encode("utf-8")).hexdigest()
+            with _open_db(home) as (conn, _):
+                with _tx_on(conn):
+                    stale_rows = conn.execute(
+                        "SELECT id, content_sha256 FROM kb_documents "
+                        "WHERE collection = ? AND (source_ref = ? OR origin = ? "
+                        "OR (source_ref = '' AND origin = 'creation' AND filename = ?))",
+                        (clean_collection, ref_tag, ref_tag, resolved.name),
+                    ).fetchall()
+                    for row in stale_rows:
+                        if str(row["content_sha256"]) != new_sha:
+                            conn.execute("DELETE FROM kb_documents WHERE id = ?", (str(row["id"]),))
+
     return ingest_bytes(
         resolved.name,
-        resolved.read_bytes(),
+        raw_bytes,
         title=title,
         collection=collection,
         origin="creation",
+        source_ref=ref_tag,
         home=home,
     )
 
@@ -1185,6 +1217,37 @@ def update_document(
             return _doc_row_to_dict(updated)
 
 
+def get_document(doc_id: str, *, home: Path | str | None = None) -> dict[str, Any]:
+    """Return full document metadata and ordered chunks for ``doc_id``."""
+    clean_id = str(doc_id or "").strip()
+    if not clean_id:
+        raise ValueError("缺少文档 ID")
+    db_path = knowledge_db_path(home)
+    if not db_path.is_file():
+        raise ValueError("找不到这篇知识库文档")
+
+    with _open_db(home) as (conn, _):
+        doc_row = conn.execute("SELECT * FROM kb_documents WHERE id = ?", (clean_id,)).fetchone()
+        if doc_row is None:
+            raise ValueError("找不到这篇知识库文档")
+        chunk_rows = conn.execute(
+            "SELECT chunk_index, heading, content FROM kb_chunks WHERE doc_id = ? ORDER BY chunk_index ASC",
+            (clean_id,),
+        ).fetchall()
+
+    return {
+        "document": _doc_row_to_dict(doc_row),
+        "chunks": [
+            {
+                "chunk_index": int(r["chunk_index"]),
+                "heading": str(r["heading"]),
+                "content": str(r["content"]),
+            }
+            for r in chunk_rows
+        ],
+    }
+
+
 def delete_document(doc_id: str, *, home: Path | str | None = None) -> None:
     """Delete a document and cascade-clean `kb_chunks` and `kb_chunks_fts`."""
     clean_id = str(doc_id or "").strip()
@@ -1209,6 +1272,7 @@ __all__ = [
     "MAX_SEARCH_LIMIT",
     "chunk_document_text",
     "delete_document",
+    "get_document",
     "import_from_creation",
     "ingest_bytes",
     "ingest_file",

@@ -117,6 +117,31 @@ def _sanitize_cloned_extra(raw_extra: Any) -> Optional[str]:
     return raw_extra
 
 
+def _extract_backfill_messages(sliced_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build synthetic MuseDB message rows from ChatStore events when no historical DB rows match."""
+    rows: list[dict[str, Any]] = []
+    for ev in sliced_events:
+        kind = ev.get("event")
+        if kind not in ("user_message", "message"):
+            continue
+        if ev.get("kind") == "tool_hint" or (ev.get("source") or {}).get("kind") == "notice":
+            continue
+        text = str(ev.get("text") or "").strip()
+        if not text:
+            continue
+        rows.append({
+            "turn_id": ev.get("turn_id"),
+            "role": "user" if kind == "user_message" else "assistant",
+            "content": text,
+            "tool_calls_json": None,
+            "tool_call_id": None,
+            "tool_name": None,
+            "extra_json": None,
+            "created_at": (float(ev.get("created_at_ms") or 0) / 1000.0) or None,
+        })
+    return rows
+
+
 def _clone_muse_db_session(
     adapter: Any,
     src_chat_id: str,
@@ -126,6 +151,7 @@ def _clone_muse_db_session(
     kept_turn_ids: set[str],
     store_truncated: bool,
     exclude_turn_id: Optional[str] = None,
+    sliced_events: Optional[list[dict[str, Any]]] = None,
 ) -> None:
     engine = _resolve_engine(adapter)
     assembler = getattr(engine, "_assembler", None) if engine is not None else None
@@ -135,20 +161,55 @@ def _clone_muse_db_session(
         if not callable(write_tx):
             return
         with write_tx() as conn:
-            src_sess = conn.execute(
-                "SELECT * FROM sessions WHERE chat_id = ? AND active = 1 ORDER BY started_at DESC, rowid DESC LIMIT 1",
+            all_sessions = conn.execute(
+                "SELECT * FROM sessions WHERE chat_id = ? ORDER BY active DESC, started_at DESC, rowid DESC",
                 (src_chat_id,),
-            ).fetchone()
-            if src_sess is None:
+            ).fetchall()
+            src_sess = all_sessions[0] if all_sessions else None
+            backfill = _extract_backfill_messages(sliced_events or []) if sliced_events else []
+            if src_sess is None and not backfill:
                 return
 
-            src_sid = str(src_sess["id"])
-            source = str(src_sess["source"] or "companion")
-            model = src_sess["model"]
-            src_meta = _json_loads_dict(src_sess["metadata_json"])
+            chosen_sess = src_sess
+            rows: list[Any] = []
+            if chosen_sess is not None:
+                rows = conn.execute(
+                    "SELECT * FROM messages WHERE session_id = ? AND active = 1 ORDER BY id ASC",
+                    (str(chosen_sess["id"]),),
+                ).fetchall()
+
+            # Cross-/new rotation fallback: if active session lacks pre-/new turn(s), search older sessions.
+            if all_sessions and (
+                (turn_id and not any(r["turn_id"] == turn_id for r in rows))
+                or (not turn_id and not rows and kept_turn_ids)
+            ):
+                for cand_sess in all_sessions[1:]:
+                    cand_sid = str(cand_sess["id"])
+                    cand_rows = conn.execute(
+                        "SELECT * FROM messages WHERE session_id = ? AND active = 1 ORDER BY id ASC",
+                        (cand_sid,),
+                    ).fetchall()
+                    if not cand_rows:
+                        cand_rows = conn.execute(
+                            "SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC",
+                            (cand_sid,),
+                        ).fetchall()
+                    if turn_id and any(r["turn_id"] == turn_id for r in cand_rows):
+                        chosen_sess = cand_sess
+                        rows = cand_rows
+                        break
+                    if not turn_id and kept_turn_ids and any(r["turn_id"] in kept_turn_ids for r in cand_rows):
+                        chosen_sess = cand_sess
+                        rows = cand_rows
+                        break
+
+            src_sid = str(chosen_sess["id"]) if chosen_sess is not None else ""
+            source = str(chosen_sess["source"] or "companion") if chosen_sess is not None else "companion"
+            model = chosen_sess["model"] if chosen_sess is not None else None
+            src_meta = _json_loads_dict(chosen_sess["metadata_json"]) if chosen_sess is not None else {}
 
             soul_snapshot = src_meta.get("soul_snapshot")
-            if not isinstance(soul_snapshot, str) and assembler is not None:
+            if not isinstance(soul_snapshot, str) and assembler is not None and src_sid:
                 cached_snaps = getattr(assembler, "_soul_snapshots", None)
                 if isinstance(cached_snaps, dict) and isinstance(cached_snaps.get(src_sid), str):
                     soul_snapshot = cached_snaps[src_sid]
@@ -162,11 +223,6 @@ def _clone_muse_db_session(
             }
             if isinstance(soul_snapshot, str):
                 new_meta["soul_snapshot"] = soul_snapshot
-
-            rows = conn.execute(
-                "SELECT * FROM messages WHERE session_id = ? AND active = 1 ORDER BY id ASC",
-                (src_sid,),
-            ).fetchall()
 
             db_truncated = False
             if turn_id:
@@ -202,8 +258,14 @@ def _clone_muse_db_session(
             else:
                 msgs_to_clone = list(rows)
 
-            is_truncated = store_truncated or db_truncated
-            new_checkpoint = None if is_truncated else src_sess["summary_checkpoint"]
+            used_backfill = False
+            if not msgs_to_clone and backfill:
+                msgs_to_clone = backfill
+                used_backfill = True
+
+            is_truncated = store_truncated or db_truncated or used_backfill
+            orig_checkpoint = chosen_sess["summary_checkpoint"] if chosen_sess is not None else None
+            new_checkpoint = None if is_truncated else orig_checkpoint
             new_sid = uuid.uuid4().hex
             now_s = time.time()
 
@@ -303,6 +365,7 @@ def fork_chat(
         kept_turn_ids=kept_turn_ids,
         store_truncated=store_truncated,
         exclude_turn_id=active_tid if not eff_turn else None,
+        sliced_events=sliced_events,
     )
 
     return {
@@ -310,6 +373,76 @@ def fork_chat(
         "chat_id": new_chat_id,
         "key": f"websocket:{new_chat_id}",
     }
+
+
+def _cleanup_deleted_turn_db(adapter: Any, chat_id: str, turn_id: str) -> None:
+    """Clear stale ``summary_checkpoint`` when a deleted turn empties or invalidates compacted state."""
+    with _borrow_db(adapter) as db:
+        write_tx = getattr(db, "_write_tx", None)
+        if not callable(write_tx):
+            return
+        with write_tx() as conn:
+            sess = conn.execute(
+                "SELECT id, summary_checkpoint FROM sessions WHERE chat_id = ? AND active = 1 "
+                "ORDER BY started_at DESC, rowid DESC LIMIT 1",
+                (chat_id,),
+            ).fetchone()
+            if sess is None or not sess["summary_checkpoint"]:
+                return
+            sid = str(sess["id"])
+            active_left = conn.execute(
+                "SELECT 1 FROM messages WHERE session_id = ? AND active = 1 LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if active_left is None:
+                conn.execute("UPDATE sessions SET summary_checkpoint = NULL WHERE id = ?", (sid,))
+                return
+            compacted_hit = conn.execute(
+                "SELECT 1 FROM messages WHERE session_id = ? AND turn_id = ? AND active = 0 LIMIT 1",
+                (sid, turn_id),
+            ).fetchone()
+            if compacted_hit is not None:
+                conn.execute("UPDATE sessions SET summary_checkpoint = NULL WHERE id = ?", (sid,))
+
+
+async def delete_message(
+    adapter: Any,
+    chat_id: str,
+    *,
+    turn_id: str,
+    role: str,
+) -> dict[str, Any]:
+    """Delete one message (user or reply) in ``turn_id`` with active-turn guard and orphan cleanup."""
+    if not chat_id or not adapter.store.exists(chat_id):
+        raise BranchTargetNotFoundError("找不到这个对话")
+    eff_turn = str(turn_id or "").strip()
+    if not eff_turn or role not in ("user", "reply"):
+        raise InvalidBranchInputError("缺少消息标识或消息角色不正确")
+    if _active_turn_id(adapter, chat_id) is not None:
+        raise ChatBusyError("正在回复中，请先停止当前回复再删除")
+
+    def _remove_role_events() -> None:
+        adapter.store.remove_events(
+            chat_id,
+            lambda e: (
+                e.get("turn_id") == eff_turn
+                and ((e.get("event") == "user_message") == (role == "user"))
+                and e.get("event") != "turn_end"
+            ),
+        )
+        still_has_turn_msgs = any(
+            e.get("turn_id") == eff_turn and e.get("event") != "turn_end"
+            for e in adapter.store.events(chat_id)
+        )
+        if not still_has_turn_msgs:
+            adapter.store.remove_events(chat_id, lambda e: e.get("turn_id") == eff_turn)
+
+    await asyncio.to_thread(_remove_role_events)
+    del_turn_fn = getattr(adapter, "delete_turn", None) or getattr(_resolve_engine(adapter), "delete_turn", None)
+    if callable(del_turn_fn):
+        await del_turn_fn(chat_id, eff_turn, role=role)
+    await asyncio.to_thread(_cleanup_deleted_turn_db, adapter, chat_id, eff_turn)
+    return {"sessions": await asyncio.to_thread(adapter.store.list)}
 
 
 def _truncate_muse_db_for_edit(

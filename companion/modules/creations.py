@@ -15,12 +15,14 @@ from the list only hides it — the file stays on disk.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import shutil
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -147,6 +149,7 @@ def import_file(source: Path, *, key: str, title: str, origin: str, prompt: Opti
     if is_secret_path(source):
         return None
     root = creations_root()
+    root_resolved = root.resolve()
     with _LOCK:
         data = _read_index(root)
         if key in data["imported"]:
@@ -158,7 +161,7 @@ def import_file(source: Path, *, key: str, title: str, origin: str, prompt: Opti
             shutil.move(str(source), target)
         else:
             shutil.copy2(source, target)
-        rel = target.relative_to(root).as_posix()
+        rel = target.resolve().relative_to(root_resolved).as_posix()
         data["imported"][key] = rel
         data["entries"][rel] = {
             "title": title, "origin": origin, "prompt": prompt,
@@ -174,10 +177,11 @@ def save_artifact(
     content: str,
     fmt: str = "md",
     prompt: str | None = None,
+    creation_id: str | None = None,
 ) -> str:
-    """Save a canvas/code artifact directly into ``创意`` and return its relative id."""
+    """Save (or atomically update when ``creation_id`` is given) a canvas/code artifact under ``创意``."""
     from muse.interceptors import scrub_url_secrets
-    from .fs_atomic import atomic_write_text
+    from .fs_atomic import atomic_write_bytes, atomic_write_text
 
     norm_fmt = str(fmt or "md").strip().lower().lstrip(".")
     suffix = _ARTIFACT_FORMATS.get(norm_fmt)
@@ -196,20 +200,67 @@ def save_artifact(
     clean_prompt = scrub_url_secrets(prompt.strip()) if isinstance(prompt, str) and prompt.strip() else None
     clean_title = safe_title(str(title or "").strip() or "画布作品", 40)
     kind = "image" if suffix == ".svg" else "document"
+    now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
 
     root = creations_root()
+    root_resolved = root.resolve()
+    cid = str(creation_id or "").strip().replace("\\", "/")
     with _LOCK:
+        data = _read_index(root)
+        if cid:
+            if cid.startswith("/") or any(part in ("", ".", "..") or part.startswith(".") for part in Path(cid).parts):
+                raise ValueError("找不到要更新的作品")
+            target = (root / cid).resolve()
+            if root_resolved not in target.parents or not target.is_file():
+                raise ValueError("找不到要更新的作品")
+
+            rel = target.relative_to(root_resolved).as_posix()
+            old_bytes = target.read_bytes()
+            history_dir = root / ".history"
+            history_dir.mkdir(parents=True, exist_ok=True)
+            backup_name = f"{uuid.uuid4().hex[:12]}{target.suffix}"
+            atomic_write_bytes(history_dir / backup_name, old_bytes)
+
+            entry = dict(data["entries"].get(rel) or data["entries"].get(cid) or {})
+            versions = list(entry.get("versions") or [])
+            versions.append({
+                "backup": backup_name,
+                "saved_at": now_iso,
+                "size": len(old_bytes),
+                "title": entry.get("title") or _display_title(target.stem),
+            })
+            if len(versions) > 10:
+                evicted = versions[:-10]
+                versions = versions[-10:]
+                for old_ver in evicted:
+                    old_bak = str((old_ver or {}).get("backup") or "")
+                    if old_bak:
+                        with contextlib.suppress(OSError):
+                            (history_dir / Path(old_bak).name).unlink(missing_ok=True)
+
+            atomic_write_text(target, clean_content)
+            data["entries"][rel] = {
+                "title": clean_title if str(title or "").strip() else (entry.get("title") or clean_title),
+                "origin": entry.get("origin") or "canvas",
+                "prompt": clean_prompt if clean_prompt is not None else entry.get("prompt"),
+                "created_at": entry.get("created_at") or now_iso,
+                "updated_at": now_iso,
+                "versions": versions,
+            }
+            _write_index(root, data)
+            return rel
+
         target = _place(root, kind, clean_title, suffix)
-        if root.resolve() not in target.resolve().parents:
+        target_resolved = target.resolve()
+        if root_resolved not in target_resolved.parents:
             raise ValueError("保存路径不合法")
         atomic_write_text(target, clean_content)
-        rel = target.relative_to(root).as_posix()
-        data = _read_index(root)
+        rel = target.resolve().relative_to(root_resolved).as_posix()
         data["entries"][rel] = {
             "title": clean_title,
             "origin": "canvas",
             "prompt": clean_prompt,
-            "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "created_at": now_iso,
         }
         _write_index(root, data)
         return rel
@@ -218,12 +269,14 @@ def save_artifact(
 def hide_creation(creation_id: str) -> None:
     """Take a file off the 创意 list; the file itself stays on disk."""
     root = creations_root()
+    root_resolved = root.resolve()
     path = (root / creation_id).resolve()
-    if root.resolve() not in path.parents or not path.is_file():
+    if root_resolved not in path.parents or not path.is_file():
         raise ValueError("找不到这个作品")
+    rel = path.relative_to(root_resolved).as_posix()
     with _LOCK:
         data = _read_index(root)
-        data["entries"].setdefault(creation_id, {})["hidden"] = True
+        data["entries"].setdefault(rel, {})["hidden"] = True
         _write_index(root, data)
 
 
@@ -422,27 +475,37 @@ def thumbnail(path: Path) -> Path:
 def list_creations(sign: Callable[[str], str]) -> dict[str, Any]:
     """Everything filed under 创意 (newest first) with counts per kind; hidden files left out."""
     root = creations_root()
-    entries = _read_index(root)["entries"]
+    root_resolved = root.resolve()
     items: list[dict[str, Any]] = []
-    for folder, kind in _DIR_KINDS.items():
-        directory = root / folder
-        if not directory.is_dir():
-            continue
-        for path in directory.iterdir():
-            if not path.is_file() or path.name.startswith("."):
+    with _LOCK:
+        entries = _read_index(root)["entries"]
+        for folder, kind in _DIR_KINDS.items():
+            directory = root / folder
+            if not directory.is_dir():
                 continue
-            rel = path.relative_to(root).as_posix()
-            meta = entries.get(rel, {})
-            if meta.get("hidden"):
-                continue
-            stat = path.stat()
-            created = meta.get("created_at") or datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds")
-            items.append({
-                "id": rel, "kind": kind, "name": path.name,
-                "title": meta.get("title") or _display_title(path.stem),
-                "origin": meta.get("origin") or "workspace", "prompt": meta.get("prompt"),
-                "size": stat.st_size, "created_at": created, "url": sign(rel),
-            })
+            for path in directory.iterdir():
+                if not path.is_file() or path.name.startswith("."):
+                    continue
+                rel = path.resolve().relative_to(root_resolved).as_posix()
+                meta = entries.get(rel, {})
+                if meta.get("hidden"):
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                created = meta.get("created_at") or datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds")
+                item: dict[str, Any] = {
+                    "id": rel, "kind": kind, "name": path.name,
+                    "title": meta.get("title") or _display_title(path.stem),
+                    "origin": meta.get("origin") or "workspace", "prompt": meta.get("prompt"),
+                    "size": stat.st_size, "created_at": created, "url": sign(rel),
+                }
+                if meta.get("updated_at"):
+                    item["updated_at"] = meta["updated_at"]
+                if meta.get("versions"):
+                    item["version_count"] = len(meta["versions"])
+                items.append(item)
     items.sort(key=lambda item: item["created_at"], reverse=True)
     counts = {kind: sum(1 for item in items if item["kind"] == kind) for kind in KIND_DIRS}
     return {"items": items, "counts": counts}

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+from datetime import datetime
 from typing import Any
 
 _CARD = re.compile(r"```(?:card|json|ui)[ \t]*\n[\s\S]*?(?:\n```|$)")
@@ -147,6 +148,7 @@ def _build_hit(
         "title": title,
         "main": is_main,
         "helper": helper_name,
+        "archived": bool(meta.get("archived")),
         "turn_id": turn_id,
         "role": hit_role,
         "text": snippet,
@@ -164,6 +166,65 @@ def _dedup_key(cid: str, turn_id: Any, role: str, at_ms: int, snippet: str) -> t
     return (cid, f"@{at_ms // 1000}:{snippet[:24]}", role)
 
 
+def _collect_db_chat_stats(conn_db: Any, target_chat_id: str | None) -> dict[str, tuple[float, str]] | None:
+    """Return ``{chat_id: (max_created_at_s, latest_plain_content)}`` for chats indexed in ``MuseDB``."""
+    lock = getattr(conn_db, "_lock", None)
+    require_conn = getattr(conn_db, "_require_conn", None)
+    if lock is None or not callable(require_conn):
+        return None
+    stats: dict[str, tuple[float, str]] = {}
+    try:
+        with lock:
+            conn = require_conn()
+            if target_chat_id is not None:
+                agg_rows = conn.execute(
+                    "SELECT chat_id, MAX(created_at) AS max_ts FROM messages "
+                    "WHERE active = 1 AND role IN ('user', 'assistant') AND chat_id = ? GROUP BY chat_id",
+                    (target_chat_id,),
+                ).fetchall()
+            else:
+                agg_rows = conn.execute(
+                    "SELECT chat_id, MAX(created_at) AS max_ts FROM messages "
+                    "WHERE active = 1 AND role IN ('user', 'assistant') GROUP BY chat_id"
+                ).fetchall()
+            for r in agg_rows:
+                cid = str(r["chat_id"] or "")
+                if not cid:
+                    continue
+                last_row = conn.execute(
+                    "SELECT content FROM messages WHERE chat_id = ? AND active = 1 "
+                    "AND role IN ('user', 'assistant') AND COALESCE(content, '') != '' "
+                    "ORDER BY id DESC LIMIT 1",
+                    (cid,),
+                ).fetchone()
+                last_plain = _plain(str(last_row["content"] or "")) if last_row is not None else ""
+                stats[cid] = (float(r["max_ts"] or 0.0), last_plain)
+    except Exception:
+        return None
+    return stats
+
+
+def _needs_store_scan(cid: str, meta: dict[str, Any], db_stats: dict[str, tuple[float, str]] | None) -> bool:
+    if db_stats is None or cid not in db_stats:
+        return True
+    db_max_ts, db_last_plain = db_stats[cid]
+    raw_updated = str(meta.get("updated_at") or "").strip()
+    if raw_updated:
+        with contextlib.suppress(ValueError):
+            updated_ts = datetime.fromisoformat(raw_updated.replace("Z", "+00:00")).timestamp()
+            if updated_ts > db_max_ts + 2.0:
+                return True
+    preview = _plain(str(meta.get("preview") or "").strip())
+    if preview and db_last_plain:
+        p_fold = preview[:16].casefold()
+        d_fold = db_last_plain[:16].casefold()
+        if not (preview.casefold().startswith(d_fold) or db_last_plain.casefold().startswith(p_fold)):
+            return True
+    elif preview and not db_last_plain:
+        return True
+    return False
+
+
 def _search_musedb(
     *,
     query: str,
@@ -176,12 +237,13 @@ def _search_musedb(
     needle: str,
     tokens: list[str],
     db: Any = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, tuple[float, str]] | None]:
     roles = [role_filter] if role_filter else ["user", "assistant"]
     fetch_limit = min(200, max(limit * 4, 60))
 
-    def _run_query(conn_db: Any) -> list[dict[str, Any]]:
-        return list(
+    def _run_query(conn_db: Any) -> tuple[list[dict[str, Any]], dict[str, tuple[float, str]] | None]:
+        db_stats = _collect_db_chat_stats(conn_db, target_chat_id)
+        found = list(
             conn_db.search_messages(
                 query,
                 chat_id=target_chat_id,
@@ -190,20 +252,22 @@ def _search_musedb(
             )
             or []
         )
+        return found, db_stats
 
     rows: list[dict[str, Any]] = []
+    db_stats: dict[str, tuple[float, str]] | None = None
     try:
         if db is not None:
-            rows = _run_query(db)
+            rows, db_stats = _run_query(db)
         else:
             from muse.paths import get_muse_db_path
             from muse.runtime import peek_shared_db, use_shared_db
 
             if peek_shared_db() is not None or get_muse_db_path().is_file():
                 with use_shared_db() as shared_db:
-                    rows = _run_query(shared_db)
+                    rows, db_stats = _run_query(shared_db)
     except Exception:
-        return []
+        return [], None
 
     hits: list[dict[str, Any]] = []
     for row in rows:
@@ -238,7 +302,7 @@ def _search_musedb(
                 tokens=tokens,
             )
         )
-    return hits
+    return hits, db_stats
 
 
 def search(
@@ -284,7 +348,7 @@ def search(
     merged: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     # 1) MuseDB FTS5 trigram BM25 + CJK LIKE lookup
-    for hit in _search_musedb(
+    db_hits, db_stats = _search_musedb(
         query=words,
         allowed=allowed,
         main_chat_id=eff_main,
@@ -295,13 +359,16 @@ def search(
         needle=needle,
         tokens=tokens,
         db=db,
-    ):
+    )
+    for hit in db_hits:
         key = _dedup_key(hit["chat_id"], hit.get("turn_id"), hit["role"], hit["created_at_ms"], hit["snippet"])
         if key not in merged:
             merged[key] = hit
 
-    # 2) ChatStore scan fallback / supplement (ensures pure ChatStore fixtures & non-DB rows are 100% searchable)
+    # 2) Incremental ChatStore scan fallback (only for chats missing/newer than MuseDB)
     for cid, meta in allowed.items():
+        if not _needs_store_scan(cid, meta, db_stats):
+            continue
         with contextlib.suppress(Exception):
             events = store.events(cid)
             for event in events:

@@ -9,6 +9,7 @@ heuristic fallback when no model API key is configured or the fast call times ou
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import threading
@@ -19,7 +20,7 @@ from typing import Any, Optional
 CACHE_MAX_SIZE = 128
 
 _CACHE_LOCK = threading.Lock()
-_CACHE: OrderedDict[tuple[str, str], list[str]] = OrderedDict()
+_CACHE: OrderedDict[tuple[str, ...], list[str]] = OrderedDict()
 
 _CARD_BLOCK_RE = re.compile(r"```(?:card|ui|json)[ \t]*\n[\s\S]*?(?:\n```|$)", re.IGNORECASE)
 _CODE_FENCE_RE = re.compile(r"```(?!(?:card|ui|json)\b)[^\n]*\n[\s\S]*?\n```", re.IGNORECASE)
@@ -41,7 +42,24 @@ def clear_cache() -> None:
         _CACHE.clear()
 
 
-def _cache_get(key: tuple[str, str]) -> Optional[list[str]]:
+def invalidate_followups(chat_id: str) -> int:
+    """Drop all cached follow-up entries belonging to ``chat_id`` (returns removed count)."""
+    cid = str(chat_id or "").strip()
+    if not cid:
+        return 0
+    with _CACHE_LOCK:
+        stale = [key for key in _CACHE if key and key[0] == cid]
+        for key in stale:
+            _CACHE.pop(key, None)
+        return len(stale)
+
+
+def _text_digest(assistant_text: str, user_text: str = "") -> str:
+    material = f"{user_text}\0{assistant_text}" if user_text else assistant_text
+    return hashlib.blake2b(material.encode("utf-8", errors="replace"), digest_size=8).hexdigest()
+
+
+def _cache_get(key: tuple[str, ...]) -> Optional[list[str]]:
     with _CACHE_LOCK:
         val = _CACHE.get(key)
         if val is None:
@@ -50,7 +68,7 @@ def _cache_get(key: tuple[str, str]) -> Optional[list[str]]:
         return list(val)
 
 
-def _cache_set(key: tuple[str, str], suggestions: list[str]) -> None:
+def _cache_set(key: tuple[str, ...], suggestions: list[str]) -> None:
     with _CACHE_LOCK:
         _CACHE[key] = list(suggestions)
         _CACHE.move_to_end(key)
@@ -283,7 +301,7 @@ async def get_followups(
     if not eff_turn_id:
         return {"chat_id": chat_id, "turn_id": "", "suggestions": []}
 
-    cache_key = (chat_id, eff_turn_id)
+    cache_key = (chat_id, eff_turn_id, _text_digest(assistant_text, user_text))
     cached = _cache_get(cache_key)
     if cached is not None:
         return {"chat_id": chat_id, "turn_id": eff_turn_id, "suggestions": cached}
@@ -311,4 +329,4 @@ async def get_followups(
     return {"chat_id": chat_id, "turn_id": eff_turn_id, "suggestions": final}
 
 
-__all__ = ["CACHE_MAX_SIZE", "clear_cache", "get_followups", "heuristic_followups"]
+__all__ = ["CACHE_MAX_SIZE", "clear_cache", "get_followups", "heuristic_followups", "invalidate_followups"]

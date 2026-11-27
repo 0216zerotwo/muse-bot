@@ -400,19 +400,35 @@ class ChatTurnEngine(AgentEngine):
         kind, hid, _ = cls._resolve_actor_helper(chat_id)
         return kind, hid
 
+    def _apply_model_override(self, actor: Any, ov: Optional[dict[str, Any]], *, from_store: bool = False) -> None:
+        if from_store:
+            with contextlib.suppress(Exception):
+                from companion.modules.models import resolve_sink_session_override
+                ok, ov = resolve_sink_session_override(self._sink, actor.chat_id)
+                if not ok:
+                    return
+        actor.set_model_override(ov)
+        ctx = ov.get("context_length") if isinstance(ov, dict) else None
+        if isinstance(ctx, int) and ctx > 0:
+            actor.context_window = ctx
+        elif ov is None and not from_store:
+            actor.context_window = 128_000
+
     def _refresh_actor_settings(self, actor: Any) -> None:
         from .helpers_orch import resolve_helper_model_override
 
         actor.max_iterations = self._configured_max_turns()
         kind, hid, hrow = self._resolve_actor_helper(actor.chat_id)
         if hrow is not None:
-            actor.actor_kind = "helper"
-            actor.helper_id = hid
-            actor.set_model_override(resolve_helper_model_override(hrow))
+            actor.actor_kind, actor.helper_id = "helper", hid
+            self._apply_model_override(actor, resolve_helper_model_override(hrow))
         elif getattr(actor, "actor_kind", "") == "helper":
-            actor.actor_kind = kind
-            actor.helper_id = None
-            actor.set_model_override(None)
+            actor.actor_kind, actor.helper_id = kind, None
+            self._apply_model_override(actor, None)
+            if kind == "companion":
+                self._apply_model_override(actor, None, from_store=True)
+        elif kind == "companion" and actor._model_override is None:
+            self._apply_model_override(actor, None, from_store=True)
 
     def get_actor(self, chat_id: str) -> Any:
         from .helpers_orch import resolve_helper_model_override
@@ -453,7 +469,9 @@ class ChatTurnEngine(AgentEngine):
                 max_iterations=self._configured_max_turns(),
             )
             if helper_row is not None:
-                actor.set_model_override(resolve_helper_model_override(helper_row))
+                self._apply_model_override(actor, resolve_helper_model_override(helper_row))
+            elif default_kind == "companion":
+                self._apply_model_override(actor, None, from_store=True)
             self._actors[chat_id] = actor
         return actor
 
@@ -485,7 +503,7 @@ class ChatTurnEngine(AgentEngine):
         return await self.get_actor(chat_id).renew_session(silent=True)
 
     def set_session_model_override(self, chat_id: str, override: Optional[dict[str, Any]]) -> None:
-        self.get_actor(chat_id).set_model_override(override)
+        self._apply_model_override(self.get_actor(chat_id), override)
 
     async def regenerate(self, chat_id: str, turn_id: str) -> str:
         actor = self.get_actor(chat_id)

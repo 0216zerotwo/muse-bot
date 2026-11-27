@@ -1,8 +1,8 @@
 """Golden wire-protocol and import-seam contracts for Web PWA, iPhone, and Android clients.
 
 Locks down:
-1. Exact HTTP & WebSocket route table on ``companion/server.py`` (40 HTTP routes + 2 WS routes,
-   plus static root mount when ``web/dist`` exists) and the 4 signed-URL path prefixes.
+1. Exact HTTP & WebSocket route table on ``companion/server.py`` (42 HTTP routes + 2 WS routes,
+   plus static root mount when ``web/dist`` exists) and the 5 signed-URL path prefixes.
 2. Exact ``MUTATIONS`` action table for ``webui_request`` frames (47 mutations).
 3. ``/webui/bootstrap`` local 200 payload and ``ETag`` / ``304 Not Modified`` thread-sync wire contract.
 4. AST static boundary check: zero ``.py`` files in ``companion/`` import ``hermes_constants``,
@@ -35,10 +35,12 @@ EXPECTED_HTTP_AND_WS_ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("/api/sessions/{key}/webui-thread", ("GET",)),
     ("/api/sessions/{key}/export", ("GET",)),
     ("/api/sessions/{key}/followups", ("GET",)),
+    ("/api/sessions/{key}/context", ("GET",)),
     ("/api/webui/companion", ("GET",)),
     ("/api/webui/approvals", ("GET",)),
     ("/api/webui/companion/search", ("GET",)),
     ("/api/webui/companion/tts", ("POST",)),
+    ("/api/webui/companion/tts/file/{sig}/{payload}", ("GET",)),
     ("/api/webui/approvals/grants", ("GET",)),
     ("/api/webui/companion/models", ("GET",)),
     ("/api/webui/companion/model-catalog", ("GET",)),
@@ -259,6 +261,7 @@ class WireAndSeamContractTest(unittest.TestCase):
         self.assertEqual(server_mod.MAX_FRAME_BYTES, 36 * 1024 * 1024)
         self.assertEqual(server_mod.CREATIONS_PREFIX, "/api/webui/companion/creations/file")
         self.assertEqual(server_mod.AVATARS_PREFIX, "/api/webui/companion/avatars/file")
+        self.assertEqual(server_mod.TTS_PREFIX, "/api/webui/companion/tts/file")
 
     def test_exact_webui_request_mutations_table(self):
         pkg = _companion_pkg()
