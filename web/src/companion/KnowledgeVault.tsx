@@ -5,8 +5,10 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  Copy,
   FolderOpen,
   Loader2,
+  MessageSquareQuote,
   Pencil,
   Search,
   Trash2,
@@ -14,18 +16,22 @@ import {
   X,
 } from "lucide-react";
 
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { useClient } from "@/providers/ClientProvider";
 
 import {
   deleteKnowledgeDocument,
   fetchKnowledge,
+  readKnowledgeDocument,
   updateKnowledgeDocument,
   uploadKnowledgeFile,
   type KnowledgeDocument,
+  type KnowledgeDocumentDetail,
   type KnowledgePayload,
   type KnowledgeSearchHit,
 } from "./companion-api";
 import { fileBadge, fileSize } from "./fileKinds";
+import { MuseSheet } from "./muse/Sheet";
 import { CompanionPet } from "./Pet";
 import { dayLabel } from "./presentation";
 
@@ -85,16 +91,27 @@ export function splitHighlightedText(text: string, matches: [number, number][] =
 }
 
 function originLabel(origin: string): string {
-  if (origin === "creation") return "作品导入";
+  if (origin === "creation" || origin.startsWith("creation:")) return "作品导入";
   if (origin === "local") return "本地导入";
   return "手动上传";
 }
 
+function formatKnowledgeQuote(title: string, heading: string, content: string): string {
+  const header = heading ? `[知识库 · ${title} / ${heading}]` : `[知识库 · ${title}]`;
+  return `${header}\n${content.trim().slice(0, 600)}`;
+}
+
 /**
  * Personal Knowledge Vault: FTS5 hybrid search with match highlights, collection capsules,
- * click/drag-and-drop upload, inline title/collection editing, and document removal.
+ * click/drag-and-drop upload, full chunk reader, quote-to-ask handoff, inline editing, and deletion.
  */
-export function KnowledgeVault({ active }: { active: boolean }) {
+export function KnowledgeVault({
+  active,
+  onQuoteToAsk,
+}: {
+  active: boolean;
+  onQuoteToAsk?: (quote: string, prompt?: string) => void;
+}) {
   const { client, token } = useClient();
   const [payload, setPayload] = useState<KnowledgePayload | null>(null);
   const [loading, setLoading] = useState(false);
@@ -119,6 +136,38 @@ export function KnowledgeVault({ active }: { active: boolean }) {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [expandedHits, setExpandedHits] = useState<ReadonlySet<string>>(new Set());
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  const [readerDoc, setReaderDoc] = useState<KnowledgeDocument | null>(null);
+  const [readerDetail, setReaderDetail] = useState<KnowledgeDocumentDetail | null>(null);
+  const [readerLoading, setReaderLoading] = useState(false);
+  const [readerError, setReaderError] = useState<string | null>(null);
+
+  const openDocumentReader = useCallback(
+    async (doc: KnowledgeDocument) => {
+      setReaderDoc(doc);
+      setReaderDetail(null);
+      setReaderLoading(true);
+      setReaderError(null);
+      try {
+        const detail = await readKnowledgeDocument(client, doc.id);
+        setReaderDetail(detail);
+      } catch (err: unknown) {
+        setReaderError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setReaderLoading(false);
+      }
+    },
+    [client],
+  );
+
+  const copySnippet = useCallback((key: string, text: string) => {
+    void copyTextToClipboard(text).then((ok) => {
+      if (!ok) return;
+      setCopiedKey(key);
+      window.setTimeout(() => setCopiedKey((curr) => (curr === key ? null : curr)), 1_500);
+    });
+  }, []);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -509,7 +558,18 @@ export function KnowledgeVault({ active }: { active: boolean }) {
                     key={hitKey}
                     hit={hit}
                     expanded={expanded}
+                    copied={copiedKey === `hit:${hitKey}`}
                     onToggleExpand={() => toggleHitExpand(hitKey)}
+                    onCopy={() => copySnippet(`hit:${hitKey}`, hit.content || hit.snippet)}
+                    onQuoteToAsk={
+                      onQuoteToAsk
+                        ? () =>
+                            onQuoteToAsk(
+                              formatKnowledgeQuote(hit.title, hit.heading, hit.content || hit.snippet),
+                              `结合「${hit.title}」的这段内容，`,
+                            )
+                        : undefined
+                    }
                   />
                 );
               })}
@@ -603,28 +663,35 @@ export function KnowledgeVault({ active }: { active: boolean }) {
                     </form>
                   ) : (
                     <div className="flex items-start gap-3">
-                      <span
-                        className="mt-0.5 grid h-10 w-10 shrink-0 place-items-center rounded-xl font-mono text-[10px] font-bold"
-                        style={{ background: "var(--c-accent-soft)", color: "var(--c-primary)" }}
-                        aria-hidden="true"
+                      <button
+                        type="button"
+                        onClick={() => void openDocumentReader(doc)}
+                        aria-label={`阅读「${doc.title}」全部章节分块`}
+                        className="c-pressable flex min-w-0 flex-1 items-start gap-3 rounded-xl text-left"
                       >
-                        {fileBadge(doc.filename)}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="truncate text-[14.5px] font-medium">{doc.title}</span>
-                          <span
-                            className="rounded-full px-2 py-0.5 text-[11px] font-medium"
-                            style={{ background: "var(--c-fill)", color: "var(--c-text-muted)" }}
-                          >
-                            {doc.collection}
-                          </span>
+                        <span
+                          className="mt-0.5 grid h-10 w-10 shrink-0 place-items-center rounded-xl font-mono text-[10px] font-bold"
+                          style={{ background: "var(--c-accent-soft)", color: "var(--c-primary)" }}
+                          aria-hidden="true"
+                        >
+                          {fileBadge(doc.filename)}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="truncate text-[14.5px] font-medium">{doc.title}</span>
+                            <span
+                              className="rounded-full px-2 py-0.5 text-[11px] font-medium"
+                              style={{ background: "var(--c-fill)", color: "var(--c-text-muted)" }}
+                            >
+                              {doc.collection}
+                            </span>
+                          </div>
+                          <p className="c-muted mt-0.5 truncate text-[12px]">
+                            {doc.filename} · {doc.chunk_count} 分块 · {fileSize(doc.size_bytes)} · {originLabel(doc.origin)} ·{" "}
+                            {dayLabel(Math.round(doc.updated_at * 1000))}
+                          </p>
                         </div>
-                        <p className="c-muted mt-0.5 truncate text-[12px]">
-                          {doc.filename} · {doc.chunk_count} 分块 · {fileSize(doc.size_bytes)} · {originLabel(doc.origin)} ·{" "}
-                          {dayLabel(Math.round(doc.updated_at * 1000))}
-                        </p>
-                      </div>
+                      </button>
 
                       {isConfirmingDelete ? (
                         <div className="flex shrink-0 items-center gap-1.5">
@@ -679,6 +746,102 @@ export function KnowledgeVault({ active }: { active: boolean }) {
           </ul>
         )}
       </section>
+
+      <MuseSheet
+        open={readerDoc !== null}
+        onClose={() => setReaderDoc(null)}
+        title={readerDoc?.title ?? "知识库文档"}
+      >
+        {readerDoc && (
+          <div className="flex flex-col gap-3 pb-3" data-testid="knowledge-reader-sheet">
+            <div className="c-muted flex flex-wrap items-center gap-1.5 text-[12px]">
+              <span className="rounded-full px-2 py-0.5 font-medium" style={{ background: "var(--c-fill)" }}>
+                {readerDoc.collection}
+              </span>
+              <span>{readerDoc.filename}</span>
+              <span>· {readerDetail?.chunks.length ?? readerDoc.chunk_count} 个分块</span>
+              <span>· {fileSize(readerDoc.size_bytes)}</span>
+            </div>
+
+            {readerLoading ? (
+              <div className="flex items-center justify-center gap-2 py-10 text-[13.5px] c-muted" role="status">
+                <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                正在加载全文分块…
+              </div>
+            ) : readerError ? (
+              <div className="c-card flex items-center gap-2 rounded-2xl p-3.5 text-[13px] c-danger" role="alert">
+                <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span className="min-w-0 flex-1">读取分块失败：{readerError}</span>
+                <button
+                  type="button"
+                  onClick={() => void openDocumentReader(readerDoc)}
+                  className="c-pressable rounded-full px-3 py-1 text-[12px] font-semibold"
+                  style={{ background: "var(--c-fill)", color: "var(--c-text)" }}
+                >
+                  重试
+                </button>
+              </div>
+            ) : !readerDetail || readerDetail.chunks.length === 0 ? (
+              <p className="c-muted py-8 text-center text-[13.5px]">该文档暂无可读分块</p>
+            ) : (
+              <ul className="flex flex-col gap-2.5">
+                {readerDetail.chunks.map((chunk) => {
+                  const key = `chunk:${readerDoc.id}:${chunk.chunk_index}`;
+                  const isCopied = copiedKey === key;
+                  return (
+                    <li
+                      key={chunk.chunk_index}
+                      data-testid="knowledge-reader-chunk"
+                      className="c-card flex flex-col gap-2 rounded-2xl p-3.5"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="min-w-0 truncate text-[13px] font-semibold">
+                          {chunk.heading || `第 ${chunk.chunk_index + 1} 段`}
+                        </span>
+                        <span className="c-muted shrink-0 text-[11px] tabular-nums">
+                          分块 #{chunk.chunk_index + 1}
+                        </span>
+                      </div>
+                      <p className="whitespace-pre-wrap break-words text-[13.5px] leading-relaxed">
+                        {chunk.content}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => copySnippet(key, chunk.content)}
+                          className="c-pressable inline-flex min-h-8 items-center gap-1 rounded-full px-3 text-[12px] font-medium"
+                          style={{ background: "var(--c-fill)" }}
+                        >
+                          {isCopied ? (
+                            <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                          ) : (
+                            <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                          )}
+                          {isCopied ? "已复制" : "复制片段"}
+                        </button>
+                        {onQuoteToAsk && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const quote = formatKnowledgeQuote(readerDoc.title, chunk.heading, chunk.content);
+                              setReaderDoc(null);
+                              onQuoteToAsk(quote, `结合「${readerDoc.title}」的这段内容，`);
+                            }}
+                            className="c-primary inline-flex min-h-8 items-center gap-1 rounded-full px-3 text-[12px] font-semibold"
+                          >
+                            <MessageSquareQuote className="h-3.5 w-3.5" aria-hidden="true" />
+                            引用去提问
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
+      </MuseSheet>
     </div>
   );
 }
@@ -695,11 +858,17 @@ function StatCard({ label, value }: { label: string; value: string }) {
 function KnowledgeHitCard({
   hit,
   expanded,
+  copied,
   onToggleExpand,
+  onCopy,
+  onQuoteToAsk,
 }: {
   hit: KnowledgeSearchHit;
   expanded: boolean;
+  copied: boolean;
   onToggleExpand: () => void;
+  onCopy: () => void;
+  onQuoteToAsk?: () => void;
 }) {
   const segments = useMemo(() => splitHighlightedText(hit.snippet, hit.matches), [hit.snippet, hit.matches]);
   const hasMore = hit.content.length > hit.snippet.length;
@@ -765,6 +934,29 @@ function KnowledgeHitCard({
           )}
         </div>
       )}
+
+      <div className="mt-0.5 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={onCopy}
+          className="c-pressable inline-flex min-h-8 items-center gap-1 rounded-full px-2.5 text-[12px] font-medium"
+          style={{ background: "var(--c-fill)" }}
+        >
+          {copied ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : <Copy className="h-3.5 w-3.5" aria-hidden="true" />}
+          {copied ? "已复制" : "复制片段"}
+        </button>
+        {onQuoteToAsk && (
+          <button
+            type="button"
+            onClick={onQuoteToAsk}
+            className="c-pressable inline-flex min-h-8 items-center gap-1 rounded-full px-2.5 text-[12px] font-semibold"
+            style={{ background: "var(--c-accent-soft)", color: "var(--c-primary)" }}
+          >
+            <MessageSquareQuote className="h-3.5 w-3.5" aria-hidden="true" />
+            引用去提问
+          </button>
+        )}
+      </div>
     </li>
   );
 }

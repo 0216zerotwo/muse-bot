@@ -1,20 +1,21 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertCircle,
   BookmarkPlus,
   Check,
   Code2,
+  Columns2,
   Copy,
   Download,
   Eye,
   Loader2,
+  RotateCcw,
   Sparkles,
   WrapText,
   X,
 } from "lucide-react";
 
-import { CodeBlock } from "@/components/CodeBlock";
 import { MarkdownText } from "@/components/MarkdownText";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useThemeValue } from "@/hooks/useTheme";
@@ -43,15 +44,19 @@ const TYPE_BADGE: Record<ArtifactType, string> = {
   code: "代码",
 };
 
+const PREVIEW_DEBOUNCE_MS = 250;
+
+type PaneMode = "preview" | "edit" | "split";
+
 type SaveState =
   | { status: "idle" }
   | { status: "saving" }
-  | { status: "saved"; savedId: string }
+  | { status: "saved"; savedId: string; updated: boolean }
   | { status: "error"; message: string };
 
 /**
  * Lazy-loaded interactive Artifact / Canvas pane.
- * - Desktop (`>= 1024px`): soft rounded side-pane next to the chat column.
+ * - Desktop (`>= 1024px`): soft rounded side-pane next to the chat column (`>= 1280px` adds split edit/preview).
  * - Mobile / narrow (`< 1024px`): full-screen slide-up sheet overlay.
  */
 export function ArtifactPane() {
@@ -67,6 +72,183 @@ export function ArtifactPane() {
   );
 }
 
+/** Zero-dependency monospace live code editor with synchronized line numbers and 2-space Tab indentation. */
+function LiveCodeEditor({
+  filename,
+  value,
+  onChange,
+  wrap,
+  onToggleWrap,
+}: {
+  filename: string;
+  value: string;
+  onChange: (next: string) => void;
+  wrap: boolean;
+  onToggleWrap: () => void;
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const gutterRef = useRef<HTMLDivElement>(null);
+  const lineCount = useMemo(() => Math.max(1, value.split("\n").length), [value]);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Tab") return;
+    event.preventDefault();
+    const box = event.currentTarget;
+    const start = box.selectionStart ?? 0;
+    const end = box.selectionEnd ?? 0;
+
+    if (event.shiftKey) {
+      const lineStart = value.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+      if (value.slice(lineStart, lineStart + 2) === "  ") {
+        const next = value.slice(0, lineStart) + value.slice(lineStart + 2);
+        onChange(next);
+        const nextStart = Math.max(lineStart, start - 2);
+        const nextEnd = Math.max(lineStart, end - 2);
+        window.requestAnimationFrame(() => {
+          textareaRef.current?.setSelectionRange(nextStart, nextEnd);
+        });
+      }
+      return;
+    }
+
+    const next = `${value.slice(0, start)}  ${value.slice(end)}`;
+    onChange(next);
+    const caret = start + 2;
+    window.requestAnimationFrame(() => {
+      textareaRef.current?.setSelectionRange(caret, caret);
+    });
+  };
+
+  return (
+    <div
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-om-border"
+      style={{ background: "var(--c-surface)" }}
+    >
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-om-border px-3 py-1.5 text-[12px]">
+        <span className="c-muted truncate font-mono">{filename}</span>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="c-muted hidden text-[11px] tabular-nums sm:inline">
+            {lineCount} 行 · {value.length} 字
+          </span>
+          <button
+            type="button"
+            aria-pressed={wrap}
+            onClick={onToggleWrap}
+            className={cn(
+              "c-pressable inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11.5px] font-medium",
+              wrap ? "text-om-fg" : "c-muted",
+            )}
+            style={wrap ? { background: "var(--c-fill)" } : undefined}
+          >
+            <WrapText className="h-3.5 w-3.5" aria-hidden="true" />
+            自动换行
+          </button>
+        </div>
+      </div>
+
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        <div
+          ref={gutterRef}
+          aria-hidden="true"
+          data-testid="artifact-line-numbers"
+          className="c-muted shrink-0 select-none overflow-hidden border-r border-om-border px-2.5 py-3 text-right font-mono text-[12px] leading-[1.6] tabular-nums"
+          style={{ background: "color-mix(in srgb, var(--c-fill) 45%, transparent)", minWidth: "2.75rem" }}
+        >
+          {Array.from({ length: lineCount }, (_, i) => (
+            <div key={i + 1}>{i + 1}</div>
+          ))}
+        </div>
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={handleKeyDown}
+          onScroll={(event) => {
+            if (gutterRef.current) {
+              gutterRef.current.scrollTop = event.currentTarget.scrollTop;
+            }
+          }}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          aria-label="编辑画布源码"
+          data-testid="artifact-code-editor"
+          className={cn(
+            "min-h-0 flex-1 resize-none bg-transparent px-3 py-3 font-mono text-[12.5px] leading-[1.6] text-om-fg outline-none",
+            wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre overflow-x-auto",
+          )}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ArtifactPreviewStage({
+  type,
+  title,
+  code,
+  isDark,
+}: {
+  type: ArtifactType;
+  title: string;
+  code: string;
+  isDark: boolean;
+}) {
+  const htmlSrcDoc = useMemo(
+    () => (type === "html" ? artifactHtmlDocument(code, isDark) : ""),
+    [type, code, isDark],
+  );
+  const svgSrcDoc = useMemo(
+    () => (type === "svg" ? svgPageDocument(code, isDark) : ""),
+    [type, code, isDark],
+  );
+
+  if (type === "html") {
+    return (
+      <iframe
+        title={`HTML 预览：${title}`}
+        sandbox="allow-scripts"
+        referrerPolicy="no-referrer"
+        srcDoc={htmlSrcDoc}
+        className="h-full w-full rounded-2xl border border-om-border bg-white"
+      />
+    );
+  }
+  if (type === "svg") {
+    return (
+      <iframe
+        title={`SVG 预览：${title}`}
+        sandbox=""
+        referrerPolicy="no-referrer"
+        srcDoc={svgSrcDoc}
+        className="h-full w-full rounded-2xl border border-om-border bg-transparent"
+      />
+    );
+  }
+  if (type === "mermaid") {
+    return (
+      <Suspense
+        fallback={
+          <div className="flex h-full items-center justify-center gap-2 text-sm text-om-muted" role="status">
+            <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+            正在加载图表引擎…
+          </div>
+        }
+      >
+        <LazyMermaidDiagram code={code} interactive className="h-full" />
+      </Suspense>
+    );
+  }
+  return (
+    <div
+      className="c-bubble-text h-full overflow-y-auto overscroll-contain rounded-2xl border border-om-border px-5 py-4"
+      style={{ background: "var(--c-surface)" }}
+    >
+      <MarkdownText>{code}</MarkdownText>
+    </div>
+  );
+}
+
 function ArtifactPaneContent({
   artifact,
   onClose,
@@ -74,17 +256,21 @@ function ArtifactPaneContent({
 }: {
   artifact: ArtifactItem;
   onClose: () => void;
-  onRefine: (item: ArtifactItem) => void;
+  onRefine: (item: ArtifactItem, editedCode?: string) => void;
 }) {
   const { client } = useClient();
   const isDesktop = useMediaQuery("(min-width: 1024px)", false);
+  const isWideDesktop = useMediaQuery("(min-width: 1280px)", false);
   const isDark = useThemeValue() === "dark";
   const panelRef = useRef<HTMLDivElement>(null);
 
   const canPreview = artifact.type !== "code";
-  const [mode, setMode] = useState<"preview" | "source">(() =>
-    canPreview ? (artifact.initialTab ?? "preview") : "source",
+  const [mode, setMode] = useState<PaneMode>(() =>
+    canPreview ? (artifact.initialTab === "source" ? "edit" : "preview") : "edit",
   );
+  const [draftCode, setDraftCode] = useState(artifact.code);
+  const [debouncedCode, setDebouncedCode] = useState(artifact.code);
+  const [savedId, setSavedId] = useState<string | null>(null);
   const [wrapSource, setWrapSource] = useState(true);
   const [copied, setCopied] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>({ status: "idle" });
@@ -93,28 +279,48 @@ function ArtifactPaneContent({
   useDialogFocus(panelRef, !isDesktop);
 
   useEffect(() => {
-    setMode(artifact.type !== "code" ? (artifact.initialTab ?? "preview") : "source");
+    setMode(artifact.type !== "code" ? (artifact.initialTab === "source" ? "edit" : "preview") : "edit");
+    setDraftCode(artifact.code);
+    setDebouncedCode(artifact.code);
+    setSavedId(null);
     setCopied(false);
     setSaveState({ status: "idle" });
   }, [artifact.id, artifact.code, artifact.type, artifact.initialTab]);
 
-  const htmlSrcDoc = useMemo(
-    () => (artifact.type === "html" ? artifactHtmlDocument(artifact.code, isDark) : ""),
-    [artifact.type, artifact.code, isDark],
-  );
+  useEffect(() => {
+    if (!isWideDesktop && mode === "split") {
+      setMode("preview");
+    }
+  }, [isWideDesktop, mode]);
 
-  const svgSrcDoc = useMemo(
-    () => (artifact.type === "svg" ? svgPageDocument(artifact.code, isDark) : ""),
-    [artifact.type, artifact.code, isDark],
-  );
+  useEffect(() => {
+    if (draftCode === debouncedCode) return;
+    const timer = window.setTimeout(() => {
+      setDebouncedCode(draftCode);
+    }, PREVIEW_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [draftCode, debouncedCode]);
+
+  const isDirty = draftCode !== artifact.code;
+
+  const handleCodeChange = useCallback((next: string) => {
+    setDraftCode(next);
+    setSaveState((prev) => (prev.status === "saved" || prev.status === "error" ? { status: "idle" } : prev));
+  }, []);
+
+  const handleRevert = useCallback(() => {
+    setDraftCode(artifact.code);
+    setDebouncedCode(artifact.code);
+    setSaveState((prev) => (prev.status === "saved" || prev.status === "error" ? { status: "idle" } : prev));
+  }, [artifact.code]);
 
   const handleCopy = useCallback(() => {
-    void copyTextToClipboard(artifact.code).then((ok) => {
+    void copyTextToClipboard(draftCode).then((ok) => {
       if (!ok) return;
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1_500);
     });
-  }, [artifact.code]);
+  }, [draftCode]);
 
   const handleDownload = useCallback(() => {
     const filename = downloadFilenameForCode(artifact.language, artifact.title);
@@ -126,33 +332,53 @@ function ArtifactPaneContent({
           : artifact.type === "markdown"
             ? "text/markdown;charset=utf-8"
             : "text/plain;charset=utf-8";
-    downloadTextFile(artifact.code, filename, mime);
-  }, [artifact]);
+    downloadTextFile(draftCode, filename, mime);
+  }, [artifact.language, artifact.title, artifact.type, draftCode]);
 
   const handleSave = useCallback(async () => {
     if (saveState.status === "saving") return;
     setSaveState({ status: "saving" });
     try {
       const res = await saveCreationArtifact(client, {
+        ...(savedId ? { id: savedId } : {}),
         title: artifact.title,
-        content: artifact.code,
+        content: draftCode,
         format: artifactFormatForLanguage(artifact.language || artifact.type),
       });
-      setSaveState({ status: "saved", savedId: res.saved_id });
+      const nextId = res.saved_id || savedId || "";
+      setSavedId(nextId || null);
+      setSaveState({
+        status: "saved",
+        savedId: nextId,
+        updated: Boolean(res.updated ?? savedId),
+      });
     } catch (err: unknown) {
       setSaveState({
         status: "error",
         message: err instanceof Error ? err.message : String(err),
       });
     }
-  }, [artifact, client, saveState.status]);
+  }, [artifact.language, artifact.title, artifact.type, client, draftCode, saveState.status, savedId]);
 
   const handleRefine = useCallback(() => {
-    onRefine(artifact);
+    onRefine(artifact, isDirty ? draftCode : undefined);
     if (!isDesktop) onClose();
-  }, [artifact, isDesktop, onClose, onRefine]);
+  }, [artifact, draftCode, isDesktop, isDirty, onClose, onRefine]);
 
   const badgeText = artifact.type === "code" ? (artifact.language || "TEXT").toUpperCase() : TYPE_BADGE[artifact.type];
+  const filename = downloadFilenameForCode(artifact.language, artifact.title);
+  const effectiveMode: PaneMode = !canPreview ? "edit" : mode === "split" && !isWideDesktop ? "preview" : mode;
+
+  const saveLabel =
+    saveState.status === "saving"
+      ? "保存中…"
+      : saveState.status === "saved"
+        ? saveState.updated
+          ? "已更新资源库"
+          : "已存入资源库"
+        : savedId
+          ? "更新资源库"
+          : "存入资源库";
 
   const inner = (
     <div
@@ -183,8 +409,29 @@ function ArtifactPaneContent({
               {badgeText}
             </span>
             <h2 className="truncate text-[15px] font-semibold leading-tight">{artifact.title}</h2>
+            {isDirty && (
+              <span
+                data-testid="artifact-dirty-badge"
+                className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium"
+                style={{ background: "var(--c-fill)", color: "var(--c-primary)" }}
+              >
+                已修改
+              </span>
+            )}
           </div>
         </div>
+
+        {isDirty && (
+          <button
+            type="button"
+            onClick={handleRevert}
+            className="c-pressable inline-flex min-h-8 shrink-0 items-center gap-1 rounded-full px-2.5 text-[12px] font-medium"
+            style={{ background: "var(--c-fill)" }}
+          >
+            <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+            还原
+          </button>
+        )}
 
         {canPreview && (
           <div
@@ -196,13 +443,13 @@ function ArtifactPaneContent({
             <button
               type="button"
               role="tab"
-              aria-selected={mode === "preview"}
+              aria-selected={effectiveMode === "preview"}
               onClick={() => setMode("preview")}
               className={cn(
                 "inline-flex min-h-8 items-center gap-1 rounded-full px-3 text-[12.5px] font-medium transition-colors",
-                mode === "preview" ? "shadow-sm" : "c-muted",
+                effectiveMode === "preview" ? "shadow-sm" : "c-muted",
               )}
-              style={mode === "preview" ? { background: "var(--c-segment-on)", color: "var(--c-text)" } : undefined}
+              style={effectiveMode === "preview" ? { background: "var(--c-segment-on)", color: "var(--c-text)" } : undefined}
             >
               <Eye className="h-3.5 w-3.5" aria-hidden="true" />
               预览
@@ -210,17 +457,33 @@ function ArtifactPaneContent({
             <button
               type="button"
               role="tab"
-              aria-selected={mode === "source"}
-              onClick={() => setMode("source")}
+              aria-selected={effectiveMode === "edit"}
+              onClick={() => setMode("edit")}
               className={cn(
                 "inline-flex min-h-8 items-center gap-1 rounded-full px-3 text-[12.5px] font-medium transition-colors",
-                mode === "source" ? "shadow-sm" : "c-muted",
+                effectiveMode === "edit" ? "shadow-sm" : "c-muted",
               )}
-              style={mode === "source" ? { background: "var(--c-segment-on)", color: "var(--c-text)" } : undefined}
+              style={effectiveMode === "edit" ? { background: "var(--c-segment-on)", color: "var(--c-text)" } : undefined}
             >
               <Code2 className="h-3.5 w-3.5" aria-hidden="true" />
-              源码
+              编辑
             </button>
+            {isWideDesktop && (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={effectiveMode === "split"}
+                onClick={() => setMode("split")}
+                className={cn(
+                  "inline-flex min-h-8 items-center gap-1 rounded-full px-3 text-[12.5px] font-medium transition-colors",
+                  effectiveMode === "split" ? "shadow-sm" : "c-muted",
+                )}
+                style={effectiveMode === "split" ? { background: "var(--c-segment-on)", color: "var(--c-text)" } : undefined}
+              >
+                <Columns2 className="h-3.5 w-3.5" aria-hidden="true" />
+                分屏
+              </button>
+            )}
           </div>
         )}
 
@@ -236,77 +499,43 @@ function ArtifactPaneContent({
 
       {/* Canvas Body */}
       <div className="relative min-h-0 flex-1 overflow-hidden p-3">
-        {mode === "preview" && canPreview ? (
-          artifact.type === "html" ? (
-            <iframe
-              title={`HTML 预览：${artifact.title}`}
-              sandbox="allow-scripts"
-              referrerPolicy="no-referrer"
-              srcDoc={htmlSrcDoc}
-              className="h-full w-full rounded-2xl border border-om-border bg-white"
+        {effectiveMode === "split" && canPreview ? (
+          <div data-testid="artifact-split-view" className="grid h-full min-h-0 grid-cols-2 gap-3">
+            <LiveCodeEditor
+              filename={filename}
+              value={draftCode}
+              onChange={handleCodeChange}
+              wrap={wrapSource}
+              onToggleWrap={() => setWrapSource((v) => !v)}
             />
-          ) : artifact.type === "svg" ? (
-            <iframe
-              title={`SVG 预览：${artifact.title}`}
-              sandbox=""
-              referrerPolicy="no-referrer"
-              srcDoc={svgSrcDoc}
-              className="h-full w-full rounded-2xl border border-om-border bg-transparent"
-            />
-          ) : artifact.type === "mermaid" ? (
-            <Suspense
-              fallback={
-                <div className="flex h-full items-center justify-center gap-2 text-sm text-om-muted" role="status">
-                  <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-                  正在加载图表引擎…
-                </div>
-              }
-            >
-              <LazyMermaidDiagram code={artifact.code} interactive className="h-full" />
-            </Suspense>
-          ) : (
-            <div
-              className="c-bubble-text h-full overflow-y-auto overscroll-contain rounded-2xl border border-om-border px-5 py-4"
-              style={{ background: "var(--c-surface)" }}
-            >
-              <MarkdownText>{artifact.code}</MarkdownText>
-            </div>
-          )
-        ) : (
-          <div
-            className="flex h-full flex-col overflow-hidden rounded-2xl border border-om-border"
-            style={{ background: "var(--c-surface)" }}
-          >
-            <div className="flex shrink-0 items-center justify-between border-b border-om-border px-3 py-1.5 text-[12px]">
-              <span className="c-muted font-mono">{downloadFilenameForCode(artifact.language, artifact.title)}</span>
-              <button
-                type="button"
-                aria-pressed={wrapSource}
-                onClick={() => setWrapSource((v) => !v)}
-                className={cn(
-                  "c-pressable inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11.5px] font-medium",
-                  wrapSource ? "text-om-fg" : "c-muted",
-                )}
-                style={wrapSource ? { background: "var(--c-fill)" } : undefined}
-              >
-                <WrapText className="h-3.5 w-3.5" aria-hidden="true" />
-                自动换行
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-auto">
-              <CodeBlock
-                language={artifact.language}
-                code={artifact.code}
-                chrome="none"
-                showLineNumbers
-                wrapLongLines={wrapSource}
+            <div className="min-h-0 h-full overflow-hidden">
+              <ArtifactPreviewStage
+                type={artifact.type}
+                title={artifact.title}
+                code={debouncedCode}
+                isDark={isDark}
               />
             </div>
           </div>
+        ) : effectiveMode === "preview" && canPreview ? (
+          <ArtifactPreviewStage
+            type={artifact.type}
+            title={artifact.title}
+            code={debouncedCode}
+            isDark={isDark}
+          />
+        ) : (
+          <LiveCodeEditor
+            filename={filename}
+            value={draftCode}
+            onChange={handleCodeChange}
+            wrap={wrapSource}
+            onToggleWrap={() => setWrapSource((v) => !v)}
+          />
         )}
       </div>
 
-      {/* Feedback Banner (save error or success) */}
+      {/* Feedback Banner (save error) */}
       {saveState.status === "error" && (
         <div
           role="alert"
@@ -360,11 +589,7 @@ function ArtifactPaneContent({
           ) : (
             <BookmarkPlus className="h-3.5 w-3.5" aria-hidden="true" />
           )}
-          {saveState.status === "saving"
-            ? "保存中…"
-            : saveState.status === "saved"
-              ? "已存入资源库"
-              : "存入资源库"}
+          {saveLabel}
         </button>
 
         <button
@@ -381,7 +606,12 @@ function ArtifactPaneContent({
 
   if (isDesktop) {
     return (
-      <div className="h-full w-[46%] min-w-[380px] max-w-[680px] shrink-0 p-3 pl-0">
+      <div
+        className={cn(
+          "h-full shrink-0 p-3 pl-0 transition-[width] duration-200",
+          effectiveMode === "split" ? "w-[56%] min-w-[540px] max-w-[920px]" : "w-[46%] min-w-[380px] max-w-[680px]",
+        )}
+      >
         {inner}
       </div>
     );

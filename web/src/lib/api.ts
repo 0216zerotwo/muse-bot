@@ -200,7 +200,11 @@ export async function listSessions(
     updated_at: string | null;
     title?: string;
     preview?: string;
+    pinned?: boolean;
+    archived?: boolean;
+    empty?: boolean;
     model_preset?: string | null;
+    reasoning_effort?: string | null;
     run_started_at?: number | null;
     recovery_state?: RecoveryState | null;
     workspace_scope?: WorkspaceScopePayload | null;
@@ -224,6 +228,10 @@ export async function listSessions(
       title: s.title ?? "",
       preview: s.preview ?? "",
       modelPreset: s.model_preset ?? null,
+      ...(s.reasoning_effort !== undefined ? { reasoningEffort: s.reasoning_effort ?? null } : {}),
+      ...(s.pinned ? { pinned: true } : {}),
+      ...(s.archived ? { archived: true } : {}),
+      ...(s.empty !== undefined ? { empty: Boolean(s.empty) } : {}),
       runStartedAt: s.run_started_at ?? null,
       recoveryState: s.recovery_state ?? null,
       workspaceScope: s.workspace_scope ?? null,

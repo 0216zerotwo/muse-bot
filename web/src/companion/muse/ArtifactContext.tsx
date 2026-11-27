@@ -24,7 +24,7 @@ export interface ArtifactContextValue {
   artifact: ArtifactItem | null;
   openArtifact: (input: OpenArtifactInput) => void;
   closeArtifact: () => void;
-  refineArtifact: (artifact: ArtifactItem) => void;
+  refineArtifact: (artifact: ArtifactItem, editedCode?: string) => void;
 }
 
 const PREVIEWABLE_LANGUAGES = new Set(["html", "htm", "svg", "mermaid", "mmd", "md", "markdown", "mdx"]);
@@ -103,8 +103,8 @@ export function ArtifactProvider({
   onRefine,
   children,
 }: {
-  /** Called when the user clicks 「让伙伴继续完善」; fills the chat composer draft and focuses it. */
-  onRefine?: (draftText: string) => void;
+  /** Called when the user clicks 「让伙伴继续完善」; fills the chat composer draft (and optional edited code quote) and focuses it. */
+  onRefine?: (draftText: string, quote?: string) => void;
   children: ReactNode;
 }) {
   const [artifact, setArtifact] = useState<ArtifactItem | null>(null);
@@ -129,8 +129,14 @@ export function ArtifactProvider({
   }, []);
 
   const refineArtifact = useCallback(
-    (item: ArtifactItem) => {
+    (item: ArtifactItem, editedCode?: string) => {
       const prompt = `请帮我继续完善「${item.title}」：`;
+      if (editedCode !== undefined && editedCode !== item.code) {
+        const snippet = editedCode.trim().slice(0, 1200);
+        const quote = `[已编辑画布 · ${item.title} (${item.language})]\n${snippet}`;
+        onRefine?.(prompt, quote);
+        return;
+      }
       onRefine?.(prompt);
     },
     [onRefine],

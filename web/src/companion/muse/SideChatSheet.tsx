@@ -9,12 +9,16 @@ export function SideChatSheet({
   chat,
   onClose,
   onRename,
+  onPin,
+  onArchive,
   onDelete,
   onExport,
 }: {
   chat: ChatSummary | null;
   onClose: () => void;
   onRename: (chatId: string, title: string) => void;
+  onPin?: (chatId: string, pinned: boolean) => void;
+  onArchive?: (chatId: string, archived: boolean) => void;
   onDelete: (chatId: string) => void;
   onExport?: (chat: ChatSummary) => Promise<void> | void;
 }) {
@@ -51,6 +55,40 @@ export function SideChatSheet({
           >
             改名
           </button>
+          {(onPin || onArchive) && (
+            <div className="flex gap-2">
+              {onPin && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onPin(chat.chatId, !chat.pinned);
+                    onClose();
+                  }}
+                  className="c-pressable min-h-11 flex-1 rounded-full text-[14.5px] font-medium"
+                  style={
+                    chat.pinned
+                      ? { background: "var(--c-accent-soft)", color: "var(--c-primary)" }
+                      : { background: "var(--c-fill)" }
+                  }
+                >
+                  {chat.pinned ? "取消置顶" : "置顶旁聊"}
+                </button>
+              )}
+              {onArchive && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onArchive(chat.chatId, !chat.archived);
+                    onClose();
+                  }}
+                  className="c-pressable min-h-11 flex-1 rounded-full text-[14.5px] font-medium"
+                  style={{ background: "var(--c-fill)" }}
+                >
+                  {chat.archived ? "取消归档" : "归档旁聊"}
+                </button>
+              )}
+            </div>
+          )}
           {onExport && (
             <button
               type="button"

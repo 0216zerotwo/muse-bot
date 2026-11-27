@@ -464,8 +464,16 @@ export interface ChatSummary {
   helper?: string;
   /** A group chat of helpers (群聊): listed apart from side chats. */
   group?: boolean;
+  /** Pinned side chats stay grouped at the top of the sidebar and command palette. */
+  pinned?: boolean;
+  /** Archived side chats collapse into the bottom 已归档 section. */
+  archived?: boolean;
+  /** True when the server marks this side chat as having no substantive messages yet. */
+  empty?: boolean;
   /** Model preset persisted for this session; null means it still follows the global default. */
   modelPreset?: string | null;
+  /** Per-session reasoning effort override; null means it follows the preset/provider default. */
+  reasoningEffort?: string | null;
   /** Unix epoch seconds when this session currently has a turn in flight. */
   runStartedAt?: number | null;
   /** Durable recovery state that needs attention after an interrupted turn. */

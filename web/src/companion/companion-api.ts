@@ -665,9 +665,25 @@ export interface UsagePeriod {
   media?: UsageMediaRow[];
 }
 
+export interface UsageDailyBucket {
+  date: string;
+  input_tokens: number;
+  cached_tokens: number;
+  output_tokens: number;
+  cost: number | null;
+  media_cost: number;
+  requests: number;
+}
+
 export interface UsagePayload {
   today: UsagePeriod;
   week: UsagePeriod;
+  /** Last 14 days in ascending YYYY-MM-DD order (optional for older servers). */
+  daily?: UsageDailyBucket[];
+  /** 7-day prompt cache hit rate in [0, 1]. */
+  cache_hit_rate?: number;
+  /** Estimated 7-day CNY cost saved via prompt cache hits. */
+  cache_saved_cost?: number;
 }
 
 /** Pictures or clips made with one model in a period. */
@@ -756,6 +772,8 @@ export type ArtifactSaveFormat =
   | "yml";
 
 export interface SaveCreationArtifactInput {
+  /** Existing creation id to update in place (triggers version backup on server). */
+  id?: string;
   title: string;
   content: string;
   format?: ArtifactSaveFormat;
@@ -764,14 +782,16 @@ export interface SaveCreationArtifactInput {
 
 export interface SaveCreationArtifactPayload extends CreationsPayload {
   saved_id: string;
+  updated?: boolean;
 }
 
-/** Save a canvas/code artifact directly into 创意 and return the updated list + saved_id. */
+/** Save or update a canvas/code artifact in 创意 and return the updated list + saved_id. */
 export function saveCreationArtifact(
   client: NanobotClient,
   input: SaveCreationArtifactInput,
 ): Promise<SaveCreationArtifactPayload> {
   return client.requestMutation<SaveCreationArtifactPayload>("companion.creations.save", {
+    ...(input.id ? { id: input.id } : {}),
     title: input.title,
     content: input.content,
     format: input.format ?? "md",
@@ -939,6 +959,93 @@ export function changeFeed(
 /** A side chat (旁聊): rename it or delete it. */
 export function changeChat(client: NanobotClient, id: string, action: "rename" | "delete", title?: string): Promise<unknown> {
   return client.requestMutation("companion.chats.change", { id, action, title });
+}
+
+export interface SetChatModelPayload {
+  sessions?: unknown[];
+  chat_id: string;
+  model_preset: string | null;
+  reasoning_effort: string | null;
+}
+
+/** Override or reset (null) the model preset and reasoning effort for one chat (main or side). */
+export function setChatModel(
+  client: NanobotClient,
+  chatId: string,
+  options: { model_preset?: string | null; reasoning_effort?: ReasoningEffort | null },
+): Promise<SetChatModelPayload> {
+  const payload: Record<string, unknown> = { id: chatId, action: "set_model" };
+  if ("model_preset" in options) payload.model_preset = options.model_preset ?? null;
+  if ("reasoning_effort" in options) payload.reasoning_effort = options.reasoning_effort ?? null;
+  return client.requestMutation<SetChatModelPayload>("companion.chats.change", payload);
+}
+
+/** Pin or unpin a side chat so it stays at the top of the sidebar. */
+export function pinChat(
+  client: NanobotClient,
+  chatId: string,
+  pinned?: boolean,
+): Promise<{ sessions?: unknown[] }> {
+  return client.requestMutation<{ sessions?: unknown[] }>("companion.chats.change", {
+    id: chatId,
+    action: "pin",
+    ...(pinned !== undefined ? { pinned } : {}),
+  });
+}
+
+/** Archive or unarchive a side chat. */
+export function archiveChat(
+  client: NanobotClient,
+  chatId: string,
+  archived?: boolean,
+): Promise<{ sessions?: unknown[] }> {
+  return client.requestMutation<{ sessions?: unknown[] }>("companion.chats.change", {
+    id: chatId,
+    action: "archive",
+    ...(archived !== undefined ? { archived } : {}),
+  });
+}
+
+/** Remove all empty, unpinned, inactive side chats in one step. */
+export function pruneEmptyChats(
+  client: NanobotClient,
+): Promise<{ sessions?: unknown[]; removed_count: number }> {
+  return client.requestMutation<{ sessions?: unknown[]; removed_count: number }>("companion.chats.change", {
+    action: "prune_empty",
+  });
+}
+
+export interface ChatContextUsage {
+  chat_id?: string;
+  estimated_tokens: number;
+  context_window: number;
+  usage_ratio: number;
+  tier1_threshold: number;
+  tier2_threshold: number;
+  has_summary_checkpoint: boolean;
+  model: string;
+  model_preset: string | null;
+  reasoning_effort: string | null;
+}
+
+/** Fetch active context window occupancy for one websocket chat session. */
+export async function fetchChatContext(
+  token: string,
+  chatId: string,
+  signal?: AbortSignal,
+): Promise<ChatContextUsage> {
+  const key = chatId.startsWith("websocket:") ? chatId : `websocket:${chatId}`;
+  const res = await fetchWithTimeout(
+    `/api/sessions/${encodeURIComponent(key)}/context`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: "same-origin",
+      signal,
+    },
+    15_000,
+  );
+  if (!res.ok) throw new Error(`context failed: HTTP ${res.status}`);
+  return (await res.json()) as ChatContextUsage;
 }
 
 /** One message out of a chat (long-press → 删除): the user's, or a whole reply. */
@@ -1525,16 +1632,38 @@ export function deleteKnowledgeDocument(
   });
 }
 
+export interface KnowledgeChunk {
+  chunk_index: number;
+  heading: string;
+  content: string;
+}
+
+export interface KnowledgeDocumentDetail {
+  document: KnowledgeDocument;
+  chunks: KnowledgeChunk[];
+}
+
+export function readKnowledgeDocument(
+  client: NanobotClient,
+  id: string,
+): Promise<KnowledgeDocumentDetail> {
+  return client.requestMutation<KnowledgeDocumentDetail>("companion.knowledge.change", {
+    action: "read",
+    id,
+  });
+}
+
 export function importCreationToKnowledge(
   client: NanobotClient,
   creationId: string,
-  options: { collection?: string; listCollection?: string } = {},
+  options: { collection?: string; listCollection?: string; replaceExisting?: boolean } = {},
 ): Promise<KnowledgePayload & { added: KnowledgeDocument }> {
   return client.requestMutation<KnowledgePayload & { added: KnowledgeDocument }>("companion.knowledge.change", {
     action: "import_creation",
     creation_id: creationId,
     ...(options.collection?.trim() ? { collection: options.collection.trim() } : {}),
     ...(options.listCollection?.trim() ? { list_collection: options.listCollection.trim() } : {}),
+    ...(options.replaceExisting !== undefined ? { replace_existing: options.replaceExisting } : {}),
   });
 }
 

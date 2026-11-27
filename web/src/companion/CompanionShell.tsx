@@ -5,10 +5,13 @@ import type { ChatSummary, UIMessage } from "@/lib/types";
 import { useClient } from "@/providers/ClientProvider";
 
 import {
+  archiveChat,
   changeChat,
   fetchCompanionState,
   fetchHelpers,
   forkSideChat,
+  pinChat,
+  pruneEmptyChats,
   searchChats,
   type HelpersPayload,
   updateCompanionState,
@@ -77,6 +80,10 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   const [memoryOpenRequest, setMemoryOpenRequest] = useState(0);
+  const [creationsSectionRequest, setCreationsSectionRequest] = useState<{
+    section: "creations" | "knowledge";
+    at: number;
+  } | null>(null);
   // 外观 → 跟随系统: switch along with the phone while the app is open.
   useEffect(followSystemTheme, []);
   // A swipe in from the left edge opens the side menu (swiped back, it closes); inside a page over
@@ -132,6 +139,44 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
     () => sessions.filter((s) => s.channel === "websocket" && s.chatId !== chatId && !s.helper && !s.group),
     [sessions, chatId],
   );
+  const emptySideChatCount = useMemo(
+    () =>
+      sideChats.filter(
+        (s) => !s.archived && !s.pinned && (s.empty ?? (!s.preview.trim() && !(s.title ?? "").trim())),
+      ).length,
+    [sideChats],
+  );
+  const handlePinChat = useCallback(
+    (id: string, pinned: boolean) => {
+      void pinChat(client, id, pinned).then(() => refresh()).catch(() => undefined);
+    },
+    [client, refresh],
+  );
+  const handleArchiveChat = useCallback(
+    (id: string, archived: boolean) => {
+      if (archived && id === sideChatId) setSideChatId(null);
+      void archiveChat(client, id, archived).then(() => refresh()).catch(() => undefined);
+    },
+    [client, refresh, sideChatId],
+  );
+  const handlePruneEmptyChats = useCallback(async () => {
+    try {
+      const res = await pruneEmptyChats(client);
+      if (sideChatId && Array.isArray(res.sessions)) {
+        const stillExists = res.sessions.some(
+          (entry) =>
+            entry &&
+            typeof entry === "object" &&
+            "key" in entry &&
+            (entry as { key?: unknown }).key === `websocket:${sideChatId}`,
+        );
+        if (!stillExists) setSideChatId(null);
+      }
+      await refresh();
+    } catch {
+      // Ignore transient failures; sidebar keeps current state.
+    }
+  }, [client, refresh, sideChatId]);
   // A tab, from the bar or the sidebar: leaves a side chat for it (主要聊天 is the main chat).
   const openTab = useCallback((next: MuseTab) => {
     setSideChatId(null);
@@ -357,6 +402,9 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
           jumpRequest={jumpRequest && jumpRequest.chatId === session.chatId ? { turnId: jumpRequest.turnId, at: jumpRequest.at } : null}
           teachRequest={teachRequest}
           onOpenMenu={() => setDrawerOpen(true)}
+          onOpenPalette={() => setPaletteOpen(true)}
+          onSessionChanged={() => void refresh()}
+          creationsSectionRequest={creationsSectionRequest}
           onUpdateCompanion={saveIdentity}
           onChangeLook={() => {
             openTab("chat");
@@ -408,6 +456,9 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
             if (id === sideChatId) setSideChatId(null);
             void changeChat(client, id, "delete").then(() => refresh());
           }}
+          onPinChat={handlePinChat}
+          onArchiveChat={handleArchiveChat}
+          onPruneEmptyChats={emptySideChatCount > 0 ? () => void handlePruneEmptyChats() : undefined}
           onExportCurrentChat={shownId ? () => void handleExportChat(shownId, session?.title || companion.name) : undefined}
         />
       )}
@@ -449,6 +500,8 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
             chat={editingChat}
             onClose={() => setEditingChat(null)}
             onRename={(id, title) => void changeChat(client, id, "rename", title).then(() => refresh())}
+            onPin={handlePinChat}
+            onArchive={handleArchiveChat}
             onDelete={(id) => {
               if (id === sideChatId) setSideChatId(null);
               void changeChat(client, id, "delete").then(() => refresh());
@@ -512,6 +565,16 @@ export function CompanionShell({ onLogout }: { onLogout: () => void }) {
               }
             }}
             onOpenSettings={(page) => setSettings(page ?? "root")}
+            onOpenAppearance={() => {
+              openTab("chat");
+              setAppearance(true);
+            }}
+            onOpenKnowledge={() => {
+              openTab("creations");
+              setCreationsSectionRequest({ section: "knowledge", at: Date.now() });
+            }}
+            onPruneEmptyChats={() => void handlePruneEmptyChats()}
+            emptySideChatCount={emptySideChatCount}
             onOpenMemory={() => {
               openTab("chat");
               setMemoryOpenRequest((n) => n + 1);

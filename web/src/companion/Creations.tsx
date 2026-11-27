@@ -97,9 +97,20 @@ function byDay(items: Creation[]): { day: string; items: Creation[] }[] {
  * 资源库: top segmented switch between 「作品归档」 (pictures, videos, documents, audio)
  * and 「知识库」 (local SQLite FTS5 personal knowledge vault).
  */
-export function CreationsView({ active }: { active: boolean }) {
+export function CreationsView({
+  active,
+  sectionRequest,
+  onQuoteToAsk,
+}: {
+  active: boolean;
+  sectionRequest?: { section: VaultSection; at: number } | null;
+  onQuoteToAsk?: (quote: string, prompt?: string) => void;
+}) {
   const { client, token } = useClient();
-  const [section, setSection] = useState<VaultSection>("creations");
+  const [section, setSection] = useState<VaultSection>(() => sectionRequest?.section ?? "creations");
+  useEffect(() => {
+    if (sectionRequest) setSection(sectionRequest.section);
+  }, [sectionRequest]);
   const [payload, setPayload] = useState<CreationsPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
@@ -141,16 +152,23 @@ export function CreationsView({ active }: { active: boolean }) {
   const importToKnowledge = useCallback(
     async (item: Creation) => {
       if (importingId) return;
+      const alreadyImported = importedIds.has(item.id);
       setImportingId(item.id);
       setImportError(null);
       setImportNotice(null);
       try {
-        const res = await importCreationToKnowledge(client, item.id);
+        const res = await importCreationToKnowledge(
+          client,
+          item.id,
+          alreadyImported ? { replaceExisting: true } : {},
+        );
         setImportedIds((prev) => new Set(prev).add(item.id));
         setImportNotice(
-          res.added.deduplicated
-            ? `「${res.added.title}」已在知识库中，已同步更新`
-            : `已将「${res.added.title}」加入知识库（${res.added.chunk_count} 个分块）`,
+          alreadyImported
+            ? `已覆盖更新知识库中的「${res.added.title}」（${res.added.chunk_count} 个分块）`
+            : res.added.deduplicated
+              ? `「${res.added.title}」已在知识库中，已同步更新`
+              : `已将「${res.added.title}」加入知识库（${res.added.chunk_count} 个分块）`,
         );
       } catch (e: unknown) {
         setImportError(e instanceof Error ? e.message : String(e));
@@ -158,7 +176,7 @@ export function CreationsView({ active }: { active: boolean }) {
         setImportingId(null);
       }
     },
-    [client, importingId],
+    [client, importedIds, importingId],
   );
 
   return (
@@ -205,7 +223,7 @@ export function CreationsView({ active }: { active: boolean }) {
       </div>
 
       {section === "knowledge" ? (
-        <KnowledgeVault active={active && section === "knowledge"} />
+        <KnowledgeVault active={active && section === "knowledge"} onQuoteToAsk={onQuoteToAsk} />
       ) : (
         <>
           <div className="flex gap-2 overflow-x-auto px-4 pb-4" role="tablist" aria-label="按类型查看">
@@ -391,7 +409,7 @@ function FileRow({
           type="button"
           disabled={importing}
           onClick={onImport}
-          aria-label={`将「${item.title}」加入知识库`}
+          aria-label={imported ? `重新导入并覆盖「${item.title}」到知识库` : `将「${item.title}」加入知识库`}
           className="c-pressable inline-flex min-h-9 shrink-0 items-center gap-1 rounded-full px-3 text-[12px] font-medium disabled:opacity-50"
           style={
             imported
@@ -406,7 +424,7 @@ function FileRow({
           ) : (
             <BookPlus className="h-3.5 w-3.5" aria-hidden="true" />
           )}
-          {importing ? "导入中…" : imported ? "已入库" : "加入知识库"}
+          {importing ? "导入中…" : imported ? "更新入库" : "加入知识库"}
         </button>
       )}
     </div>
